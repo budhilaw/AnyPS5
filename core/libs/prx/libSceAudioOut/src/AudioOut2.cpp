@@ -115,16 +115,21 @@ float sample(const Port& port, std::uint32_t frame, std::uint32_t channel) {
 void mixPort(Port& port, std::vector<float>& mix) {
     if (port.data == nullptr || port.type == PORT_TYPE_VIBRATION) return;
     if (!port.typeSettled) {
-        // Float samples of a mix stay within a few units; the same bytes read as floats from
-        // 16-bit data are denormals, huge values or NaNs.
+        // Float samples of a mix stay within a few units; the same bytes read as floats from 16-bit
+        // data are mostly denormals, huge values or NaNs. A fade-in has some tiny floats too: count.
         const auto count = GrainFrames * port.channels;
-        bool plausible = true, silent = true;
-        for (std::uint32_t index = 0; index < count && plausible; ++index) {
+        std::uint32_t plausible = 0, garbage = 0;
+        for (std::uint32_t index = 0; index < count; ++index) {
             float value; std::memcpy(&value, static_cast<const std::uint8_t*>(port.data) + index * sizeof(float), sizeof(value));
-            if (value != 0.0f) silent = false;
-            if (!(value == value) || value > 16.0f || value < -16.0f || (value != 0.0f && value < 1e-20f && value > -1e-20f)) plausible = false;
+            if (value == 0.0f) continue;
+            if (!(value == value) || value > 16.0f || value < -16.0f || (value < 1e-20f && value > -1e-20f)) ++garbage;
+            else ++plausible;
         }
-        if (!silent) { port.isFloat = plausible; port.typeSettled = true; if (port.format >= 0x100) APS5_LOG_OUT("port format 0x%x: %s samples", port.format, plausible ? "float" : "int16"); }
+        if (plausible + garbage >= 64) {
+            port.isFloat = plausible > garbage;
+            port.typeSettled = true;
+            if (port.format >= 0x100) APS5_LOG_OUT("port format 0x%x: %s samples (%u plausible, %u not)", port.format, port.isFloat ? "float" : "int16", plausible, garbage);
+        }
     }
     for (std::uint32_t frame = 0; frame < GrainFrames; ++frame) {
         float left = 0.0f, right = 0.0f;
