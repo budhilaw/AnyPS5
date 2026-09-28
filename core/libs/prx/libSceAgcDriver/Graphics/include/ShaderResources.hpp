@@ -49,7 +49,7 @@ private:
     };
 
     void build(std::span<const CompiledShader> shaders, const ColorTarget* target, std::uint64_t indexAddress, std::size_t indexBytes);
-    std::size_t addGuestBuffer(std::span<const std::uint32_t> words, bool written, const ColorTarget* target, std::uint64_t indexAddress, std::size_t indexBytes);
+    std::size_t addGuestBuffer(std::span<const std::uint32_t> words, bool written, bool read, const ColorTarget* target, std::uint64_t indexAddress, std::size_t indexBytes);
     std::size_t addDataBuffer(std::span<const std::uint32_t> words);
     void addImageBinding(const ShaderRecompiler::DescriptorBinding& binding, VkShaderStageFlags flags, std::vector<Binding>& bindings);
     void release() noexcept;

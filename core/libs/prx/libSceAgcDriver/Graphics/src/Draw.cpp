@@ -10,6 +10,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/DrawQueue.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureCache.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/GraphicsPipelineCache.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/GuestBufferCache.hpp"
 #include <span>
 #include <array>
 #include <chrono>
@@ -27,6 +28,8 @@ namespace {
 struct DrawStorage {
     std::unique_ptr<Buffer> indices;
     std::vector<std::unique_ptr<Buffer>> vertices;
+    // Imported guest mappings the draw reads its indices or vertices from in place.
+    std::vector<std::shared_ptr<Buffer>> hostViews;
     std::shared_ptr<ResidentColor> color;
     std::vector<std::shared_ptr<ResidentColor>> extraColors;
     std::shared_ptr<DepthImage> depth;
@@ -104,17 +107,31 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
     auto storage = std::make_shared<DrawStorage>();
     auto& indices = storage->indices;
     std::uint32_t maxIndex = draw.indexed ? 0u : draw.firstVertex + draw.indexCount - 1u;
+    VkBuffer indexHandle = VK_NULL_HANDLE;
+    VkDeviceSize indexOffset = 0;
     if (draw.indexed) {
-        indices = std::make_unique<Buffer>(context, static_cast<std::size_t>(indexBytes), VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
-        GuestMemory::Read(draw.indexAddress, indices->Bytes(), draw.indexSize);
+        // Indices straight from the imported guest mapping when possible, else a copy.
+        std::span<const std::byte> indexData;
+        auto view = context.guestBufferCache != nullptr ? context.guestBufferCache->HostRange(draw.indexAddress, indexBytes) : GuestBufferCache::HostView{};
+        if (view.buffer && view.offset % 4u == 0) {
+            indexHandle = view.buffer->Handle();
+            indexOffset = view.offset;
+            indexData = view.buffer->Bytes().subspan(static_cast<std::size_t>(view.offset), static_cast<std::size_t>(indexBytes));
+            storage->hostViews.push_back(std::move(view.buffer));
+        } else {
+            indices = std::make_unique<Buffer>(context, static_cast<std::size_t>(indexBytes), VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+            GuestMemory::Read(draw.indexAddress, indices->Bytes(), draw.indexSize);
+            indexHandle = indices->Handle();
+            indexData = indices->Bytes();
+        }
         for (std::size_t offset = 0; offset < indexBytes; offset += draw.indexSize) {
             std::uint32_t index = 0;
             if (draw.indexSize == 2) {
                 std::uint16_t value = 0;
-                std::memcpy(&value, indices->Bytes().data() + offset, sizeof(value));
+                std::memcpy(&value, indexData.data() + offset, sizeof(value));
                 index = value;
             } else {
-                std::memcpy(&index, indices->Bytes().data() + offset, sizeof(index));
+                std::memcpy(&index, indexData.data() + offset, sizeof(index));
             }
             Require(index <= context.limits.maxDrawIndexedIndexValue, "index exceeds the device's indexed draw limit");
             maxIndex = std::max(maxIndex, index);
@@ -144,6 +161,12 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
         const auto address = fields[0] | (static_cast<std::uint64_t>(fields[1] & 0xffffu) << 32u);
         Require(!state.hasColorTarget || address + bytes <= state.color.address || state.color.address + state.color.bytes <= address, "vertex buffer aliases the render target");
         GuestMemory::CheckRange(reinterpret_cast<const void*>(address), bytes, 1);
+        if (auto view = context.guestBufferCache != nullptr ? context.guestBufferCache->HostRange(address, bytes) : GuestBufferCache::HostView{}; view.buffer && view.offset % 4u == 0) {
+            vertexOffsets[vertexHandles.size()] = view.offset;
+            vertexHandles.push_back(view.buffer->Handle());
+            storage->hostViews.push_back(std::move(view.buffer));
+            continue;
+        }
         auto buffer = std::make_unique<Buffer>(context, bytes, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
         GuestMemory::Read(address, buffer->Bytes(), 1);
         {
@@ -458,7 +481,7 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
     } else {
         if (!vertexHandles.empty()) context.Function<PFN_vkCmdBindVertexBuffers>("vkCmdBindVertexBuffers")(commands, 0, static_cast<std::uint32_t>(vertexHandles.size()), vertexHandles.data(), vertexOffsets.data());
         if (draw.indexed) {
-            context.Function<PFN_vkCmdBindIndexBuffer>("vkCmdBindIndexBuffer")(commands, indices->Handle(), 0, draw.indexSize == 2 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32);
+            context.Function<PFN_vkCmdBindIndexBuffer>("vkCmdBindIndexBuffer")(commands, indexHandle, indexOffset, draw.indexSize == 2 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32);
             context.Function<PFN_vkCmdDrawIndexed>("vkCmdDrawIndexed")(commands, draw.indexCount, draw.instanceCount, 0, static_cast<std::int32_t>(draw.firstVertex), draw.firstInstance);
         } else {
             context.Function<PFN_vkCmdDraw>("vkCmdDraw")(commands, draw.indexCount, draw.instanceCount, draw.firstVertex, draw.firstInstance);

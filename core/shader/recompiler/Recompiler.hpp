@@ -244,6 +244,8 @@ struct DescriptorBinding {
     bool readOnly = false;
     // GuestBuffers: whether the shader stores to (or atomically updates) each element.
     std::vector<bool> elementWritten;
+    // GuestBuffers: whether the shader loads from (or atomically updates) each element.
+    std::vector<bool> elementRead;
     std::optional<DescriptorImageShape> imageShape;
     std::vector<bool> samplerDepthCompare;
 };

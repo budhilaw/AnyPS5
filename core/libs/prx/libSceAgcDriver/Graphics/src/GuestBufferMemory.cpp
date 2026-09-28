@@ -152,15 +152,20 @@ void GuestBufferMemory::WriteBack() {
         else merged.push_back(range);
     }
     std::vector<std::span<const std::byte>> sources;
+    std::vector<bool> inPlace;
     for (const auto& [begin, end] : merged) {
+        // The writable check notifies every watcher of the range (textures, render targets) that
+        // it was written, which is all an in-place (imported) region needs.
         GuestMemory::CheckRange(reinterpret_cast<const void*>(begin), static_cast<std::size_t>(end - begin), 1, true);
         const auto found = std::upper_bound(regions.begin(), regions.end(), begin, [](auto address, const auto& region) { return address < region.begin; });
         Require(found != regions.begin(), "write-back range has no GPU owner");
         const auto& region = *std::prev(found);
         Require(region.buffer != nullptr && region.writable && end <= region.end, "write-back range exceeds its GPU owner");
         sources.push_back(region.buffer->Bytes().subspan(static_cast<std::size_t>(begin - region.begin + region.padding), static_cast<std::size_t>(end - begin)));
+        inPlace.push_back(region.mirror != nullptr && region.mirror->imported);
     }
     for (std::size_t i = 0; i < merged.size(); ++i) {
+        if (inPlace[i] && !TraceWriteBack()) continue; // the GPU wrote guest memory itself
         if (TraceWriteBack()) {
             // Small ranges show their dwords, larger ones how many dwords are nonzero.
             const auto& bytes = sources[i];

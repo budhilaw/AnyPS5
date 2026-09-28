@@ -39,6 +39,8 @@ Range GuestAllocationsFind_nid_postfix(void* mutation, const void* pointer);
 void GuestAllocationsRemove_nid_postfix(void* mutation, const void* pointer);
 void GuestAllocationsProtect_nid_postfix(void* mutation, const void* pointer, std::size_t bytes, bool readable, bool writable, const std::function<void()>& apply);
 std::uint64_t GuestAllocationsProtectionGeneration_nid_postfix();
+// Changes whenever a guest mapping is added, removed, reprotected or unmapped.
+std::uint64_t GuestAllocationsMapEpoch_nid_postfix();
 void GuestAllocationsUnmap_nid_postfix(void* mutation, const void* pointer, std::size_t bytes, const std::function<void(const void*, bool)>& apply);
 Lease GuestAllocationsAcquire_nid_postfix();
 }

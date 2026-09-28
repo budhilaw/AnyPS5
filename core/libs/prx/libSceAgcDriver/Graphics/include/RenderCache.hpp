@@ -24,6 +24,8 @@ public:
     std::uint64_t lastUse = 0; // RenderCache use counter at the last lookup, for LRU eviction
     std::uint64_t Generation() const { return generation; }
     void Invalidate();
+    // Drops the GPU contents without saving them (the guest memory is about to be overwritten).
+    void Discard() { dirty = false; Invalidate(); }
     void ReleaseMemory();
     // The image received GPU writes outside a draw (a shader store through a texture copy).
     void MarkWritten() { dirty = true; ++generation; }
@@ -64,6 +66,9 @@ public:
     void DumpTargets(const std::string& prefix);
     void DumpDepthTargets(const std::string& prefix);
     void Resolve(std::uint64_t address, std::size_t bytes, bool writable);
+    // Drops the GPU contents of targets lying wholly inside [address, address + bytes) without a
+    // download: the caller overwrites that memory completely.
+    void DiscardCovered(std::uint64_t address, std::size_t bytes);
     void Flush();
 
 private:

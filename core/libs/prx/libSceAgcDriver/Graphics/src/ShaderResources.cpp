@@ -1,4 +1,5 @@
 #include "prx/libSceAgcDriver/Graphics/include/ShaderResources.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/RenderCache.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Resources.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureCache.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
@@ -111,7 +112,8 @@ void ShaderResources::build(std::span<const CompiledShader> shaders, const Color
                         // Without write metadata every buffer counts as written (and is written back).
                         static const bool writeBackAll = std::getenv("ANYPS5_DEBUG_WRITEBACK_ALL") != nullptr; // diagnostics
                         const bool written = writeBackAll || element >= binding.elementWritten.size() || binding.elementWritten[element];
-                        item.allocations.push_back(addGuestBuffer(std::span<const std::uint32_t>(binding.guestDescriptor).subspan(static_cast<std::size_t>(element) * 4, 4), written, target, indexAddress, indexBytes));
+                        const bool read = writeBackAll || element >= binding.elementRead.size() || binding.elementRead[element];
+                        item.allocations.push_back(addGuestBuffer(std::span<const std::uint32_t>(binding.guestDescriptor).subspan(static_cast<std::size_t>(element) * 4, 4), written, read, target, indexAddress, indexBytes));
                     }
                 } else if (addressRole) {
                     item.allocations.push_back(allocations.size());
@@ -209,7 +211,7 @@ void ShaderResources::build(std::span<const CompiledShader> shaders, const Color
     }
 }
 
-std::size_t ShaderResources::addGuestBuffer(std::span<const std::uint32_t> words, bool written, const ColorTarget* target, std::uint64_t indexAddress, std::size_t indexBytes) {
+std::size_t ShaderResources::addGuestBuffer(std::span<const std::uint32_t> words, bool written, bool read, const ColorTarget* target, std::uint64_t indexAddress, std::size_t indexBytes) {
     Require(words.size() == 4, "buffer descriptor must contain four DWORDs");
     Require((words[1] & 0x40000000u) == 0, "buffer descriptor has reserved bits set");
     const ShaderRecompiler::ShaderBufferResource descriptor{{words[0], words[1], words[2], words[3]}};
@@ -225,6 +227,10 @@ std::size_t ShaderResources::addGuestBuffer(std::span<const std::uint32_t> words
     Require(byteSize <= context.limits.maxStorageBufferRange, "shader buffer exceeds descriptor range limit");
     Require(byteSize <= std::numeric_limits<std::size_t>::max(), "shader buffer size exceeds host address space");
     const auto size = static_cast<std::size_t>(byteSize);
+    // A buffer the shader only stores to replaces what it covers: render targets wholly inside it
+    // need no download first (a compute clear of a target through its memory, every frame).
+    static const bool keepDownloads = std::getenv("ANYPS5_NO_WRITE_ONLY_DISCARD") != nullptr; // diagnostics
+    if (written && !read && !keepDownloads && context.renderCache != nullptr) context.renderCache->DiscardCovered(address, size);
     try {
         GuestMemory::CheckRange(reinterpret_cast<const void*>(address), size, 1, true);
     } catch (const std::exception& error) {

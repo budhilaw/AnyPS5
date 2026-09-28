@@ -40,6 +40,8 @@ void require(bool condition, const char* reason) {
 
 }
 
+std::atomic<std::uint64_t>& guestMapEpoch();
+
 void* GuestAllocationsBegin_nid_postfix() {
     return new std::unique_lock<std::recursive_mutex>(registry().mutex);
 }
@@ -130,6 +132,7 @@ void GuestAllocationsRegisterMainImage_nid_postfix(void*) {
 #endif
 
 void GuestAllocationsAdd_nid_postfix(void*, void* pointer, std::size_t bytes, bool readable, bool writable) {
+    guestMapEpoch().fetch_add(1, std::memory_order_acq_rel);
     const auto address = reinterpret_cast<std::uintptr_t>(pointer);
     require(address != 0 && bytes <= std::numeric_limits<std::uint64_t>::max() - address, "invalid guest allocation range");
     require(!writable || readable, "writable guest allocation must be readable");
@@ -201,6 +204,7 @@ Range GuestAllocationsFind_nid_postfix(void*, const void* pointer) {
 }
 
 void GuestAllocationsRemove_nid_postfix(void* mutation, const void* pointer) {
+    guestMapEpoch().fetch_add(1, std::memory_order_acq_rel);
     const auto range = GuestAllocationsFind_nid_postfix(mutation, pointer);
     GuestAllocationsRequireUnpinned_nid_postfix(mutation, pointer, range.bytes);
     std::erase_if(registry().ranges, [&](const auto& entry) { return entry.second->allocationAddress == range.address; });
@@ -248,11 +252,21 @@ namespace {
 std::atomic<std::uint64_t> protectionGeneration{1};
 }
 
+std::atomic<std::uint64_t>& guestMapEpoch() {
+    static std::atomic<std::uint64_t> epoch{1};
+    return epoch;
+}
+
+std::uint64_t GuestAllocationsMapEpoch_nid_postfix() {
+    return guestMapEpoch().load(std::memory_order_acquire);
+}
+
 std::uint64_t GuestAllocationsProtectionGeneration_nid_postfix() {
     return protectionGeneration.load(std::memory_order_acquire);
 }
 
 void GuestAllocationsProtect_nid_postfix(void* mutation, const void* pointer, std::size_t bytes, bool readable, bool writable, const std::function<void()>& apply) {
+    guestMapEpoch().fetch_add(1, std::memory_order_acq_rel);
     protectionGeneration.fetch_add(1, std::memory_order_acq_rel);
     GuestAllocationsRequireUnpinned_nid_postfix(mutation, pointer, bytes);
     auto replacement = replaceRange(pointer, bytes, false, readable, writable);
@@ -261,6 +275,7 @@ void GuestAllocationsProtect_nid_postfix(void* mutation, const void* pointer, st
 }
 
 void GuestAllocationsUnmap_nid_postfix(void* mutation, const void* pointer, std::size_t bytes, const std::function<void(const void*, bool)>& apply) {
+    guestMapEpoch().fetch_add(1, std::memory_order_acq_rel);
     GuestAllocationsRequireUnpinned_nid_postfix(mutation, pointer, bytes);
     const auto address = reinterpret_cast<std::uintptr_t>(pointer);
     const auto found = registry().ranges.upper_bound(address);

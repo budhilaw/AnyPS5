@@ -15,12 +15,42 @@
 #include <stdexcept>
 #include <string_view>
 #include <utility>
+#include <unordered_map>
+#include <functional>
+
+#if defined(__APPLE__)
+#include <mach/mach_time.h>
+#endif
 
 namespace AgcDriver {
 
+// A monotonic clock that stays cheap under Rosetta: steady_clock goes through
+// mach_continuous_time, which traps, and the driver reads the clock tens of thousands of times
+// per frame for its timing marks. mach_absolute_time is a commpage read.
+struct TimingClock {
+    using rep = std::int64_t;
+    using period = std::nano;
+    using duration = std::chrono::nanoseconds;
+    using time_point = std::chrono::time_point<TimingClock>;
+    static constexpr bool is_steady = true;
+    static time_point now() noexcept {
+#if defined(__APPLE__)
+        static const mach_timebase_info_data_t timebase = [] {
+            mach_timebase_info_data_t info{};
+            mach_timebase_info(&info);
+            return info;
+        }();
+        const auto ticks = static_cast<unsigned __int128>(mach_absolute_time()) * timebase.numer / timebase.denom;
+        return time_point(duration(static_cast<rep>(ticks)));
+#else
+        return time_point(std::chrono::duration_cast<duration>(std::chrono::steady_clock::now().time_since_epoch()));
+#endif
+    }
+};
+
 class FrameTiming {
 public:
-    using Clock = std::chrono::steady_clock;
+    using Clock = TimingClock;
 
     struct Metric {
         Clock::duration total{};
@@ -33,7 +63,12 @@ public:
 
     Metric* Get(const char* scope, const char* stage) {
         std::lock_guard lock(mutex);
-        return &metrics[{scope, stage}];
+        // Timers pass string literals: their addresses find the metric without comparing text.
+        const PointerKey key{scope, stage};
+        if (const auto it = byPointer.find(key); it != byPointer.end()) return it->second;
+        auto* metric = &metrics[{scope, stage}];
+        byPointer.emplace(key, metric);
+        return metric;
     }
 
     void Add(Metric* metric, Clock::duration elapsed, std::uint64_t bytes = 0) {
@@ -128,6 +163,13 @@ private:
 
     std::mutex mutex;
     std::map<std::pair<std::string_view, std::string_view>, Metric> metrics;
+    using PointerKey = std::pair<const char*, const char*>;
+    struct PointerKeyHash {
+        std::size_t operator()(const PointerKey& key) const noexcept {
+            return std::hash<const void*>{}(key.first) * 31u ^ std::hash<const void*>{}(key.second);
+        }
+    };
+    std::unordered_map<PointerKey, Metric*, PointerKeyHash> byPointer;
     std::uint64_t id;
     std::uint64_t firstSerial = 0;
     std::uint64_t lastSerial = 0;
@@ -164,9 +206,8 @@ private:
 class PerformanceTimer {
 public:
     explicit PerformanceTimer(const char* scope) : frame(PerformanceContext::Current()), scope(scope) {
-        if (frame != nullptr) {
-            total = frame->Get(scope, "total");
-        }
+        if (frame == nullptr) return;
+        total = frame->Get(scope, "total");
         start = Clock::now();
         previous = start;
     }

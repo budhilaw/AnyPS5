@@ -1,3 +1,8 @@
+#include <execinfo.h>
+#include <dlfcn.h>
+#include <cstdlib>
+#include <cstdio>
+#include <string>
 #include "prx/libSceAgcDriver/Graphics/include/RenderCache.hpp"
 #include "prx/libc/include/General.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/DrawQueue.hpp"
@@ -363,6 +368,23 @@ void RenderCache::Resolve(std::uint64_t address, std::size_t bytes, bool writabl
         else if (writable) entry->Invalidate();
     }
     if (affected.empty()) return;
+    {
+        static const bool trace = std::getenv("ANYPS5_TRACE_RESOLVE") != nullptr; // diagnostics
+        static int reported = 0;
+        if (trace && reported++ < 60) {
+            void* frames[8];
+            const int count = ::backtrace(frames, 8);
+            std::string chain;
+            for (int i = 1; i < count; ++i) {
+                Dl_info info{};
+                dladdr(frames[i], &info);
+                char item[96];
+                std::snprintf(item, sizeof(item), " <- %s+0x%lx", info.dli_sname ? info.dli_sname : "?", info.dli_saddr ? static_cast<unsigned long>(static_cast<const char*>(frames[i]) - static_cast<const char*>(info.dli_saddr)) : 0ul);
+                chain += item;
+            }
+            APS5_LOG_OUT("resolve 0x%llx+0x%zx %s: %zu dirty target(s), first 0x%llx%s", static_cast<unsigned long long>(address), bytes, writable ? "write" : "read", affected.size(), static_cast<unsigned long long>(affected.front()->Description().address), chain.c_str());
+        }
+    }
     PerformanceTimer timing("Graphics.RenderCache.Resolve");
     if (context.drawQueue) context.drawQueue->Wait();
     CommandBatch batch(context);
@@ -374,6 +396,13 @@ void RenderCache::Resolve(std::uint64_t address, std::size_t bytes, bool writabl
         if (writable) entry->Invalidate();
     }
     timing.Mark("guest_writeback");
+}
+
+void RenderCache::DiscardCovered(std::uint64_t address, std::size_t bytes) {
+    for (const auto& [base, entry] : entries) {
+        const auto& color = entry->Description();
+        if (base >= address && base + color.bytes <= address + bytes && base + color.bytes > base) entry->Discard();
+    }
 }
 
 void RenderCache::Flush() {

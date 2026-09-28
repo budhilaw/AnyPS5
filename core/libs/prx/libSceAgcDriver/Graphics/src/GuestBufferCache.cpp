@@ -5,6 +5,7 @@
 #include "prx/libc/include/GuestAllocations.hpp"
 #include "prx/libc/include/GuestMemoryBacking.hpp"
 #include <algorithm>
+#include <set>
 #include <chrono>
 #include <cstdlib>
 #include <limits>
@@ -230,11 +231,22 @@ std::shared_ptr<GuestBufferCache::Mirror> GuestBufferCache::import(std::uint64_t
     const auto alignment = static_cast<std::uint64_t>(context.hostPointerAlignment);
     const auto first = begin - begin % alignment;
     const auto last = (end + alignment - 1) / alignment * alignment;
+    // A range that failed to import once is mirrored from then on.
+    static std::set<std::pair<std::uint64_t, std::uint64_t>> refused;
+    if (refused.count({begin, end}) != 0) return nullptr;
     void* alias = GuestMemoryBacking::GuestMemoryBackingAlias_nid_postfix(first, static_cast<std::size_t>(last - first));
     static int reported = 0;
     if (alias == nullptr) {
-        if (reported++ < 4) APS5_LOG_OUT("guest range 0x%llx+0x%llx has no shared backing; mirroring it", static_cast<unsigned long long>(begin), static_cast<unsigned long long>(end - begin));
-        return nullptr;
+        // Memory outside the shared guest mappings (the executable's own data and bss) is plain
+        // host memory at the guest address: import it where it is, when it is readable and writable.
+        try {
+            GuestMemory::CheckRange(reinterpret_cast<const void*>(first), static_cast<std::size_t>(last - first), 1, true);
+            alias = reinterpret_cast<void*>(first);
+        } catch (const std::exception&) {
+            if (reported++ < 4) APS5_LOG_OUT("guest range 0x%llx+0x%llx has no shared backing; mirroring it", static_cast<unsigned long long>(begin), static_cast<unsigned long long>(end - begin));
+            refused.insert({begin, end});
+            return nullptr;
+        }
     }
     try {
         auto buffer = std::make_shared<Buffer>(context, Buffer::HostImport{}, alias, static_cast<std::size_t>(last - first), static_cast<std::size_t>(begin - first), static_cast<std::size_t>(end - begin), usage | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
@@ -244,8 +256,38 @@ std::shared_ptr<GuestBufferCache::Mirror> GuestBufferCache::import(std::uint64_t
         return mirror;
     } catch (const std::exception& error) {
         if (reported++ < 4) APS5_LOG_OUT("host import of 0x%llx+0x%llx failed (%s); mirroring it", static_cast<unsigned long long>(begin), static_cast<unsigned long long>(end - begin), error.what());
+        refused.insert({begin, end});
         return nullptr;
     }
+}
+
+GuestBufferCache::HostView GuestBufferCache::HostRange(std::uint64_t address, std::uint64_t bytes) {
+    static const bool disabled = std::getenv("ANYPS5_NO_HOST_VERTEX") != nullptr; // diagnostics
+    if (disabled || !context.hostPointerImport || bytes == 0) return {};
+    GuestMemoryBacking::GuestMemoryBackingExtentInfo extent{};
+    if (!GuestMemoryBacking::GuestMemoryBackingExtent_nid_postfix(address, static_cast<std::size_t>(bytes), &extent)) return {};
+    const auto alignment = static_cast<std::uint64_t>(context.hostPointerAlignment);
+    // The import covers whole host pages of the mapping; a range in a partial tail page is copied.
+    const auto importBytes = extent.bytes / alignment * alignment;
+    if (reinterpret_cast<std::uintptr_t>(extent.alias) % alignment != 0 || address + bytes > extent.address + importBytes) return {};
+    std::lock_guard lock(mutex);
+    auto& mapping = hostMappings[extent.address];
+    if (!mapping.buffer || mapping.serial != extent.serial || mapping.bytes != importBytes) {
+        try {
+            constexpr VkBufferUsageFlags usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+            mapping.buffer = std::make_shared<Buffer>(context, Buffer::HostImport{}, extent.alias, static_cast<std::size_t>(importBytes), 0, static_cast<std::size_t>(importBytes), usage);
+            mapping.serial = extent.serial;
+            mapping.bytes = importBytes;
+            static int reported = 0;
+            if (reported++ < 8) APS5_LOG_OUT("guest mapping 0x%llx+%.1f MiB imported for vertex and index data", static_cast<unsigned long long>(extent.address), importBytes / 1048576.0);
+        } catch (const std::exception& error) {
+            static int reported = 0;
+            if (reported++ < 4) APS5_LOG_OUT("host import of guest mapping 0x%llx failed (%s); copying its data", static_cast<unsigned long long>(extent.address), error.what());
+            hostMappings.erase(extent.address);
+            return {};
+        }
+    }
+    return {mapping.buffer, address - extent.address};
 }
 
 void GuestBufferCache::MarkSynced(const std::shared_ptr<Mirror>& mirror) {

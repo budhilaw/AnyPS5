@@ -1,9 +1,16 @@
 #include <cstdio>
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libc/include/GuestMemoryTracking.hpp"
+#include "prx/libc/include/GuestAllocations.hpp"
 #include "prx/libSceAgcDriver/Execution/include/MemoryAccessScope.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
 #include <algorithm>
+#include <chrono>
+#include <map>
+#include <mutex>
+#include <vector>
+#include <cstdlib>
+#include <dlfcn.h>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
@@ -54,6 +61,12 @@ void CheckRange(const void* pointer, std::size_t bytes, std::size_t alignment, b
         cursor = std::min(end, base + memory.RegionSize);
     }
 #elif defined(__APPLE__)
+    // The last readable and writable region this thread verified stays valid until a guest
+    // mapping changes (the epoch): shader memory is read a dword at a time, thousands per frame.
+    struct VerifiedRegion { std::uint64_t epoch = 0; std::uintptr_t first = 0; std::uintptr_t end = 0; };
+    thread_local VerifiedRegion verified;
+    const auto epoch = GuestAllocations::GuestAllocationsMapEpoch_nid_postfix();
+    if (verified.epoch == epoch && address >= verified.first && end <= verified.end) return;
     while (cursor < end) {
         mach_vm_address_t first = cursor;
         mach_vm_size_t size = 0;
@@ -73,6 +86,9 @@ void CheckRange(const void* pointer, std::size_t bytes, std::size_t alignment, b
             throw std::runtime_error(std::string("AGC driver: ") + message);
         }
         require(size <= std::numeric_limits<std::uintptr_t>::max() - first && first + size > cursor, "invalid guest memory mapping");
+        if ((info.protection & (VM_PROT_READ | VM_PROT_WRITE)) == (VM_PROT_READ | VM_PROT_WRITE) && first <= address && first + size >= end) {
+            verified = {epoch, static_cast<std::uintptr_t>(first), static_cast<std::uintptr_t>(first + size)};
+        }
         cursor = std::min(end, static_cast<std::uintptr_t>(first + size));
     }
 #else
@@ -102,6 +118,29 @@ void CheckRange(const void* pointer, std::size_t bytes, std::size_t alignment, b
 void Read(std::uint64_t address, std::span<std::byte> destination, std::size_t alignment) {
     PerformanceTimer timing("GuestMemory.Read");
     if (destination.empty()) return;
+    // ANYPS5_TRACE_READ_CALLERS: bytes read per call site, the largest printed every 3 seconds.
+    static const bool traceCallers = std::getenv("ANYPS5_TRACE_READ_CALLERS") != nullptr;
+    if (traceCallers) {
+        static std::mutex callerMutex;
+        static std::map<void*, std::pair<std::uint64_t, std::uint64_t>> callers;
+        static auto last = std::chrono::steady_clock::now();
+        std::lock_guard lock(callerMutex);
+        auto& entry = callers[__builtin_return_address(0)];
+        entry.first += destination.size();
+        ++entry.second;
+        if (std::chrono::steady_clock::now() - last > std::chrono::seconds(3)) {
+            last = std::chrono::steady_clock::now();
+            std::vector<std::pair<std::uint64_t, void*>> sorted;
+            for (const auto& [caller, value] : callers) sorted.push_back({value.first, caller});
+            std::sort(sorted.rbegin(), sorted.rend());
+            for (std::size_t i = 0; i < std::min<std::size_t>(sorted.size(), 6); ++i) {
+                Dl_info info{};
+                dladdr(sorted[i].second, &info);
+                std::fprintf(stderr, "[read-callers] %.1f MiB in %llu reads from %p (%s+0x%lx)\n", sorted[i].first / 1048576.0, static_cast<unsigned long long>(callers[sorted[i].second].second), sorted[i].second, info.dli_sname ? info.dli_sname : "?", info.dli_saddr ? static_cast<unsigned long>(static_cast<const char*>(sorted[i].second) - static_cast<const char*>(info.dli_saddr)) : 0ul);
+            }
+            callers.clear();
+        }
+    }
     const auto* source = reinterpret_cast<const void*>(address);
     CheckRange(source, destination.size(), alignment);
     timing.Mark("range_check");

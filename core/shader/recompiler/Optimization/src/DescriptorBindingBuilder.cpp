@@ -212,6 +212,7 @@ void DescriptorBindingBuilder::Populate(BindingAllocationResult& allocation, con
             for (const std::uint32_t r : logical.resources) {
                 const auto& buffer = info.buffers.at(r);
                 physical.elementWritten.push_back(buffer.written || buffer.atomic);
+                physical.elementRead.push_back(buffer.read || buffer.atomic);
             }
             break;
         case DescriptorRole::GuestImages:

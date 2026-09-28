@@ -42,6 +42,14 @@ public:
     // The mirror's contents were just written back to guest memory: it is current again, and the
     // other mirrors over the same memory are not.
     void MarkSynced(const std::shared_ptr<Mirror>& mirror);
+    // A buffer over the whole host-imported guest mapping holding [address, address + bytes) and
+    // the offset of `address` in it: the GPU reads guest memory in place, nothing is copied. Null
+    // when the device cannot import host memory or the range has no shared backing.
+    struct HostView {
+        std::shared_ptr<Buffer> buffer;
+        VkDeviceSize offset = 0;
+    };
+    HostView HostRange(std::uint64_t address, std::uint64_t bytes);
     // Stops watching pages in [address, address + bytes): another owner (a render target) takes
     // them over. Mirrors there copy on every use afterwards.
     void ReleaseTracking(std::uint64_t address, std::size_t bytes);
@@ -77,7 +85,7 @@ private:
     // Mirrors from this size on are refreshed chunk by chunk, in place (see Acquire).
     static constexpr std::uint64_t IncrementalBytes = 16ull << 20;
     // Ranges from this size on are bound in place when the device imports host memory.
-    static constexpr std::uint64_t ImportBytes = 64ull << 20;
+    static constexpr std::uint64_t ImportBytes = 1ull << 20;
     std::shared_ptr<Mirror> import(std::uint64_t begin, std::uint64_t end, VkBufferUsageFlags usage);
     Chunk& chunk(std::uint64_t address);
     bool current(const Mirror& mirror);
@@ -93,6 +101,12 @@ private:
     std::uint64_t uses = 0;
     std::uint64_t retainedBytes = 0;
     std::uint64_t budget;
+    struct HostMapping {
+        std::uint64_t serial;
+        std::uint64_t bytes;
+        std::shared_ptr<Buffer> buffer;
+    };
+    std::map<std::uint64_t, HostMapping> hostMappings;  // keyed by guest mapping address
     std::uint64_t copiedBytes = 0;
     std::uint64_t reusedBytes = 0;
 };
