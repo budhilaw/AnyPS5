@@ -1249,6 +1249,10 @@ private:
                     auto& execution = fifo.front();
                     const auto result = step(execution);
                     if (result == Step::Finished) {
+                        // The console's GPU starts a submission's work when it is submitted: work
+                        // it recorded reaches the queue now, so label writes behind it complete
+                        // while the title waits for them rather than when later work fills a batch.
+                        if (const auto current = currentDevice(); current != nullptr && graphicsPosted != 0) postGraphics({[current] { current->FlushDraws(); }, {}, false});
                         Submission finished = std::move(execution.submission);
                         fifo.pop_front();
                         complete(finished);

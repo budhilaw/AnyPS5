@@ -2,6 +2,8 @@
 #define CORE_LIBS_PRX_LIBSCEAGCDRIVER_EXECUTION_INCLUDE_PERFORMANCETIMER_HPP
 
 #include <algorithm>
+#include <array>
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -52,31 +54,43 @@ class FrameTiming {
 public:
     using Clock = TimingClock;
 
+    // Updated without the frame's lock: the driver and graphics threads mark the same frame.
     struct Metric {
-        Clock::duration total{};
-        Clock::duration maximum{};
-        std::uint64_t count = 0;
-        std::uint64_t bytes = 0;
+        std::atomic<std::int64_t> total{0};    // nanoseconds
+        std::atomic<std::int64_t> maximum{0};  // nanoseconds
+        std::atomic<std::uint64_t> count{0};
+        std::atomic<std::uint64_t> bytes{0};
     };
 
     explicit FrameTiming(std::uint64_t id) : id(id) {}
 
     Metric* Get(const char* scope, const char* stage) {
+        // Timers pass string literals: their addresses find the metric without comparing text,
+        // first in a per-thread cache (frames are keyed by id: a new frame may reuse an address).
+        struct Cached { std::uint64_t frame; const FrameTiming* owner; const char* scope; const char* stage; Metric* metric; };
+        thread_local std::array<Cached, 256> cache{};
+        const auto slot = (std::hash<const void*>{}(scope) * 31u ^ std::hash<const void*>{}(stage)) % cache.size();
+        auto& cached = cache[slot];
+        if (cached.owner == this && cached.frame == id && cached.scope == scope && cached.stage == stage) return cached.metric;
         std::lock_guard lock(mutex);
-        // Timers pass string literals: their addresses find the metric without comparing text.
         const PointerKey key{scope, stage};
-        if (const auto it = byPointer.find(key); it != byPointer.end()) return it->second;
-        auto* metric = &metrics[{scope, stage}];
-        byPointer.emplace(key, metric);
+        Metric* metric = nullptr;
+        if (const auto it = byPointer.find(key); it != byPointer.end()) metric = it->second;
+        else {
+            metric = &metrics[{scope, stage}];
+            byPointer.emplace(key, metric);
+        }
+        cached = {id, this, scope, stage, metric};
         return metric;
     }
 
     void Add(Metric* metric, Clock::duration elapsed, std::uint64_t bytes = 0) {
-        std::lock_guard lock(mutex);
-        metric->total += elapsed;
-        metric->maximum = std::max(metric->maximum, elapsed);
-        ++metric->count;
-        metric->bytes += bytes;
+        const auto nanoseconds = static_cast<std::int64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count());
+        metric->total.fetch_add(nanoseconds, std::memory_order_relaxed);
+        auto maximum = metric->maximum.load(std::memory_order_relaxed);
+        while (nanoseconds > maximum && !metric->maximum.compare_exchange_weak(maximum, nanoseconds, std::memory_order_relaxed)) {}
+        metric->count.fetch_add(1, std::memory_order_relaxed);
+        if (bytes != 0) metric->bytes.fetch_add(bytes, std::memory_order_relaxed);
     }
 
     void IncludeSubmission(std::uint64_t serial, Clock::time_point received, Clock::time_point enqueued, Clock::time_point dequeued, bool firstSegment) {
@@ -120,15 +134,16 @@ public:
         auto accounted = Clock::duration::zero();
         for (const auto scope : {"Driver.Packet", "Driver.Suspend", "Driver.Worker", "Driver.Completion"}) {
             const auto it = metrics.find({scope, "total"});
-            if (it != metrics.end()) accounted += it->second.total;
+            if (it != metrics.end()) accounted += std::chrono::nanoseconds(it->second.total.load());
         }
         output << " worker_unattributed_ms=" << milliseconds(flipReached - executionStart - accounted);
         if (interval != Clock::duration::zero()) output << " flip_interval_ms=" << milliseconds(interval);
         output << " metrics=inclusive(count,sum_ms,max_ms[,bytes])";
         for (const auto& [key, metric] : metrics) {
-            if (metric.count == 0) continue;
-            output << ' ' << key.first << '.' << key.second << "=(" << metric.count << ',' << milliseconds(metric.total) << ',' << milliseconds(metric.maximum);
-            if (metric.bytes != 0) output << ',' << metric.bytes;
+            const auto count = metric.count.load();
+            if (count == 0) continue;
+            output << ' ' << key.first << '.' << key.second << "=(" << count << ',' << milliseconds(std::chrono::nanoseconds(metric.total.load())) << ',' << milliseconds(std::chrono::nanoseconds(metric.maximum.load()));
+            if (const auto bytes = metric.bytes.load(); bytes != 0) output << ',' << bytes;
             output << ')';
         }
         output << '\n';
@@ -146,9 +161,10 @@ public:
         output << "[FrameTiming] partial frame=" << id << " reason=" << reason << " submissions=" << firstSerial << ':' << lastSerial;
         output << " metrics=inclusive(count,sum_ms,max_ms[,bytes])";
         for (const auto& [key, metric] : metrics) {
-            if (metric.count == 0) continue;
-            output << ' ' << key.first << '.' << key.second << "=(" << metric.count << ',' << milliseconds(metric.total) << ',' << milliseconds(metric.maximum);
-            if (metric.bytes != 0) output << ',' << metric.bytes;
+            const auto count = metric.count.load();
+            if (count == 0) continue;
+            output << ' ' << key.first << '.' << key.second << "=(" << count << ',' << milliseconds(std::chrono::nanoseconds(metric.total.load())) << ',' << milliseconds(std::chrono::nanoseconds(metric.maximum.load()));
+            if (const auto bytes = metric.bytes.load(); bytes != 0) output << ',' << bytes;
             output << ')';
         }
         output << '\n';

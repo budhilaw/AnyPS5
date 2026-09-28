@@ -52,11 +52,15 @@ void ResidentColor::Begin(VkCommandBuffer commands) {
         throw std::runtime_error(message);
     }
     if (!valid) {
-        memoryWatch->Protect(GuestMemoryTracking::Protection::Read);
         const GuestMemory::MemoryAccessScope suspended(nullptr, nullptr);
         // A GPU-side upload follows every queued draw and dispatch: what they write in place
-        // reaches the target without waiting for them.
-        if (transfer.Upload(color.address, color.extent.width, color.extent.height, color.tileMode)) adoptedThrough = context.drawQueue != nullptr ? context.drawQueue->NextSequence() : 0;
+        // reaches the target without waiting for them. A host copy reads the pages first.
+        if (transfer.UploadView(color.address, color.extent.width, color.extent.height, color.tileMode)) {
+            adoptedThrough = context.drawQueue != nullptr ? context.drawQueue->NextSequence() : 0;
+        } else {
+            memoryWatch->Protect(GuestMemoryTracking::Protection::Read);
+            transfer.Upload(color.address, color.extent.width, color.extent.height, color.tileMode);
+        }
         transfer.Detile(commands);
         Transition(commands, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
         VkBufferImageCopy copy{};
