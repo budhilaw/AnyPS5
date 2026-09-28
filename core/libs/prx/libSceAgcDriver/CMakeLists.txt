@@ -229,6 +229,7 @@ add_executable(agc_driver_graphics_tests EXCLUDE_FROM_ALL
         Graphics/src/Sampler.cpp
         ${agcTextureDetileShaderHeader}
         Execution/src/GuestMemory.cpp
+        Execution/src/GpuJournal.cpp
 )
 
 target_include_directories(agc_driver_graphics_tests PRIVATE

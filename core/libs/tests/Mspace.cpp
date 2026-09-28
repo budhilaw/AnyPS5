@@ -26,7 +26,7 @@ int main() {
     Require(arena != nullptr);
     Require(sceLibcMspaceCreate_nid_postfix("overlap", storage.data(), storage.size(), 0) == nullptr);
     auto* first = static_cast<unsigned char*>(sceLibcMspaceCalloc_nid_postfix(arena, 32, 4));
-    Require(first > storage.data() && first + 128 <= storage.data() + storage.size());
+    Require(first >= storage.data() && first + 128 <= storage.data() + storage.size()); // bookkeeping lives outside the space
     for (int i = 0; i < 128; ++i) { Require(first[i] == 0); first[i] = static_cast<unsigned char>(i); }
     void* blocker = sceLibcMspaceMalloc_nid_postfix(arena, 128);
     auto* grown = static_cast<unsigned char*>(sceLibcMspaceRealloc_nid_postfix(arena, first, 4096));
