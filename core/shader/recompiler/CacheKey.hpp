@@ -80,6 +80,7 @@ private:
         append(key, value.executeOnNoop);
         append(key, value.targetOutputMode);
         append(key, value.targetExportMapping);
+        append(key, value.dualSourceBlend);
     }
 
     static void append(std::vector<std::uint64_t>& key, const ShaderVertexResourceDestination& value) {
@@ -137,6 +138,7 @@ private:
         append(key, value.maxWorkgroupSharedMemoryBytes);
         append(key, value.mesh);
         append(key, value.tessellation);
+        append(key, value.subgroupStageMask);
     }
 };
 

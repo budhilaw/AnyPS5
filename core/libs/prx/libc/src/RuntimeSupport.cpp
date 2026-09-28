@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <stdexcept>
@@ -21,22 +22,42 @@ extern "C" {
 
 FileStream _Stderr_nid_postfix{stderr};
 FileStream _Stdout_nid_postfix{stdout};
+FileStream _Stdin_nid_postfix{stdin};
+
+namespace {
+struct Destructor { void (*function)(void*); void* argument; void* dso; };
+std::vector<Destructor>& destructors() { static auto* list = new std::vector<Destructor>; return *list; }
+std::mutex destructorsMutex;
+
+// Runs (in reverse order) and drops the destructors registered for `dso`, or all of them for null.
+void runDestructors(void* dso) {
+    for (;;) {
+        Destructor next{};
+        {
+            std::lock_guard lock(destructorsMutex);
+            auto& list = destructors();
+            auto it = std::find_if(list.rbegin(), list.rend(), [&](const Destructor& d) { return dso == nullptr || d.dso == dso; });
+            if (it == list.rend()) return;
+            next = *it;
+            list.erase(std::next(it).base());
+        }
+        next.function(next.argument);
+    }
+}
+}
 
 int APS5_VABI __cxa_atexit_nid_postfix(void (*func)(void*), void* arg, void* dsoHandle) {
-    (void)dsoHandle;
-    static std::vector<std::pair<void (*)(void*), void*>> destructors;
     static bool runnerRegistered = false;
-    destructors.emplace_back(func, arg);
+    std::lock_guard lock(destructorsMutex);
+    destructors().push_back({func, arg, dsoHandle});
     if (!runnerRegistered) {
         runnerRegistered = true;
-        std::atexit([] {
-            for (auto it = destructors.rbegin(); it != destructors.rend(); ++it) {
-                it->first(it->second);
-            }
-        });
+        std::atexit([] { runDestructors(nullptr); });
     }
     return 0;
 }
+
+void APS5_VABI __cxa_finalize_nid_postfix(void* dsoHandle) { runDestructors(dsoHandle); }
 
 unsigned int APS5_VABI _Atomic_fetch_add_4_nid_postfix(volatile unsigned int* target, unsigned int value, int memoryOrder) {
     (void)memoryOrder;

@@ -27,9 +27,7 @@ std::uint32_t* APS5_VABI sceAgcDcbWaitRegMem(CommandBuffer* buf, std::uint8_t si
 }
 
 uint32_t APS5_VABI sceAgcDcbWaitOnAddressGetSize(uint32_t size) {
- (void)size;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+    return (size == 0 ? 14u : 16u) * sizeof(std::uint32_t);
 }
 
 std::uint32_t* APS5_VABI sceAgcDcbEventWrite(CommandBuffer* buf, std::uint8_t eventType, const volatile void* address) {
@@ -45,9 +43,7 @@ std::uint32_t* APS5_VABI sceAgcDcbEventWrite(CommandBuffer* buf, std::uint8_t ev
 }
 
 std::uint64_t APS5_VABI sceAgcDcbEventWriteGetSize(std::uint8_t eventType) {
-    (void)eventType;
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return ((eventType & 0xfeu) == 0x38u ? 4u : 2u) * sizeof(std::uint32_t);
 }
 
 std::uint32_t* APS5_VABI sceAgcDcbStallCommandBufferParser(CommandBuffer* buf) {
@@ -55,8 +51,7 @@ std::uint32_t* APS5_VABI sceAgcDcbStallCommandBufferParser(CommandBuffer* buf) {
 }
 
 std::uint32_t APS5_VABI sceAgcDcbStallCommandBufferParserGetSize() {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return 2 * sizeof(std::uint32_t);
 }
 
 std::uint32_t* APS5_VABI sceAgcDcbMemSemaphore(CommandBuffer* buf, std::uint8_t action, std::uint8_t clientCode, const volatile void* address) {

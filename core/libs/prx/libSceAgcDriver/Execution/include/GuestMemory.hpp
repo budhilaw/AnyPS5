@@ -8,6 +8,10 @@
 namespace AgcDriver::GuestMemory {
 
 void CheckRange(const void* pointer, std::size_t bytes, std::size_t alignment, bool writable = false);
+// The largest prefix of [pointer, pointer + bytes) that CheckGpuRange accepts, page granular.
+// Logs the host mappings covering [address, address + bytes): start, size and protection of each.
+void DescribeRegions(std::uint64_t address, std::size_t bytes);
+std::size_t MappedGpuBytes(const void* pointer, std::size_t bytes, bool writable);
 void CheckGpuRange(const void* pointer, std::size_t bytes, std::size_t alignment, bool writable = false);
 void Read(std::uint64_t address, std::span<std::byte> destination, std::size_t alignment = 1);
 void Write(std::uint64_t address, std::span<const std::byte> source, std::size_t alignment = 1);

@@ -5,6 +5,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/ColorTargetLayout.hpp"
 #include "prx/libSceAgcDriver/Execution/include/QueueState.hpp"
 #include <array>
+#include <vector>
 #include <cstddef>
 #include <cstdint>
 #include "Recompiler.hpp"
@@ -34,12 +35,47 @@ struct ColorTarget {
     std::size_t bytes;
     std::uint8_t componentMapping;
     ColorTileMode tileMode = ColorTileMode::Linear;
+    std::uint32_t bytesPerPixel = 4;
+    // Targets whose texel size the host tiling code does not handle live on the GPU only: they are
+    // neither loaded from nor written back to guest memory (their titles never touch that memory
+    // from the CPU either; see docs/TechnicalDebt.md).
+    bool gpuOnly = false;
+};
+
+// A depth/stencil target lives on the GPU only: the driver never reads or writes its guest memory,
+// which titles do not access from the CPU either (HTILE metadata makes it opaque).
+struct DepthTarget {
+    std::uint64_t address;
+    VkExtent2D extent;
+    VkFormat format;
+    bool stencil;
+    std::uint64_t stencilAddress = 0;  // DB_STENCIL_READ_BASE: the stencil surface lives apart from Z
+};
+
+struct DepthState {
+    bool test = false;
+    bool write = false;
+    VkCompareOp compare = VK_COMPARE_OP_ALWAYS;
+    bool stencilTest = false;
+    VkStencilOpState front{};
+    VkStencilOpState back{};
+    bool clearDepth = false;
+    float depthClear = 1.0f;
+    bool clearStencil = false;
+    std::uint32_t stencilClear = 0;
 };
 
 struct State {
     ShaderStages stages;
     ColorTarget color;
     bool hasColorTarget;
+    // Color targets 1..7 (multiple render targets) with their blend states; every target shares
+    // the extent of target 0.
+    std::vector<ColorTarget> extraColors;
+    std::vector<VkPipelineColorBlendAttachmentState> extraBlends;
+    bool hasDepthTarget = false;
+    DepthTarget depth{};
+    DepthState depthState{};
     bool rectList = false;
     VkExtent2D renderExtent;
     VkPrimitiveTopology topology;
@@ -48,8 +84,15 @@ struct State {
     VkRect2D scissor;
     VkCullModeFlags cullMode;
     VkFrontFace frontFace;
+    // Polygon offset (PA_SU_POLY_OFFSET_*): Vulkan's constant factor is in depth units of the
+    // format and the slope factor is the console's scale divided by sixteen.
+    bool depthClamp = false; // PA_CL_CLIP_CNTL ZCLIP_NEAR/FAR_DISABLE
+    bool depthBias = false;
+    float depthBiasConstant = 0.0f;
+    float depthBiasSlope = 0.0f;
     VkPipelineColorBlendAttachmentState blend;
     std::array<float, 4> blendConstants;
+    bool dualSourceBlend = false;
 };
 
 ShaderStages DecodeShaderStages(const QueueState& queue);

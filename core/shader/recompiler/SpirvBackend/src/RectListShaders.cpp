@@ -19,6 +19,9 @@ struct Parameter {
     std::uint32_t inputLocation;
     std::uint32_t outputLocation;
     bool flat;
+    // The vertex shader exports nothing at inputLocation: the fragment shader reads zeros, as
+    // the hardware provides for an unexported parameter.
+    bool missing = false;
 };
 
 void require(bool condition, const char* message) {
@@ -114,6 +117,10 @@ public:
         store(access(ptrOutputVec4Float, glOut, invocation, intConstant(0)), position);
 
         for (std::uint32_t i = 0; i < parameters.size(); i++) {
+            if (parameters[i].missing) {
+                store(access(ptrOutputVec4Float, outputs[i], invocation), zeroVec4());
+                continue;
+            }
             const auto input0 = load(vec4FloatType, access(ptrInputVec4Float, inputs[i], intConstant(0)));
             if (parameters[i].flat) {
                 store(access(ptrOutputVec4Float, outputs[i], invocation), input0);
@@ -246,6 +253,10 @@ private:
     void store(std::uint32_t pointer, std::uint32_t value) { emit(spv::OpStore, pointer, value); }
 
     std::uint32_t intConstant(std::uint32_t value) { return constant(intType, value); }
+    std::uint32_t zeroVec4() {
+        const auto zero = constant(floatType, 0u);
+        return builder.Constant(spv::OpConstantComposite, vec4FloatType, zero, zero, zero, zero);
+    }
 
     std::uint32_t uintConstant(std::uint32_t value) { return constant(uintType, value); }
 
@@ -291,6 +302,7 @@ private:
         inputs.resize(parameters.size());
         std::array<std::uint32_t, 32> locations {};
         for (std::uint32_t i = 0; i < parameters.size(); i++) {
+            if (tessControl && parameters[i].missing) continue; // no vertex output to read
             const auto location = tessControl ? parameters[i].inputLocation : parameters[i].outputLocation;
             if (tessControl && locations[location] != 0) {
                 inputs[i] = locations[location];
@@ -374,8 +386,8 @@ RectListShaders BuildRectListShaders(const RecompileResult& vertex, const Recomp
     for (const auto& input : fragment.fragmentParameters) {
         require(input.location < 32 && input.sourceLocation < 32 && locations.insert(input.location).second, "invalid fragment parameter location");
         require(!input.perVertex, "custom per-vertex interpolation is unsupported");
-        require(std::find(vertex.parameterExports.begin(), vertex.parameterExports.end(), input.sourceLocation) != vertex.parameterExports.end(), "fragment input has no vertex export");
-        parameters.push_back({input.sourceLocation, input.location, input.flat});
+        const bool exported = std::find(vertex.parameterExports.begin(), vertex.parameterExports.end(), input.sourceLocation) != vertex.parameterExports.end();
+        parameters.push_back({input.sourceLocation, input.location, input.flat, !exported});
     }
     const auto components = static_cast<std::uint32_t>((parameters.size() + 1) * 4);
     const auto& limits = *target.tessellation;

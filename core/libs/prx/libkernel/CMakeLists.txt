@@ -1,9 +1,13 @@
 add_library(libkernel SHARED EXCLUDE_FROM_ALL
+        ${CMAKE_CURRENT_SOURCE_DIR}/MissingImports.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Apr/src/Apr.cpp
+        $<$<PLATFORM_ID:Darwin>:${CMAKE_CURRENT_SOURCE_DIR}/Pthread/Darwin/GuestTls.cpp>
         ${CMAKE_CURRENT_SOURCE_DIR}/Equeue/Equeue.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Equeue/src/EventAccessors.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/File/src/NativeStat.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/File/src/Open.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/File/src/Stdio.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/File/src/PosixExtra.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Semaphore/src/Semaphore.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/DirectMemory/Export.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/DirectMemory/DirectMemory.cpp
@@ -17,12 +21,8 @@ add_library(libkernel SHARED EXCLUDE_FROM_ALL
         ${CMAKE_CURRENT_SOURCE_DIR}/Pthread/src/Tsd.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Pthread/src/Rwlock.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Pthread/src/Sem.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/Pthread/Posix/Attr.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/Pthread/Posix/Cond.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/Pthread/Posix/Mutex.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/Pthread/Posix/Rwlock.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/Pthread/Posix/Thread.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Pthread/Posix/Once.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Pthread/Posix/PthreadPosix.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Pthread/Posix/Tsd.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Pthread/Posix/Sem.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Socket/src/Socket.cpp

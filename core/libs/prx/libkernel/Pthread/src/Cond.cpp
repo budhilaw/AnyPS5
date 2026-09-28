@@ -1,4 +1,7 @@
 #include "../include/Pthread.hpp"
+#include <mutex>
+#include <thread>
+#include <string>
 #include "prx/libc/include/General.hpp"
 #include <chrono>
 #include <stdexcept>
@@ -24,10 +27,11 @@ int APS5_VABI scePthreadCondattrDestroy(PthreadCondattr* attr) {
     return SCE_OK;
 }
 
-int APS5_VABI scePthreadCondInit(PthreadCond* cond, const PthreadCondattr*, const char*) {
+int APS5_VABI scePthreadCondInit(PthreadCond* cond, const PthreadCondattr* attr, const char*) {
     if (!cond) throw std::runtime_error("scePthreadCondInit: null cond");
     auto* p = new (std::nothrow) PthreadCondPrivate{};
     if (!p) return SCE_KERNEL_ERROR_ENOMEM;
+    if (attr && *attr) p->_clockid = (*attr)->_clockid;
     *cond = p;
     return SCE_OK;
 }
@@ -39,32 +43,49 @@ int APS5_VABI scePthreadCondDestroy(PthreadCond* cond) {
     return SCE_OK;
 }
 
+// PTHREAD_COND_INITIALIZER is a null handle; the first use creates the condition variable.
+static PthreadCondPrivate* EnsureCond(PthreadCond* cond, const char* caller) {
+    if (!cond) throw std::runtime_error(std::string(caller) + ": null cond");
+    if (*cond) return *cond;
+    static std::mutex initialization;
+    std::lock_guard lock(initialization);
+    if (!*cond) {
+        auto* p = new (std::nothrow) PthreadCondPrivate{};
+        if (!p) throw std::runtime_error(std::string(caller) + ": cannot initialize a static cond");
+        *cond = p;
+    }
+    return *cond;
+}
+
 int APS5_VABI scePthreadCondSignal(PthreadCond* cond) {
-    if (!cond || !*cond) throw std::runtime_error("scePthreadCondSignal: null cond");
-    (*cond)->_cv.notify_one();
+    EnsureCond(cond, "scePthreadCondSignal")->_cv.notify_one();
     return SCE_OK;
 }
 
 int APS5_VABI scePthreadCondBroadcast(PthreadCond* cond) {
-    if (!cond || !*cond) throw std::runtime_error("scePthreadCondBroadcast: null cond");
-    (*cond)->_cv.notify_all();
+    EnsureCond(cond, "scePthreadCondBroadcast")->_cv.notify_all();
     return SCE_OK;
 }
 
 int APS5_VABI scePthreadCondTimedwait(PthreadCond* cond, PthreadMutex* mutex, unsigned int usec) {
-    if (!cond || !*cond || !mutex || !*mutex)
-        throw std::runtime_error("scePthreadCondTimedwait: null arg");
+    if (!mutex || !*mutex) throw std::runtime_error("scePthreadCondTimedwait: null mutex");
     auto* m = *mutex;
-    auto* c = *cond;
+    auto* c = EnsureCond(cond, "scePthreadCondTimedwait");
     if (m->_type == MutexType::Recursive) {
         std::unique_lock<std::recursive_timed_mutex> lk(m->_rmtx, std::adopt_lock);
+        MutexClearOwner(m);
         auto res = c->_cv.wait_for(lk, std::chrono::microseconds(usec));
         lk.release();
+        m->_owner.store(std::this_thread::get_id(), std::memory_order_relaxed); // the wait re-acquired the mutex for this thread
+        MutexNoteOwner(m);
         return res == std::cv_status::timeout ? SCE_KERNEL_ERROR_ETIMEDOUT : SCE_OK;
     }
     std::unique_lock<std::timed_mutex> lk(m->_mtx, std::adopt_lock);
+    MutexClearOwner(m);
     auto res = c->_cv.wait_for(lk, std::chrono::microseconds(usec));
     lk.release();
+    m->_owner.store(std::this_thread::get_id(), std::memory_order_relaxed); // the wait re-acquired the mutex for this thread
+    MutexNoteOwner(m);
     return res == std::cv_status::timeout ? SCE_KERNEL_ERROR_ETIMEDOUT : SCE_OK;
 }
 
@@ -76,10 +97,25 @@ int APS5_VABI scePthreadCondSignalto(PthreadCond* cond, Pthread thread) {
 }
 
 int APS5_VABI scePthreadCondWait(PthreadCond* cond, PthreadMutex* mutex) {
- (void)cond;
- (void)mutex;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+    if (!mutex || !*mutex) throw std::runtime_error("scePthreadCondWait: null mutex");
+    auto* m = *mutex;
+    auto* c = EnsureCond(cond, "scePthreadCondWait");
+    if (m->_type == MutexType::Recursive) {
+        std::unique_lock<std::recursive_timed_mutex> lk(m->_rmtx, std::adopt_lock);
+        MutexClearOwner(m);
+        c->_cv.wait(lk);
+        lk.release();
+        m->_owner.store(std::this_thread::get_id(), std::memory_order_relaxed); // the wait re-acquired the mutex for this thread
+        MutexNoteOwner(m);
+        return SCE_OK;
+    }
+    std::unique_lock<std::timed_mutex> lk(m->_mtx, std::adopt_lock);
+    MutexClearOwner(m);
+    c->_cv.wait(lk);
+    lk.release();
+    m->_owner.store(std::this_thread::get_id(), std::memory_order_relaxed); // the wait re-acquired the mutex for this thread
+    MutexNoteOwner(m);
+    return SCE_OK;
 }
 
 }

@@ -64,6 +64,7 @@ struct ShaderPixelStageInfo {
     bool executeOnNoop;
     std::array<std::uint8_t, 8> targetOutputMode;
     std::array<std::uint8_t, 8> targetExportMapping;
+    bool dualSourceBlend = false;  // DB_SHADER_CONTROL.DUAL_EXPORT_ENABLE: MRT1 is blend source 1
 };
 
 struct ShaderVertexBufferResource {
@@ -132,6 +133,9 @@ struct SpirvTarget {
     std::uint32_t maxWorkgroupSharedMemoryBytes;
     std::optional<MeshTargetLimits> mesh;
     std::optional<TessellationTargetLimits> tessellation;
+    // Bit (1 << ShaderStage) set for each stage the device supports subgroup operations in; a
+    // stage without them is emitted as single-lane waves (no cross-lane communication).
+    std::uint32_t subgroupStageMask = 0xffffffffu;
 };
 
 struct BindingLayout {
@@ -238,6 +242,8 @@ struct DescriptorBinding {
     std::uint32_t count;
     std::vector<std::uint32_t> guestDescriptor;
     bool readOnly = false;
+    // GuestBuffers: whether the shader stores to (or atomically updates) each element.
+    std::vector<bool> elementWritten;
     std::optional<DescriptorImageShape> imageShape;
     std::vector<bool> samplerDepthCompare;
 };

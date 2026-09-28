@@ -19,13 +19,13 @@ void* APS5_VABI sceAgcDcbA_zARR5aCmkoY(void) {
 
 
 uint32_t* APS5_VABI sceAgcDcbJump(CommandBuffer* buf, uint8_t mode, uint8_t cache_policy, const uint32_t* target, uint32_t size_in_dwords) {
- (void)buf;
- (void)mode;
- (void)cache_policy;
- (void)target;
- (void)size_in_dwords;
- NotImplemented_nid_no_patch(__func__);
- return nullptr;
+    Agc::Command::Require(buf != nullptr && target != nullptr, __func__, "null command buffer or target");
+    Agc::Command::CheckBits(mode, 1, __func__);
+    Agc::Command::CheckBits(cache_policy, 3, __func__);
+    Agc::Command::Require(size_in_dwords != 0 && size_in_dwords <= 0xfffffu, __func__, "invalid indirect buffer size");
+    const auto address = reinterpret_cast<std::uintptr_t>(target);
+    Agc::Command::CheckAddress(address, 4, __func__);
+    return Agc::Command::Emit(buf, 0x3fu, {static_cast<std::uint32_t>(address), static_cast<std::uint32_t>(address >> 32u), 0x0f200000u | (static_cast<std::uint32_t>(cache_policy) << 28u) | (static_cast<std::uint32_t>(mode) << 20u) | size_in_dwords}, __func__);
 }
 
 std::uint32_t APS5_VABI sceAgcDcbJumpGetSize() {
@@ -51,11 +51,13 @@ uint32_t APS5_VABI sceAgcDcbRewindGetSize(void) {
 }
 
 uint32_t* APS5_VABI sceAgcDcbWaitUntilSafeForRendering(CommandBuffer* buf, uint32_t video_out_handle, uint32_t display_buffer_index) {
- (void)buf;
- (void)video_out_handle;
- (void)display_buffer_index;
- NotImplemented_nid_no_patch(__func__);
- return nullptr;
+    Agc::Command::Require(buf != nullptr, __func__, "null command buffer");
+    auto* packet = Agc::Command::Allocate(buf, 4, __func__);
+    packet[0] = Agc::Command::Header(0x10u, 4, 0x06u << 2u);
+    packet[1] = video_out_handle;
+    packet[2] = display_buffer_index;
+    packet[3] = 0;
+    return packet;
 }
 
 }

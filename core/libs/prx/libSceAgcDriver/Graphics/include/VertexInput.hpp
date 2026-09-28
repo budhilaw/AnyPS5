@@ -16,8 +16,19 @@ struct VertexFormat {
     const char* scalar;
 };
 
+// An attribute whose buffer descriptor is null or has the invalid format: the hardware fetches
+// zeros for it (titles leave unused vertex streams unbound).
+inline bool IsNullVertexAttribute(const ShaderRecompiler::VertexAttribute& attribute) {
+    const auto& fields = attribute.resource.fields;
+    const auto address = fields[0] | (static_cast<std::uint64_t>(fields[1] & 0xffffu) << 32u);
+    return address == 0 || ((fields[3] >> 12u) & 0x7fu) == 0;
+}
+
+constexpr std::size_t NullVertexAttributeBytes = 16;
+
 inline VertexFormat DecodeVertexFormat(const ShaderRecompiler::VertexAttribute& attribute) {
     Require(attribute.components >= 1 && attribute.components <= 4, "invalid vertex attribute component count");
+    if (IsNullVertexAttribute(attribute)) return {VK_FORMAT_R32G32B32A32_SFLOAT, 16u, 4u, "f32"};
     const auto format = (attribute.resource.fields[3] >> 12u) & 0x7fu;
     switch (format) {
         case 1: { const std::array formats{VK_FORMAT_R8_UNORM}; const auto count = std::min(attribute.components, 1u); return {formats[count - 1], count * 1u, 1u, "f32"}; }
@@ -94,6 +105,13 @@ inline VertexInputLayout BuildVertexInputLayout(const Context& context, std::spa
         const auto format = DecodeVertexFormat(attribute);
         Require(attribute.location < context.limits.maxVertexInputAttributes && locations.insert(attribute.location).second, "invalid or duplicate vertex attribute location");
         Require(attribute.fetchIndex <= 1, "unsupported vertex fetch index");
+        if (IsNullVertexAttribute(attribute)) {
+            // One zeroed record repeated for every vertex and instance.
+            const auto binding = static_cast<std::uint32_t>(result.bindings.size());
+            result.bindings.push_back({binding, 0u, VK_VERTEX_INPUT_RATE_VERTEX});
+            result.attributes.push_back({attribute.location, binding, format.format, 0});
+            continue;
+        }
         Require((fields[1] & 0x80000000u) == 0 && (fields[3] & 0x00800000u) == 0 && (fields[3] >> 30u) == 0, "unsupported vertex buffer descriptor flags");
         const auto stride = (fields[1] >> 16u) & 0x3fffu;
         const auto address = fields[0] | (static_cast<std::uint64_t>(fields[1] & 0xffffu) << 32u);
@@ -112,6 +130,7 @@ inline VertexInputLayout BuildVertexInputLayout(const Context& context, std::spa
 
 inline std::size_t VertexBufferReadSize(const ShaderRecompiler::VertexAttribute& attribute, std::uint32_t maxIndex, std::uint32_t instances, std::uint32_t firstInstance = 0) {
     Require(instances != 0, "vertex input requires nonzero instance count");
+    if (IsNullVertexAttribute(attribute)) return NullVertexAttributeBytes;
     Require(firstInstance <= std::numeric_limits<std::uint32_t>::max() - (instances - 1u), "vertex input instance range overflow");
     const auto stride = (attribute.resource.fields[1] >> 16u) & 0x3fffu;
     const auto records = attribute.resource.fields[2];

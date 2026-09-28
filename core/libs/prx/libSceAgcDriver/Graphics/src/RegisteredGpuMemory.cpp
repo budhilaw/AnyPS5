@@ -14,7 +14,7 @@ void GuestBufferMemory::AcquireRegistered() {
             snapshot.resize(range->bytes);
             GuestMemory::Read(range->address, snapshot);
         }
-        regions.push_back({range->address, range->address + range->bytes, range->writable, std::move(snapshot), nullptr});
+        regions.push_back({range->address, range->address + range->bytes, range->writable, false, std::move(snapshot), nullptr});
     }
 }
 

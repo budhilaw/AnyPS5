@@ -10,6 +10,7 @@
 extern "C" {
 
 int APS5_VABI sceNpTrophy2GetTrophyInfo(int context, int handle, int trophy_id, NpTrophy2Details* details, NpTrophy2Data* data) {
+    Aps5TraceCall_nid_no_patch(__func__);
     if (details == nullptr || data == nullptr) {
         APS5_INVALID_ARG_EX;
     }
@@ -38,6 +39,7 @@ int APS5_VABI sceNpTrophy2GetTrophyInfo(int context, int handle, int trophy_id, 
 }
 
 int APS5_VABI sceNpTrophy2GetTrophyInfoArray(int context, int handle, uint32_t offset, uint32_t limit, NpTrophy2Details* details_array, NpTrophy2Data* data_array, uint32_t* count) {
+    Aps5TraceCall_nid_no_patch(__func__);
     if (count == nullptr) {
         APS5_INVALID_ARG_EX;
     }
@@ -68,6 +70,7 @@ int APS5_VABI sceNpTrophy2GetTrophyInfoArray(int context, int handle, uint32_t o
 }
 
 int APS5_VABI sceNpTrophy2GetTrophyIcon(int context, int handle, int trophy_id, void* buffer, size_t* size) {
+    Aps5TraceCall_nid_no_patch(__func__);
     (void)context;
     (void)handle;
     (void)trophy_id;

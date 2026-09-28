@@ -11,9 +11,11 @@ struct Args {
     bool toIntel = false;
     bool writeRegistry = false;
     bool toWindows = false;
+    bool toMacOS = false;
     bool lazyBinding = false;
     bool autorun = false;
     bool windowsDiagnostics = false;
+    bool unselfOnly = false;
     std::uint32_t unusedFilterLevel = 0;
     std::string inputPath;
     std::string outputPath;

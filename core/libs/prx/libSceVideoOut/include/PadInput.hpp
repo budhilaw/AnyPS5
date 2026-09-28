@@ -21,6 +21,8 @@ private:
     std::array<std::uint8_t, 2> mouseStick{128, 128};
     std::chrono::steady_clock::time_point nextMousePoll{};
     bool mouseEnabled = false;
+    std::uint32_t scripted = 0; // buttons held by ANYPS5_DEBUG_PRESS (automated testing)
+    std::array<std::uint8_t, 4> scriptedSticks{128, 128, 128, 128};
 };
 
 #endif

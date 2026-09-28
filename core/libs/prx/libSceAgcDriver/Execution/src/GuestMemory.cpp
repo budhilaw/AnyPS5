@@ -1,3 +1,4 @@
+#include <cstdio>
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libc/include/GuestMemoryTracking.hpp"
 #include "prx/libSceAgcDriver/Execution/include/MemoryAccessScope.hpp"
@@ -12,6 +13,9 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#elif defined(__APPLE__)
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
 #else
 #include <fstream>
 #include <sstream>
@@ -27,7 +31,11 @@ void require(bool condition, const char* reason) {
 void CheckRange(const void* pointer, std::size_t bytes, std::size_t alignment, bool writable) {
     require(alignment != 0, "zero guest memory alignment");
     const auto address = reinterpret_cast<std::uintptr_t>(pointer);
-    require(address != 0 && address % alignment == 0, "null or misaligned address");
+    if (address == 0 || address % alignment != 0) {
+        char message[128];
+        std::snprintf(message, sizeof(message), "null or misaligned address 0x%llx (%zu bytes, alignment %zu)", static_cast<unsigned long long>(address), bytes, alignment);
+        throw std::runtime_error(std::string("AGC driver: ") + message);
+    }
     require(bytes <= std::numeric_limits<std::uintptr_t>::max() - address, "address range overflow");
     MemoryAccessScope::Resolve(address, bytes, writable);
     GuestMemoryTracking::GuestMemoryTrackingResolve_nid_postfix(address, bytes, writable);
@@ -45,6 +53,28 @@ void CheckRange(const void* pointer, std::size_t bytes, std::size_t alignment, b
         require(!writable || protection == PAGE_READWRITE || protection == PAGE_WRITECOPY || protection == PAGE_EXECUTE_READWRITE || protection == PAGE_EXECUTE_WRITECOPY, "guest memory has no write permission");
         cursor = std::min(end, base + memory.RegionSize);
     }
+#elif defined(__APPLE__)
+    while (cursor < end) {
+        mach_vm_address_t first = cursor;
+        mach_vm_size_t size = 0;
+        vm_region_basic_info_data_64_t info{};
+        mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+        mach_port_t object = MACH_PORT_NULL;
+        const auto result = mach_vm_region(mach_task_self(), &first, &size, VM_REGION_BASIC_INFO_64, reinterpret_cast<vm_region_info_t>(&info), &count, &object);
+        if (object != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), object);
+        if (!(result == KERN_SUCCESS && first <= cursor)) {
+            char message[160];
+            std::snprintf(message, sizeof(message), "guest address range is not mapped: 0x%llx (%zu bytes), cursor 0x%llx", static_cast<unsigned long long>(address), bytes, static_cast<unsigned long long>(cursor));
+            throw std::runtime_error(std::string("AGC driver: ") + message);
+        }
+        if ((info.protection & VM_PROT_READ) == 0 || (writable && (info.protection & VM_PROT_WRITE) == 0)) {
+            char message[192];
+            std::snprintf(message, sizeof(message), "guest memory is not %s: range 0x%llx (%zu bytes) at 0x%llx lies in a region 0x%llx+0x%llx with protection %u", writable ? "writable" : "readable", static_cast<unsigned long long>(address), bytes, static_cast<unsigned long long>(cursor), static_cast<unsigned long long>(first), static_cast<unsigned long long>(size), static_cast<unsigned>(info.protection));
+            throw std::runtime_error(std::string("AGC driver: ") + message);
+        }
+        require(size <= std::numeric_limits<std::uintptr_t>::max() - first && first + size > cursor, "invalid guest memory mapping");
+        cursor = std::min(end, static_cast<std::uintptr_t>(first + size));
+    }
 #else
     std::ifstream maps("/proc/self/maps");
     require(maps.is_open(), "cannot query guest memory maps");
@@ -61,7 +91,11 @@ void CheckRange(const void* pointer, std::size_t bytes, std::size_t alignment, b
         require(!writable || (permissions.size() > 1 && permissions[1] == 'w'), "guest memory has no write permission");
         cursor = std::min(end, last);
     }
-    require(cursor == end, "guest address range is not mapped");
+    if (!(cursor == end)) {
+            char message[160];
+            std::snprintf(message, sizeof(message), "guest address range is not mapped: 0x%llx (%zu bytes), cursor 0x%llx", static_cast<unsigned long long>(address), bytes, static_cast<unsigned long long>(cursor));
+            throw std::runtime_error(std::string("AGC driver: ") + message);
+        }
 #endif
 }
 

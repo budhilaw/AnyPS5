@@ -101,6 +101,26 @@ public:
         if (std::fwrite(text.data(), 1, text.size(), stdout) != text.size() || std::fflush(stdout) != 0) throw std::runtime_error("Frame timing: report write failed");
     }
 
+    // Prints the metrics gathered so far for a frame that has not flipped yet (diagnostics for
+    // phases where the title renders without presenting).
+    void PrintPartial(const char* reason) {
+        std::lock_guard lock(mutex);
+        std::ostringstream output;
+        output.imbue(std::locale::classic());
+        output << std::fixed << std::setprecision(3);
+        output << "[FrameTiming] partial frame=" << id << " reason=" << reason << " submissions=" << firstSerial << ':' << lastSerial;
+        output << " metrics=inclusive(count,sum_ms,max_ms[,bytes])";
+        for (const auto& [key, metric] : metrics) {
+            if (metric.count == 0) continue;
+            output << ' ' << key.first << '.' << key.second << "=(" << metric.count << ',' << milliseconds(metric.total) << ',' << milliseconds(metric.maximum);
+            if (metric.bytes != 0) output << ',' << metric.bytes;
+            output << ')';
+        }
+        output << '\n';
+        const auto text = output.str();
+        std::fwrite(text.data(), 1, text.size(), stderr);
+    }
+
 private:
     static double milliseconds(Clock::duration elapsed) {
         return std::chrono::duration<double, std::milli>(elapsed).count();

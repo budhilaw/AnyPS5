@@ -1,14 +1,19 @@
 #include "prx/libkernel/File/include/NativeStat.hpp"
 
+#include <cerrno>
 #include <stdexcept>
 #include <string>
 
 #ifdef _WIN32
+#include <cerrno>
 #include <sys/stat.h>
 #include <sys/types.h>
 using NativeStat = struct __stat64;
 static int DoStat(const std::filesystem::path& p, NativeStat* st) {
     return _wstat64(p.wstring().c_str(), st);
+}
+static int DoFstat(int fd, NativeStat* st) {
+    return _fstat64(fd, st);
 }
 #else
 #include <sys/stat.h>
@@ -16,15 +21,34 @@ using NativeStat = struct stat;
 static int DoStat(const std::filesystem::path& p, NativeStat* st) {
     return ::stat(p.c_str(), st);
 }
+static int DoFstat(int fd, NativeStat* st) {
+    return ::fstat(fd, st);
+}
 #endif
 
 namespace File {
 
-void FillFileStat(const std::filesystem::path& nativePath, FileStat* sb) {
+static void Convert(const NativeStat& st, FileStat* sb);
+
+int FillFileStat(const std::filesystem::path& nativePath, FileStat* sb) {
     NativeStat st{};
     if (DoStat(nativePath, &st) != 0) {
-        throw std::runtime_error(std::string("FillFileStat: stat failed for ") + nativePath.string());
+        const int error = errno;
+        if (error == ENOENT || error == ENOTDIR) return ENOENT;
+        throw std::runtime_error(std::string("FillFileStat: stat failed for ") + nativePath.string() + ", errno=" + std::to_string(error));
     }
+    Convert(st, sb);
+    return 0;
+}
+
+int FillDescriptorStat(int fd, FileStat* sb) {
+    NativeStat st{};
+    if (DoFstat(fd, &st) != 0) return errno == 0 ? EBADF : errno;
+    Convert(st, sb);
+    return 0;
+}
+
+static void Convert(const NativeStat& st, FileStat* sb) {
     *sb = FileStat{};
     sb->st_mode = static_cast<std::uint16_t>(st.st_mode);
     sb->st_size = static_cast<std::int64_t>(st.st_size);
@@ -54,12 +78,21 @@ void FillFileStat(const std::filesystem::path& nativePath, FileStat* sb) {
     sb->st_rdev = static_cast<std::uint32_t>(st.st_rdev);
     sb->st_blksize = static_cast<std::uint32_t>(st.st_blksize);
     sb->st_blocks = static_cast<std::int64_t>(st.st_blocks);
+#if defined(__APPLE__)
+    sb->st_atim.tv_sec = static_cast<std::int64_t>(st.st_atimespec.tv_sec);
+    sb->st_atim.tv_nsec = static_cast<std::int64_t>(st.st_atimespec.tv_nsec);
+    sb->st_mtim.tv_sec = static_cast<std::int64_t>(st.st_mtimespec.tv_sec);
+    sb->st_mtim.tv_nsec = static_cast<std::int64_t>(st.st_mtimespec.tv_nsec);
+    sb->st_ctim.tv_sec = static_cast<std::int64_t>(st.st_ctimespec.tv_sec);
+    sb->st_ctim.tv_nsec = static_cast<std::int64_t>(st.st_ctimespec.tv_nsec);
+#else
     sb->st_atim.tv_sec = static_cast<std::int64_t>(st.st_atim.tv_sec);
     sb->st_atim.tv_nsec = static_cast<std::int64_t>(st.st_atim.tv_nsec);
     sb->st_mtim.tv_sec = static_cast<std::int64_t>(st.st_mtim.tv_sec);
     sb->st_mtim.tv_nsec = static_cast<std::int64_t>(st.st_mtim.tv_nsec);
     sb->st_ctim.tv_sec = static_cast<std::int64_t>(st.st_ctim.tv_sec);
     sb->st_ctim.tv_nsec = static_cast<std::int64_t>(st.st_ctim.tv_nsec);
+#endif
 #if defined(__APPLE__)
     sb->st_birthtim.tv_sec = static_cast<std::int64_t>(st.st_birthtimespec.tv_sec);
     sb->st_birthtim.tv_nsec = static_cast<std::int64_t>(st.st_birthtimespec.tv_nsec);

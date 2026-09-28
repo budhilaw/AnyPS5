@@ -7,6 +7,7 @@
 extern "C" {
 
 int APS5_VABI sceNpTrophy2CreateHandle(int* handle) {
+    Aps5TraceCall_nid_no_patch(__func__);
     if (handle == nullptr) {
         APS5_INVALID_ARG_EX;
     }
@@ -15,11 +16,13 @@ int APS5_VABI sceNpTrophy2CreateHandle(int* handle) {
 }
 
 int APS5_VABI sceNpTrophy2DestroyHandle(int handle) {
+    Aps5TraceCall_nid_no_patch(__func__);
     (void)handle;
     return SCE_NP_TROPHY2_OK;
 }
 
 int APS5_VABI sceNpTrophy2AbortHandle(int handle) {
+    Aps5TraceCall_nid_no_patch(__func__);
     (void)handle;
     return SCE_NP_TROPHY2_OK;
 }

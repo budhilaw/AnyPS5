@@ -21,7 +21,9 @@ inline Registers InitialContextRegisters() {
         {0xc, 0}, {0xd, 0x40004000}, {0x81, 0x80000000}, {0x82, 0x40004000},
         {0x90, 0x80000000}, {0x91, 0x40004000},
         {0x105, 0}, {0x106, 0}, {0x107, 0}, {0x108, 0},
-        {0x1b1, 0}, {0x1b6, 0}, {0x1c3, 0}, {0x1c4, 0}, {0x1c5, 0},
+        // SPI_VS_OUT_CONFIG, SPI_PS_INPUT_ENA/ADDR (the cleared state enables the perspective
+        // center inputs), SPI_INTERP_CONTROL_0, SPI_PS_IN_CONTROL, SPI_BARYC_CNTL, ...
+        {0x1b1, 0}, {0x1b3, 0x2}, {0x1b4, 0x2}, {0x1b5, 0}, {0x1b6, 0}, {0x1b8, 0}, {0x1c3, 0}, {0x1c4, 0}, {0x1c5, 0},
         {0x1ff, 0}, {0x292, 2}, {0x293, 0}, {0x29b, 0},
         {0x2ce, 0}, {0x2d3, 0}, {0x2d5, 0}, {0x2d6, 0}, {0x2db, 0},
         {0x2dc, 0xaa00}, {0x2e4, 0}, {0x2f8, 0}, {0x2f9, 0x2d},
@@ -30,6 +32,7 @@ inline Registers InitialContextRegisters() {
         {0x390, 0}, {0x3b0, 0}, {0x3b8, 0}
     };
     for (std::uint32_t i = 0; i < 8; ++i) result.emplace(0x1e0 + i, 0x20010001);
+    for (std::uint32_t i = 0; i < 32; ++i) result.emplace(0x191 + i, 0); // SPI_PS_INPUT_CNTL_n
     for (std::uint32_t i = 0; i < 16; ++i) {
         result.emplace(0x94 + 2 * i, 0x80000000);
         result.emplace(0x95 + 2 * i, 0x40004000);
@@ -41,6 +44,7 @@ inline Registers InitialContextRegisters() {
 }
 
 struct QueueState {
+    std::uint32_t id = 0;  // the queue of the submission being executed (diagnostics)
     Registers shader;
     Registers context = InitialContextRegisters();
     Registers userConfig{{0x24a, 0}, {0x24b, 0}};

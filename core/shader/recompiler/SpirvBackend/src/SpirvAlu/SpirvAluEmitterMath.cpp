@@ -192,6 +192,10 @@ std::uint32_t EmitDppWriteCondition(SpirvValueEmitContext& ctx, const DppMoveFla
 }
 
 std::uint32_t EmitDsMaskedLaneRead(SpirvEmitterState& state, std::uint32_t source, std::uint32_t target, std::uint32_t exec) {
+    if (state.singleLane) {
+        const auto sourceActive = Binary(state, spv::OpLogicalAnd, TypeBool(state), exec, EmitSubgroupLaneActiveBool(state, target));
+        return Select(state, TypeU32(state), sourceActive, source, ConstantU32(state, 0u));
+    }
     auto lane = target;
     if (state.laneCount == 2) {
         lane = Binary(state, spv::OpBitwiseAnd, TypeU32(state), lane, ConstantU32(state, 31u));

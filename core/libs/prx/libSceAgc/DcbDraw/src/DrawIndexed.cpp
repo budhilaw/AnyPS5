@@ -10,12 +10,10 @@
 extern "C" {
 
 uint32_t* APS5_VABI sceAgcDcbDrawIndex(CommandBuffer* buf, uint32_t index_count, const volatile void* index_addr, uint64_t modifier) {
- (void)buf;
- (void)index_count;
- (void)index_addr;
- (void)modifier;
- NotImplemented_nid_no_patch(__func__);
- return nullptr;
+    Agc::Command::Require(buf != nullptr && index_addr != nullptr, __func__, "null command buffer or index address");
+    const auto address = reinterpret_cast<std::uintptr_t>(index_addr);
+    Agc::Command::CheckAddress(address, 2, __func__);
+    return Agc::Command::Emit(buf, 0x27u, {index_count == 0 ? 1u : index_count, static_cast<std::uint32_t>(address), static_cast<std::uint32_t>(address >> 32u), index_count, Agc::Command::DrawInitiator(modifier, true, __func__)}, __func__);
 }
 
 std::uint32_t APS5_VABI sceAgcDcbDrawIndexGetSize() {
@@ -35,16 +33,14 @@ std::uint32_t* APS5_VABI sceAgcDcbDrawIndexOffset(CommandBuffer* buf, std::uint3
 }
 
 uint32_t APS5_VABI sceAgcDcbDrawIndexOffsetGetSize(void) {
- NotImplemented_nid_no_patch(__func__);
- return 0;
+    return 5 * sizeof(std::uint32_t);
 }
 
 uint32_t* APS5_VABI sceAgcDcbDrawIndexIndirect(CommandBuffer* buf, uint32_t data_offset_in_bytes, uint64_t modifier) {
- (void)buf;
- (void)data_offset_in_bytes;
- (void)modifier;
- NotImplemented_nid_no_patch(__func__);
- return nullptr;
+    Agc::Command::Require(buf != nullptr, __func__, "null command buffer");
+    Agc::Command::Require((data_offset_in_bytes & 3u) == 0, __func__, "misaligned indirect arguments offset");
+    const auto patch = Agc::Command::DrawPatchOffsets(modifier, __func__);
+    return Agc::Command::Emit(buf, 0x25u, {data_offset_in_bytes, static_cast<std::uint32_t>(patch), static_cast<std::uint32_t>(patch >> 32u), Agc::Command::DrawInitiator(modifier, true, __func__)}, __func__);
 }
 
 std::uint32_t APS5_VABI sceAgcDcbDrawIndexIndirectGetSize() {

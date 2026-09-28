@@ -16,6 +16,13 @@ void* APS5_VABI memset_nid_postfix(void* s, int c, size_t n) {
 }
 
 void* APS5_VABI memcpy_nid_postfix(void* dest, const void* src, size_t n) {
+    // ANYPS5_TRACE_MEMCPY: a sparse sample of guest memcpy calls (size and caller).
+    static const bool trace = std::getenv("ANYPS5_TRACE_MEMCPY") != nullptr;
+    if (trace) {
+        thread_local unsigned long long calls = 0, bytes = 0;
+        ++calls; bytes += n;
+        if ((calls & (calls - 1)) == 0 && calls >= (1ull << 16)) APS5_LOG_OUT("memcpy #%llu on this thread (%llu bytes so far): n=%zu dest=%p src=%p caller=%p", calls, bytes, n, dest, src, __builtin_return_address(0));
+    }
     return std::memcpy(dest, src, n);
 }
 
@@ -29,6 +36,24 @@ int APS5_VABI memcmp_nid_postfix(const void* s1, const void* s2, size_t n) {
 
 const void* APS5_VABI memchr_nid_postfix(const void* s, int c, size_t n) {
     return std::memchr(s, c, n);
+}
+
+// Compiler runtime: a float raised to an integer power (by squaring, like libgcc's __powisf2).
+float APS5_VABI __powisf2_nid_postfix(float base, int exponent) {
+    const bool negative = exponent < 0;
+    unsigned remaining = negative ? 0u - static_cast<unsigned>(exponent) : static_cast<unsigned>(exponent);
+    float result = (remaining & 1u) ? base : 1.0f;
+    while (remaining >>= 1u) {
+        base *= base;
+        if (remaining & 1u) result *= base;
+    }
+    return negative ? 1.0f / result : result;
+}
+
+// Only the C locale exists: collation is byte order.
+int APS5_VABI strcoll_nid_postfix(const char* s1, const char* s2) {
+    if (!s1 || !s2) throw std::invalid_argument("strcoll: null string");
+    return std::strcmp(s1, s2);
 }
 
 int APS5_VABI strcmp_nid_postfix(const char* s1, const char* s2) {
@@ -100,7 +125,9 @@ double APS5_VABI strtod_nid_postfix(const char* str, char** endptr) {
 double APS5_VABI atof_nid_postfix(const char* str) { return std::atof(str); }
 float APS5_VABI strtof_nid_postfix(const char* str, char** endptr) { return std::strtof(str, endptr); }
 long double APS5_VABI strtold_nid_postfix(const char* str, char** endptr) {
+#if ANYPS5_GUEST_ABI
     static_assert(sizeof(long double) == 16, "Guest long double requires x87 extended precision storage");
+#endif
     return std::strtold(str, endptr);
 }
 

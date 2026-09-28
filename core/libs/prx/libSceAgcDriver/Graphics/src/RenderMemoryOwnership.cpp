@@ -1,11 +1,16 @@
 #include "prx/libSceAgcDriver/Graphics/include/RenderCache.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/GuestBufferCache.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/DrawQueue.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
 #include <limits>
+#include <cstdio>
+#include <stdexcept>
 
 namespace AgcDriver::Graphics {
 
 ResidentColor::ResidentColor(const Context& context, const ColorTarget& color) : context(context), color(color), transfer(context) {
+    if (color.gpuOnly) return; // never exchanged with guest memory
+    if (context.guestBufferCache != nullptr) context.guestBufferCache->ReleaseTracking(color.address, color.bytes);
     memoryWatch = std::make_unique<GuestMemoryTracking::Watch>(color.address, color.bytes, this, [](void* owner, GuestMemoryTracking::Access access) {
         static_cast<ResidentColor*>(owner)->resolveCpuAccess(access);
     });
@@ -14,13 +19,18 @@ ResidentColor::ResidentColor(const Context& context, const ColorTarget& color) :
 ResidentColor::~ResidentColor() = default;
 
 void ResidentColor::Invalidate() {
+    if (color.gpuOnly) { dirty = false; return; } // nothing to hand back: the image keeps its contents
     Require(!dirty, "cannot discard GPU-owned render target contents");
     if (memoryWatch) memoryWatch->Protect(GuestMemoryTracking::Protection::ReadWrite);
     valid = false;
 }
 
 void ResidentColor::ReleaseMemory() {
-    Require(!dirty, "cannot release GPU-owned render target memory");
+    if (dirty && !color.gpuOnly) {
+        char message[160];
+        std::snprintf(message, sizeof(message), "cannot release GPU-owned render target 0x%llx (%ux%u) memory while its contents are unsaved", static_cast<unsigned long long>(color.address), color.extent.width, color.extent.height);
+        throw std::runtime_error(message);
+    }
     Invalidate();
     memoryWatch.reset();
 }

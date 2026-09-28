@@ -3,6 +3,9 @@
 #include "prx/libc/include/General.hpp"
 #include <cerrno>
 #include <cstdint>
+#include <thread>
+#include <ctime>
+#include <chrono>
 #include <stdexcept>
 #include <string>
 
@@ -52,6 +55,8 @@ static void SleepNanos(std::uint64_t nanos) {
     while (nanosleep(&req, &req) == -1 && errno == EINTR) {}
 #endif
 }
+
+static constexpr int SCE_KERNEL_ERROR_EINVAL = 0x80020016;
 
 extern "C" {
 
@@ -241,17 +246,25 @@ int APS5_VABI clock_getres_nid_postfix(int clockId, KernelTimespec* res) {
 // ---------------------------------------------------------------------------
 
 int APS5_VABI sceKernelClockGetres(KernelClockid clock_id, KernelTimespec* tp) {
- (void)clock_id;
- (void)tp;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+    if (tp == nullptr) return SCE_KERNEL_ERROR_EINVAL;
+    if (clock_id != 0 && clock_id != 4 && clock_id != 5 && clock_id != 7 && clock_id != 8 && clock_id != 9 && clock_id != 10 && clock_id != 11 && clock_id != 12 && clock_id != 13 && clock_id != 15) return SCE_KERNEL_ERROR_EINVAL;
+    tp->tv_sec = 0;
+    tp->tv_nsec = 1;
+    return 0;
 }
 
 int APS5_VABI sceKernelClockGettime(KernelClockid clock_id, KernelTimespec* tp) {
- (void)clock_id;
- (void)tp;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+    if (tp == nullptr) return SCE_KERNEL_ERROR_EINVAL;
+    std::chrono::nanoseconds now;
+    switch (clock_id) {
+        case 0: case 9: case 10: case 13: now = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::system_clock::now().time_since_epoch()); break; // REALTIME variants
+        case 4: case 5: case 7: case 8: case 11: case 12: now = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()); break; // MONOTONIC/UPTIME variants
+        case 15: now = std::chrono::nanoseconds(static_cast<std::int64_t>(std::clock()) * (1000000000ll / CLOCKS_PER_SEC)); break; // PROCESS_CPUTIME_ID
+        default: return SCE_KERNEL_ERROR_EINVAL;
+    }
+    tp->tv_sec = static_cast<std::int64_t>(now.count() / 1000000000ll);
+    tp->tv_nsec = static_cast<std::int64_t>(now.count() % 1000000000ll);
+    return 0;
 }
 
 int APS5_VABI sceKernelConvertLocaltimeToUtc(int64_t local_time, int64_t reserved, int64_t* utc_time, KernelTimezone* timezone, int32_t* dst_seconds) {
@@ -274,9 +287,11 @@ int APS5_VABI sceKernelConvertUtcToLocaltime(int64_t utc_time, int64_t* local_ti
 }
 
 int APS5_VABI sceKernelGettimeofday(KernelTimeval* tp) {
- (void)tp;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+    if (tp == nullptr) return SCE_KERNEL_ERROR_EINVAL;
+    const auto now = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+    tp->tv_sec = static_cast<std::int64_t>(now / 1000000);
+    tp->tv_usec = static_cast<std::int64_t>(now % 1000000);
+    return 0;
 }
 
 int APS5_VABI sceKernelGettimezone(KernelTimezone* tz) {
@@ -286,19 +301,16 @@ int APS5_VABI sceKernelGettimezone(KernelTimezone* tz) {
 }
 
 uint64_t APS5_VABI sceKernelReadTsc(void) {
- NotImplemented_nid_no_patch(__func__);
- return 0;
+    return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
 }
 
 uint64_t APS5_VABI sceKernelGetTscFrequency(void) {
- NotImplemented_nid_no_patch(__func__);
- return 0;
+    return 1000000000ull; // sceKernelReadTsc counts nanoseconds of the host's steady clock
 }
 
 unsigned int APS5_VABI sceKernelSleep(unsigned int seconds) {
- (void)seconds;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+    std::this_thread::sleep_for(std::chrono::seconds(seconds));
+    return 0;
 }
 
 }

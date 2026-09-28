@@ -4,6 +4,8 @@
 #include "prx/libc/include/General.hpp"
 #include "prx/libc/include/ApplicationHeap.hpp"
 
+static constexpr int SCE_KERNEL_ERROR_EINVAL = 0x80020016;
+
 extern "C" {
 
 void APS5_VABI sceKernelRtldSetApplicationHeapAPI(void* api[]) {
@@ -11,30 +13,31 @@ void APS5_VABI sceKernelRtldSetApplicationHeapAPI(void* api[]) {
 }
 
 int APS5_VABI sceKernelRtldThreadAtexitDecrement(uint64_t* c) {
- (void)c;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+    if (c == nullptr) return SCE_KERNEL_ERROR_EINVAL;
+    __atomic_sub_fetch(c, 1, __ATOMIC_SEQ_CST);
+    return 0;
 }
 
 int APS5_VABI sceKernelRtldThreadAtexitIncrement(uint64_t* c) {
- (void)c;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+    if (c == nullptr) return SCE_KERNEL_ERROR_EINVAL;
+    __atomic_add_fetch(c, 1, __ATOMIC_SEQ_CST);
+    return 0;
 }
 
 void APS5_VABI sceKernelSetThreadAtexitCount(get_thread_atexit_count_func_t func) {
- (void)func;
- NotImplemented_nid_no_patch(__func__);
+    static get_thread_atexit_count_func_t registered = nullptr;
+    registered = func;
 }
 
 void APS5_VABI sceKernelSetThreadAtexitReport(thread_atexit_report_func_t func) {
- (void)func;
- NotImplemented_nid_no_patch(__func__);
+    static thread_atexit_report_func_t registered = nullptr;
+    registered = func;
 }
 
 void APS5_VABI sceKernelSetThreadDtors(thread_dtors_func_t dtors) {
- (void)dtors;
- NotImplemented_nid_no_patch(__func__);
+    // libc registers the routine that runs thread-local destructors at thread exit; kept for it.
+    static thread_dtors_func_t registered = nullptr;
+    registered = dtors;
 }
 
 }

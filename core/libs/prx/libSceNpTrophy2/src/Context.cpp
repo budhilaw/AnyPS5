@@ -8,6 +8,7 @@
 extern "C" {
 
 int APS5_VABI sceNpTrophy2CreateContext(int* context, int user_id, uint32_t service_label, uint64_t options) {
+    Aps5TraceCall_nid_no_patch(__func__);
     if (context == nullptr) {
         APS5_INVALID_ARG_EX;
     }
@@ -19,11 +20,13 @@ int APS5_VABI sceNpTrophy2CreateContext(int* context, int user_id, uint32_t serv
 }
 
 int APS5_VABI sceNpTrophy2DestroyContext(int context) {
+    Aps5TraceCall_nid_no_patch(__func__);
     (void)context;
     return SCE_NP_TROPHY2_OK;
 }
 
 int APS5_VABI sceNpTrophy2RegisterContext(int context, int handle, uint64_t options) {
+    Aps5TraceCall_nid_no_patch(__func__);
     (void)context;
     (void)handle;
     (void)options;

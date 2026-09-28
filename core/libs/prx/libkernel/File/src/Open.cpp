@@ -1,15 +1,20 @@
 #include "prx/libkernel/File/include/FileFlags.hpp"
 #include "prx/libkernel/File/include/NativeStat.hpp"
 #include "prx/libc/include/General.hpp"
+#include "prx/libkernel/File/include/GuestBufferAccess.hpp"
 #include "prx/libkernel/File/include/File.hpp"
 #include "SceTypes.hpp"
 
 #include <cerrno>
+#include <atomic>
+#include <cstdlib>
 #include <limits>
 #include <stdexcept>
 #include <string>
 
 static constexpr int SCE_KERNEL_ERROR_ENOENT = -2147352574;
+static constexpr int SCE_KERNEL_ERROR_ENOTEMPTY = -2147352510;
+static constexpr int SCE_KERNEL_ERROR_EEXIST = -2147352559;
 
 #ifdef _WIN32
 #include <fcntl.h>
@@ -87,6 +92,8 @@ static int MapFlags(int sceFlags) {
 }
 #endif
 
+void ReleaseDirectoryStream(int fd);
+
 extern "C" {
 
 int APS5_VABI sceKernelOpen(const char* path, int flags, std::uint16_t mode) {
@@ -98,12 +105,16 @@ int APS5_VABI sceKernelOpen(const char* path, int flags, std::uint16_t mode) {
         if (error == ENOENT) {
             return SCE_KERNEL_ERROR_ENOENT;
         }
-        throw std::runtime_error(std::string(__func__) + ": failed to open " + native.string() + ", errno=" + std::to_string(error));
+        // The console reports every open failure as an error code (EEXIST for exclusive creates,
+        // EACCES, EISDIR, ...); titles handle them.
+        APS5_LOG_OUT("open of %s failed: errno=%d", native.string().c_str(), error);
+        return static_cast<int>(0x80020000u | static_cast<unsigned>(error & 0xff));
     }
     return fd;
 }
 
 int APS5_VABI sceKernelClose(int d) {
+    ReleaseDirectoryStream(d);
     if (NativeClose(d) != 0) {
         throw std::runtime_error(std::string(__func__) + ": close failed, fd=" + std::to_string(d) + ", errno=" + std::to_string(errno));
     }
@@ -114,7 +125,15 @@ std::int64_t APS5_VABI sceKernelRead(int d, void* buf, std::size_t nbytes) {
     if (buf == nullptr) {
         throw std::invalid_argument(std::string(__func__) + ": buf is null");
     }
+    PrepareGuestBuffer(buf, nbytes, true);
     auto n = NativeRead(d, buf, nbytes);
+    {
+        // ANYPS5_TRACE_IO: every 2^k-th read with its size and result.
+        static const bool trace = std::getenv("ANYPS5_TRACE_IO") != nullptr;
+        static std::atomic<std::uint64_t> reads{0};
+        const auto count = ++reads;
+        if (trace && (count & (count - 1)) == 0) APS5_LOG_OUT("read #%llu fd=%d bytes=%zu -> %lld (offset now %lld)", static_cast<unsigned long long>(count), d, nbytes, static_cast<long long>(n), static_cast<long long>(NativeLseek(d, 0, SEEK_CUR)));
+    }
     if (n < 0) {
         throw std::runtime_error(std::string(__func__) + ": read failed, fd=" + std::to_string(d) + ", errno=" + std::to_string(errno));
     }
@@ -125,6 +144,7 @@ std::int64_t APS5_VABI sceKernelWrite(int d, const void* buf, std::size_t nbytes
     if (buf == nullptr) {
         throw std::invalid_argument(std::string(__func__) + ": buf is null");
     }
+    PrepareGuestBuffer(buf, nbytes, false);
     auto n = NativeWrite(d, buf, nbytes);
     if (n < 0) {
         throw std::runtime_error(std::string(__func__) + ": write failed, fd=" + std::to_string(d) + ", errno=" + std::to_string(errno));
@@ -137,6 +157,12 @@ int APS5_VABI sceKernelLseek(int d, std::int64_t offset, int whence) {
         throw std::invalid_argument(std::string(__func__) + ": invalid whence=" + std::to_string(whence));
     }
     std::int64_t result = NativeLseek(d, offset, whence);
+    {
+        static const bool trace = std::getenv("ANYPS5_TRACE_IO") != nullptr;
+        static std::atomic<std::uint64_t> seeks{0};
+        const auto count = ++seeks;
+        if (trace && (count & (count - 1)) == 0) APS5_LOG_OUT("lseek #%llu fd=%d offset=%lld whence=%d -> %lld", static_cast<unsigned long long>(count), d, static_cast<long long>(offset), whence, static_cast<long long>(result));
+    }
     if (result < 0) {
         throw std::runtime_error(std::string(__func__) + ": lseek failed, fd=" + std::to_string(d) + ", errno=" + std::to_string(errno));
     }
@@ -153,7 +179,7 @@ int APS5_VABI sceKernelStat(const char* path, FileStat* sb) {
     if (sb == nullptr) {
         throw std::invalid_argument(std::string(__func__) + ": sb is null");
     }
-    File::FillFileStat(ResolvePath_nid_no_patch(path), sb);
+    if (File::FillFileStat(ResolvePath_nid_no_patch(path), sb) != 0) return SCE_KERNEL_ERROR_ENOENT;
     return 0;
 }
 

@@ -7,6 +7,7 @@
 extern "C" {
 
 int APS5_VABI sceNpUniversalDataSystemCreateEventPropertyArray(NpUniversalDataSystemEventPropertyArray** new_array) {
+    Aps5TraceCall_nid_no_patch(__func__);
     if (new_array == nullptr) {
         APS5_INVALID_ARG_EX;
     }
@@ -15,6 +16,7 @@ int APS5_VABI sceNpUniversalDataSystemCreateEventPropertyArray(NpUniversalDataSy
 }
 
 int APS5_VABI sceNpUniversalDataSystemDestroyEventPropertyArray(NpUniversalDataSystemEventPropertyArray* array) {
+    Aps5TraceCall_nid_no_patch(__func__);
     delete array;
     return SCE_NP_UNIVERSAL_DATA_SYSTEM_OK;
 }

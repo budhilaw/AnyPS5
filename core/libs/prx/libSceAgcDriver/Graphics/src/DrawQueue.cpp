@@ -31,9 +31,22 @@ void DrawQueue::Enqueue(std::shared_ptr<ShaderResources> resources, std::shared_
     if (recording.entries.size() >= 8) Flush();
 }
 
+void DrawQueue::EnqueueCompletion(std::function<void()> action) {
+    if (recording.commands) {
+        recording.completions.push_back(std::move(action));
+        return;
+    }
+    if (!pending.empty()) {
+        pending.back().completions.push_back(std::move(action));
+        return;
+    }
+    action();
+}
+
 void DrawQueue::Flush() {
     if (!recording.commands) return;
-    Require(!recording.entries.empty() || recording.hasBarrier, "cannot submit an incomplete draw batch");
+    // A batch without draws still carries barriers and layout transitions (or a draw failed
+    // after it began): submitting it keeps the command buffer reusable and the queue in order.
     pending.push_back(std::move(recording));
     recording = Batch{};
     pending.back().commands->Submit();

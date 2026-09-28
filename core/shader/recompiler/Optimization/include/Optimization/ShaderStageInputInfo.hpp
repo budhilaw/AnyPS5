@@ -178,6 +178,7 @@ struct ShaderPixelInputInfo {
     bool psSampleShading = false;
     bool psEarlyZ = false;
     bool psExecuteOnNoop = false;
+    bool psDualSourceBlend = false;
     ShaderStageRuntime stage;
 
     bool HasPositionInput() const {

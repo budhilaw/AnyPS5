@@ -14,6 +14,7 @@ static char g_dir_name[32] = {};
 extern "C" {
 
 int APS5_VABI sceSaveDataDialogInitialize(void) {
+    Aps5TraceCall_nid_no_patch(__func__);
  if (g_status != SAVE_DATA_DIALOG_STATUS_NONE) {
   return SAVE_DATA_DIALOG_ERROR_ALREADY_INITIALIZED;
  }
@@ -25,14 +26,17 @@ int APS5_VABI sceSaveDataDialogInitialize(void) {
 }
 
 int APS5_VABI sceSaveDataDialogGetStatus(void) {
+    Aps5TraceCall_nid_no_patch(__func__);
  return g_status;
 }
 
 int APS5_VABI sceSaveDataDialogUpdateStatus(void) {
+    Aps5TraceCall_nid_no_patch(__func__);
  return g_status;
 }
 
 int APS5_VABI sceSaveDataDialogGetResult(void* result) {
+    Aps5TraceCall_nid_no_patch(__func__);
  if (result == nullptr) {
   return SAVE_DATA_DIALOG_ERROR_ARG_NULL;
  }
@@ -49,6 +53,7 @@ int APS5_VABI sceSaveDataDialogGetResult(void* result) {
 }
 
 int APS5_VABI sceSaveDataDialogOpen(const void* param) {
+    Aps5TraceCall_nid_no_patch(__func__);
  if (g_status != SAVE_DATA_DIALOG_STATUS_INITIALIZED && g_status != SAVE_DATA_DIALOG_STATUS_FINISHED) {
   return SAVE_DATA_DIALOG_ERROR_INVALID_STATE;
  }
@@ -74,16 +79,19 @@ int APS5_VABI sceSaveDataDialogOpen(const void* param) {
 }
 
 int APS5_VABI sceSaveDataDialogClose(const void* closeParam) {
+    Aps5TraceCall_nid_no_patch(__func__);
  (void)closeParam;
  g_status = SAVE_DATA_DIALOG_STATUS_FINISHED;
  return SAVE_DATA_DIALOG_OK;
 }
 
 int APS5_VABI sceSaveDataDialogIsReadyToDisplay(void) {
+    Aps5TraceCall_nid_no_patch(__func__);
  return 1;
 }
 
 int APS5_VABI sceSaveDataDialogTerminate(void) {
+    Aps5TraceCall_nid_no_patch(__func__);
  g_status = SAVE_DATA_DIALOG_STATUS_NONE;
  g_mode = 0;
  g_user_data = nullptr;
@@ -92,12 +100,14 @@ int APS5_VABI sceSaveDataDialogTerminate(void) {
 }
 
 int APS5_VABI sceSaveDataDialogProgressBarInc(int target, std::uint32_t delta) {
+    Aps5TraceCall_nid_no_patch(__func__);
  (void)target;
  (void)delta;
  return SAVE_DATA_DIALOG_OK;
 }
 
 int APS5_VABI sceSaveDataDialogProgressBarSetValue(int target, std::uint32_t rate) {
+    Aps5TraceCall_nid_no_patch(__func__);
  (void)target;
  (void)rate;
  return SAVE_DATA_DIALOG_OK;

@@ -39,7 +39,9 @@ int main() {
     *__error_nid_postfix() = 0;
     Require(std::isinf(strtof_nid_postfix("1e1000", nullptr)));
     Require(*__error_nid_postfix() == 34);
-    Require(strtold_nid_postfix("1.0000000000000000001!", &end) > 1.L && *end == '!');
+    // Only an x87 extended-precision long double can represent the extra digit; other hosts round to 1.
+    const auto extended = strtold_nid_postfix("1.0000000000000000001!", &end);
+    Require((std::numeric_limits<long double>::digits >= 64 ? extended > 1.L : extended == 1.L) && *end == '!');
     Require(fmodf_nid_postfix(5.5f, 2.f) == 1.5f);
     Require(fmodf_nid_postfix(-5.5f, 2.f) == -1.5f);
     Require(std::signbit(fmodf_nid_postfix(-4.f, 2.f)));

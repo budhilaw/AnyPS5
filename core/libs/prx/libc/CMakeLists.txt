@@ -18,7 +18,6 @@ target_sources(libc PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src/ApplicationHeap.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/ApplicationProcessParameters.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/JumpBuffer.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/src/Formatting.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/RuntimeSupport.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/LocaleSupport.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/Process.cpp
@@ -27,17 +26,37 @@ target_sources(libc PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src/Filesystem.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/Errors.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/CxxAbiSupport.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/src/exception/Exports.cpp
 )
+
+if(ANYPS5_GUEST_ABI)
+    target_sources(libc PRIVATE src/Formatting.cpp src/exception/Exports.cpp)
+    target_compile_definitions(libc PRIVATE ANYPS5_GUEST_ABI=1)
+else()
+    target_compile_definitions(libc PRIVATE ANYPS5_GUEST_ABI=0)
+endif()
 
 if(WIN32)
     target_sources(libc PRIVATE src/MemoryTrackingWindows.cpp src/MemoryBackingWindows.cpp)
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
     target_sources(libc PRIVATE src/MemoryTrackingLinux.cpp src/MemoryBackingLinux.cpp)
+elseif(APPLE)
+    target_sources(libc PRIVATE src/MemoryTrackingDarwin.cpp src/MemoryBackingDarwin.cpp src/specifics/darwin/GuestImage.cpp src/specifics/darwin/GuestMain.cpp)
+    target_link_libraries(libc PRIVATE "-framework CoreFoundation")
 else()
-    message(FATAL_ERROR "Guest GPU memory tracking requires Windows or x86-64 Linux")
+    message(FATAL_ERROR "Guest GPU memory tracking requires Windows, macOS or x86-64 Linux")
 endif()
 
 target_include_directories(libc PRIVATE
         ${LIBS_INCLUDE_DIR}
 )
+
+target_sources(libc PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/MissingImports.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/DinkumwareThreads.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/DinkumwareMath.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/StringsExtra.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/CxxAllocation.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/RuntimeExtra.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/Random.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/SafeStrings.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/HeapStats.cpp)

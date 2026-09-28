@@ -1,3 +1,4 @@
+#include "prx/libSceAgc/Command/include/Draw.hpp"
 #include "prx/libSceAgc/DcbDraw/include/IndexBuffer.hpp"
 
 #include "prx/libSceAgc/Command/include/Packet.hpp"
@@ -19,10 +20,8 @@ std::uint32_t APS5_VABI sceAgcDcbSetIndexBufferGetSize() {
 }
 
 uint32_t* APS5_VABI sceAgcDcbSetIndexCount(CommandBuffer* buf, uint32_t index_count) {
- (void)buf;
- (void)index_count;
- NotImplemented_nid_no_patch(__func__);
- return nullptr;
+    Agc::Command::Require(buf != nullptr, __func__, "null command buffer");
+    return Agc::Command::Emit(buf, 0x13u, {index_count}, __func__);
 }
 
 std::uint32_t APS5_VABI sceAgcDcbSetIndexCountGetSize() {

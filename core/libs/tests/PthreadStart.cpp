@@ -41,8 +41,10 @@ static void* APS5_VABI CheckThread(void* arg) {
     if (context.thread->threadId != std::this_thread::get_id() || !context.thread->nativeHandle)
         throw std::runtime_error("Native thread was not initialized");
 #else
-    if (context.thread->_thr.get_id() != std::this_thread::get_id()) throw std::runtime_error("Thread object was not initialized");
-    if (!context.thread->_thr.joinable()) throw std::runtime_error("Thread object is not joinable");
+    if (scePthreadSelf() != context.thread) throw std::runtime_error("Current guest thread handle is incorrect");
+    if (!pthread_equal(context.thread->native, pthread_self())) throw std::runtime_error("Thread object was not initialized");
+    if (!context.thread->joinable) throw std::runtime_error("Thread object is not joinable");
+    if (context.thread->stackSize == 0 || context.thread->stackAddress == nullptr) throw std::runtime_error("Thread stack was not recorded");
 #endif
     PthreadAttr attr = nullptr;
     if (scePthreadAttrInit(&attr) != 0) throw std::runtime_error("Attribute initialization failed");

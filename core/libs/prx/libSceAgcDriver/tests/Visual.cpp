@@ -1,5 +1,8 @@
 #define SDL_MAIN_HANDLED
 #include "prx/libSceAgcDriver/Execution/include/VulkanDevice.hpp"
+#include "prx/libSceAgcDriver/Execution/include/VulkanLibrary.hpp"
+#include "prx/libc/include/GuestMemoryBacking.hpp"
+#include "prx/libc/include/GuestMemoryTracking.hpp"
 #include <SDL.h>
 #include <SDL_vulkan.h>
 #include <array>
@@ -8,6 +11,7 @@
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <span>
 #include <string_view>
 #include <vector>
 
@@ -16,7 +20,19 @@ namespace {
 using AgcDriver::Graphics::Require;
 constexpr std::uint32_t Width = 640;
 constexpr std::uint32_t Height = 480;
-alignas(256) std::array<std::byte, Width * Height * 4> Pixels{};
+// The driver reads and writes back render memory through the shared guest backing, so the
+// pixel buffer is mapped like guest memory instead of living in a static array.
+std::span<std::byte> Pixels;
+
+std::span<std::byte> MapPixels() {
+    constexpr int GuestReadWrite = 1 | 2;
+    const auto pageSize = GuestMemoryTracking::GuestMemoryTrackingPageSize_nid_postfix();
+    const auto bytes = (static_cast<std::size_t>(Width) * Height * 4 + pageSize - 1) / pageSize * pageSize;
+    const auto alignment = std::max<std::size_t>(pageSize, 65536);
+    auto* memory = GuestMemoryBacking::GuestMemoryBackingMap_nid_postfix(nullptr, bytes, alignment, GuestReadWrite);
+    Require(memory != nullptr, "cannot map the guest pixel buffer");
+    return {static_cast<std::byte*>(memory), static_cast<std::size_t>(Width) * Height * 4};
+}
 
 ShaderRecompiler::RecompileResult LoadShader(const std::filesystem::path& path) {
     std::ifstream file(path, std::ios::binary | std::ios::ate);
@@ -30,7 +46,16 @@ ShaderRecompiler::RecompileResult LoadShader(const std::filesystem::path& path) 
     return result;
 }
 
-void Run(SDL_Window* window, const std::filesystem::path& directory, bool verifyOnly) {
+// Writes the verified GPU readback as a binary PPM so a headless run leaves visual evidence.
+void DumpPixels(const std::filesystem::path& path) {
+    std::ofstream file(path, std::ios::binary);
+    Require(file.is_open(), "cannot write readback image: " + path.string());
+    file << "P6\n" << Width << ' ' << Height << "\n255\n";
+    for (std::size_t i = 0; i < Pixels.size(); i += 4) file.write(reinterpret_cast<const char*>(&Pixels[i]), 3);
+    Require(static_cast<bool>(file), "cannot write readback image: " + path.string());
+}
+
+void Run(SDL_Window* window, const std::filesystem::path& directory, bool verifyOnly, const std::filesystem::path& dumpPath) {
     unsigned count = 0;
     Require(SDL_Vulkan_GetInstanceExtensions(window, &count, nullptr) == SDL_TRUE, SDL_GetError());
     std::vector<const char*> extensions(count);
@@ -47,6 +72,7 @@ void Run(SDL_Window* window, const std::filesystem::path& directory, bool verify
         *height = drawableHeight > 0 ? static_cast<std::uint32_t>(drawableHeight) : 0;
     }, Width, Height};
     AgcDriver::VulkanDevice device(&presentation);
+    Pixels = MapPixels();
     auto vertex = LoadShader(directory / "Triangle.vert.spv");
     auto fragment = LoadShader(directory / "Triangle.frag.spv");
     const std::array<AgcDriver::Graphics::CompiledShader, 2> shaders{{
@@ -85,6 +111,7 @@ void Run(SDL_Window* window, const std::filesystem::path& directory, bool verify
     const auto center = (Height / 2 * Width + Width / 2) * 4;
     Require(std::to_integer<unsigned>(Pixels[center]) > 30 && std::to_integer<unsigned>(Pixels[center + 1]) > 30 && std::to_integer<unsigned>(Pixels[center + 2]) > 30, "GPU readback: triangle center was not rendered");
     Require(Pixels[0] == std::byte{16} && Pixels[1] == std::byte{24} && Pixels[2] == std::byte{40}, "GPU readback: background changed");
+    if (!dumpPath.empty()) DumpPixels(dumpPath);
     device.PresentPixels(Width, Height, Pixels);
     std::cout << "SPIR-V triangle rendered, GPU readback verified, frame queued for presentation. Close the window or press Escape.\n" << std::flush;
     if (!verifyOnly) {
@@ -104,15 +131,18 @@ void Run(SDL_Window* window, const std::filesystem::path& directory, bool verify
 
 int main(int argc, char** argv) {
     try {
-        Require(argc == 1 || (argc == 2 && std::string_view(argv[1]) == "--verify"), "usage: agc_driver_visual_test [--verify]");
+        const bool verifyOnly = argc >= 2 && std::string_view(argv[1]) == "--verify";
+        const bool dump = argc == 4 && std::string_view(argv[2]) == "--dump";
+        Require(argc == 1 || (verifyOnly && (argc == 2 || dump)), "usage: agc_driver_visual_test [--verify [--dump <readback.ppm>]]");
         SDL_SetMainReady();
         Require(SDL_Init(SDL_INIT_VIDEO) == 0, SDL_GetError());
+        AgcDriver::ResolveVulkanLibrary();
         {
             const auto window = std::unique_ptr<SDL_Window, decltype(&SDL_DestroyWindow)>(SDL_CreateWindow("AnyPS5 AGC - SPIR-V triangle test", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, Width, Height, SDL_WINDOW_VULKAN | SDL_WINDOW_SHOWN), SDL_DestroyWindow);
             Require(window != nullptr, SDL_GetError());
             const auto base = std::unique_ptr<char, decltype(&SDL_free)>(SDL_GetBasePath(), SDL_free);
             Require(base != nullptr, SDL_GetError());
-            Run(window.get(), std::filesystem::path(base.get()), argc == 2);
+            Run(window.get(), std::filesystem::path(base.get()), verifyOnly, dump ? std::filesystem::path(argv[3]) : std::filesystem::path{});
         }
         SDL_Quit();
         return 0;

@@ -6,9 +6,8 @@
 #include <unistd.h>
 #endif
 
-namespace { FileStream input{stdin}; }
 extern "C" {
-FileStream* __stdinp_nid_postfix = &input;
+FileStream* __stdinp_nid_postfix = &_Stdin_nid_postfix;
 FileStream* __stdoutp_nid_postfix = &_Stdout_nid_postfix;
 FileStream* __stderrp_nid_postfix = &_Stderr_nid_postfix;
 int __isthreaded_nid_postfix = 1;

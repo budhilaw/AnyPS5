@@ -1,6 +1,14 @@
 #include "prx/libc/include/exceptions/Runtime.hpp"
 #include <cstdio>
+#if !defined(_WIN32)
+#include <execinfo.h>
+#endif
+#include <cstring>
+#include <exception>
+#include <typeinfo>
 #include <limits>
+
+extern "C" void* __dynamic_cast_nid_postfix(const void* source, const __cxxabiv1::__class_type_info* sourceType, const __cxxabiv1::__class_type_info* destinationType, std::ptrdiff_t);
 
 namespace LibcException {
 
@@ -9,7 +17,11 @@ namespace LibcException {
         Header* primary = Primary(globals.caught);
         const char* typeName = primary->type ? primary->type->name() : nullptr;
         const char* what = nullptr;
-        if (primary->adjusted) {
+        // what() exists only on std::exception and its descendants; other class types have no
+        // such vtable slot and non-class types have no vtable at all.
+        const bool standard = primary->type && primary->adjusted && std::strncmp(Kind(primary->type), "N10__cxxabiv1", 13) == 0 && std::strstr(Kind(primary->type), "class_type_info") != nullptr
+            && __dynamic_cast_nid_postfix(primary->adjusted, static_cast<const __cxxabiv1::__class_type_info*>(primary->type), static_cast<const __cxxabiv1::__class_type_info*>(&typeid(std::exception)), -1) != nullptr;
+        if (standard) {
             struct VtableLayout { std::ptrdiff_t offset; const void* type; void (*destroy)(void*); void (*del)(void*); const char* (*whatFn)(const void*); };
             const void* vtable = *static_cast<const void* const*>(primary->adjusted);
             auto* layout = reinterpret_cast<const VtableLayout*>(static_cast<const char*>(vtable) - offsetof(VtableLayout, destroy));
@@ -32,6 +44,11 @@ namespace LibcException {
     } else {
         std::fprintf(stderr, "terminate called without an active exception\n");
     }
+#if !defined(_WIN32)
+    void* frames[32];
+    const auto count = ::backtrace(frames, 32);
+    ::backtrace_symbols_fd(frames, count, 2);
+#endif
     std::abort();
 }
 

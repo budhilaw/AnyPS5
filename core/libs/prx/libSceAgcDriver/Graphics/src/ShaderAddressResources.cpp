@@ -33,6 +33,10 @@ VkDescriptorBufferInfo ShaderResources::descriptor(const Allocation& allocation)
         Require(bda != nullptr, "BDA descriptors have no memory owner");
         return allocation.role == ShaderRecompiler::DescriptorRole::BdaPagetable ? bda->Table() : bda->Fault();
     }
+    if (allocation.role == ShaderRecompiler::DescriptorRole::Gds) {
+        Require(context.gds != nullptr, "GDS descriptor has no buffer owner");
+        return {context.gds->Handle(), 0, allocation.size};
+    }
     Require(allocation.buffer != nullptr, "shader data has no buffer owner");
     return {allocation.buffer->Handle(), 0, allocation.size};
 }

@@ -2,27 +2,29 @@
 #define CORE_LIBS_PRX_LIBSCEAGCDRIVER_GRAPHICS_INCLUDE_PIPELINECACHE_HPP
 
 #include "prx/libSceAgcDriver/Graphics/include/Context.hpp"
+#include <mutex>
+#include <string>
 
 namespace AgcDriver::Graphics {
 
+// The device pipeline cache, persisted next to the executable (or at ANYPS5_PIPELINE_CACHE) so
+// the host's shader compiles survive a restart. MoltenVK keeps its SPIR-V to MSL conversions in
+// it; the Metal compiler keeps its own cache of the resulting source.
 class PipelineCache {
 public:
-    explicit PipelineCache(const Context& context) : context(context) {
-        const VkPipelineCacheCreateInfo info{VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
-        Check(context.Function<PFN_vkCreatePipelineCache>("vkCreatePipelineCache")(context.device, &info, nullptr, &cache), "vkCreatePipelineCache");
-    }
-
-    ~PipelineCache() {
-        context.Function<PFN_vkDestroyPipelineCache>("vkDestroyPipelineCache")(context.device, cache, nullptr);
-    }
-
+    explicit PipelineCache(const Context& context);
+    ~PipelineCache();
     PipelineCache(const PipelineCache&) = delete;
     PipelineCache& operator=(const PipelineCache&) = delete;
     VkPipelineCache Handle() const { return cache; }
+    // Writes the cache data to its file (no-op when persistence is disabled).
+    void Save();
 
 private:
     Context context;
     VkPipelineCache cache = VK_NULL_HANDLE;
+    std::string path;
+    std::mutex saving;
 };
 
 }

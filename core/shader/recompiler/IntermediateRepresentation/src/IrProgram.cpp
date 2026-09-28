@@ -806,12 +806,12 @@ std::uint32_t ImageBindingIndex(DescriptorBindingKind kind) {
 }
 
 DescriptorBindingKind DescriptorBindingForImage(const ImageResource& image) {
-    constexpr std::uint32_t sampledFloatBinding = 1u;
-    constexpr std::uint32_t sampledUintBinding = 8u;
-    constexpr std::uint32_t sampledSintBinding = 15u;
+    constexpr std::uint32_t sampledFloatBinding = FirstImageBinding;
+    constexpr std::uint32_t sampledUintBinding = sampledFloatBinding + SampledImageDimensionSlots;
+    constexpr std::uint32_t sampledSintBinding = sampledUintBinding + SampledImageDimensionSlots;
     constexpr std::uint32_t storageFloatBinding = FirstStorageImageBinding;
-    constexpr std::uint32_t storageUintBinding = storageFloatBinding + 5u;
-    constexpr std::uint32_t atomicUintBinding = storageUintBinding + 5u;
+    constexpr std::uint32_t storageUintBinding = storageFloatBinding + StorageImageDimensionSlots;
+    constexpr std::uint32_t atomicUintBinding = storageUintBinding + StorageImageDimensionSlots;
 
     std::uint32_t base = 0u;
     bool sampled = false;
@@ -872,7 +872,8 @@ DescriptorBindingKind DescriptorBindingForImage(const ImageResource& image) {
             dimension = 2u;
             break;
         case RdnaImageDimension::Dim2DArray:
-            dimension = 3u;
+            // Cube maps are sampled through 2D array instructions; they need their own image type.
+            dimension = sampled && image.cube ? 7u : 3u;
             break;
         case RdnaImageDimension::Dim2DMsaa:
             if (!sampled) {

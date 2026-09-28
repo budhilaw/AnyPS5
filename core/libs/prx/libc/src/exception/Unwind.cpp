@@ -1,3 +1,6 @@
+#include <cstdio>
+#include <cstring>
+#include <cstdlib>
 #include "prx/libc/include/exceptions/Unwind.hpp"
 #include "prx/libc/include/specifics/linux/ElfTypes.hpp"
 #include "prx/libc/src/specifics/x86_64/RegisterContext.cpp"
@@ -5,8 +8,15 @@
 #ifdef _WIN32
 #include <windows.h>
 #endif
+#ifdef __APPLE__
+#include "prx/libc/include/specifics/darwin/GuestImage.hpp"
+#include <dlfcn.h>
+#include <mach-o/dyld.h>
+#include <mach-o/getsect.h>
+#include <mach-o/loader.h>
+#endif
 
-#if defined(__linux__) || defined(_WIN32)
+#if defined(__linux__) || defined(_WIN32) || defined(__APPLE__)
 
 #ifdef _WIN32
 extern "C" _Unwind_Reason_Code __gxx_personality_v0(int, _Unwind_Action, std::uint64_t, _Unwind_Exception*, _Unwind_Context*);
@@ -25,6 +35,12 @@ bool OwnPersonality(Word personality) {
     if (personality == reinterpret_cast<Word>(__gxx_personality_v0_nid_postfix)) return true;
 #ifdef _WIN32
     if (personality == reinterpret_cast<Word>(__gxx_personality_v0)) return true;
+#endif
+#ifdef __APPLE__
+    // Host frames (libc++abi) use the same Itanium LSDA layout, so guest exceptions can run their
+    // cleanups and handlers through this personality as well.
+    static const auto host = reinterpret_cast<Word>(dlsym(RTLD_DEFAULT, "__gxx_personality_v0"));
+    if (host != 0 && personality == host) return true;
 #endif
     return false;
 }
@@ -64,6 +80,58 @@ int FindFrame(dl_phdr_info* info, std::size_t, void* argument) {
     return 1;
 }
 
+#endif
+
+#ifdef __APPLE__
+// Binary search of a PT_GNU_EH_FRAME-style header (the relinker keeps the guest's table).
+bool LookupHeader(const Byte* header, Lookup& query) {
+    if (header[0] != 1 || header[3] == 255) return false;
+    const Byte* p = header + 4;
+    Encoded(p, header[1], Word(header));
+    const Word count = Encoded(p, header[2]);
+    const auto width = EncodingSize(header[3]);
+    const Byte* table = p;
+    Word lo = 0, hi = count;
+    while (lo < hi) {
+        const Word mid = lo + (hi - lo) / 2;
+        p = table + mid * width * 2;
+        if (Encoded(p, header[3], Word(header)) <= query.pc) lo = mid + 1;
+        else hi = mid;
+    }
+    if (!lo) return false;
+    p = table + (lo - 1) * width * 2 + width;
+    query.fde = reinterpret_cast<const Byte*>(Encoded(p, header[3], Word(header)));
+    return true;
+}
+
+// Finds the loaded image containing query.pc and its text/data bases; returns its header.
+const mach_header_64* FindImage(Lookup& query, std::uint32_t& index) {
+    const auto count = _dyld_image_count();
+    for (std::uint32_t image = 0; image < count; ++image) {
+        const auto* header = reinterpret_cast<const mach_header_64*>(_dyld_get_image_header(image));
+        if (header == nullptr || header->magic != MH_MAGIC_64) continue;
+        const auto slide = static_cast<Word>(_dyld_get_image_vmaddr_slide(image));
+        bool contains = false;
+        Word text = 0, data = 0;
+        const auto* command = reinterpret_cast<const load_command*>(header + 1);
+        for (std::uint32_t i = 0; i < header->ncmds; ++i) {
+            if (command->cmd == LC_SEGMENT_64) {
+                const auto* segment = reinterpret_cast<const segment_command_64*>(command);
+                const Word start = static_cast<Word>(segment->vmaddr) + slide;
+                if (segment->vmsize != 0 && query.pc >= start && query.pc - start < segment->vmsize) contains = true;
+                if ((segment->initprot & VM_PROT_EXECUTE) != 0 && text == 0) text = start;
+                if ((segment->initprot & VM_PROT_WRITE) != 0 && data == 0) data = start;
+            }
+            command = reinterpret_cast<const load_command*>(reinterpret_cast<const Byte*>(command) + command->cmdsize);
+        }
+        if (!contains) continue;
+        query.text = text;
+        query.data = data;
+        index = image;
+        return header;
+    }
+    return nullptr;
+}
 #endif
 
 struct Frame {
@@ -143,6 +211,45 @@ bool DecodeFrame(_Unwind_Context& context, Frame& frame) {
 #ifdef __linux__
     dl_iterate_phdr(FindFrame, &query);
     return DecodeCandidate(context, frame, query);
+#elif defined(__APPLE__)
+    std::uint32_t image = 0;
+    const auto* header = FindImage(query, image);
+    if (header == nullptr) return false;
+    if (image == 0) {
+        // The relinked guest executable: its PT_GNU_EH_FRAME table is published as metadata.
+        const auto guest = GuestImage::FindExceptionHeader();
+        if (guest) return LookupHeader(guest->header, query) && DecodeCandidate(context, frame, query);
+    } else {
+        // A relinked guest module (dylib) publishes the same table; the slot is not rebased.
+        unsigned long metadataSize = 0;
+        const Byte* metadata = getsectiondata(header, "__ANYPS5", "__ehframehdr", &metadataSize);
+        if (metadata != nullptr) {
+            if (metadataSize != sizeof(std::uint64_t)) return false;
+            std::uint64_t value = 0;
+            std::memcpy(&value, metadata, sizeof(value));
+            const auto* table = reinterpret_cast<const Byte*>(static_cast<std::uintptr_t>(value) + static_cast<std::uintptr_t>(_dyld_get_image_vmaddr_slide(image)));
+            return LookupHeader(table, query) && DecodeCandidate(context, frame, query);
+        }
+    }
+    // Host libraries: linear scan of the DWARF __eh_frame section that Apple Clang emits.
+    unsigned long size = 0;
+    const Byte* p = getsectiondata(header, "__TEXT", "__eh_frame", &size);
+    if (p == nullptr) return false;
+    const Byte* end = p + size;
+    while (end - p >= 8) {
+        const Byte* record = p;
+        const auto length = Read<std::uint32_t>(p);
+        if (!length) continue;
+        if (length == 0xffffffff || length < 4 || Word(end - p) < length) return false;
+        const Byte* next = p + length;
+        if (Read<std::uint32_t>(p)) {
+            query.fde = record;
+            frame = {};
+            if (DecodeCandidate(context, frame, query)) return true;
+        }
+        p = next;
+    }
+    return false;
 #else
     MEMORY_BASIC_INFORMATION memory{};
     if (!VirtualQuery(reinterpret_cast<void*>(query.pc), &memory, sizeof(memory)) || memory.Type != MEM_IMAGE)
@@ -374,10 +481,44 @@ bool Step(_Unwind_Context& context) {
     return true;
 }
 
+// ANYPS5_TRACE_UNWIND=1 prints every frame the unwinder visits and every context it installs.
+bool TraceUnwind() {
+    static const bool enabled = std::getenv("ANYPS5_TRACE_UNWIND") != nullptr;
+    return enabled;
+}
+
+void TraceFrame(const char* phase, const _Unwind_Context& context) {
+    if (!TraceUnwind()) return;
+    const auto pc = context.registers[16];
+#if !defined(_WIN32)
+    Dl_info owner{};
+    if (dladdr(reinterpret_cast<const void*>(pc), &owner) != 0 && owner.dli_fname != nullptr) {
+        const char* name = std::strrchr(owner.dli_fname, '/');
+        std::fprintf(stderr, "[unwind] %s pc 0x%llx = %s + 0x%llx sp 0x%llx cfa 0x%llx\n", phase, static_cast<unsigned long long>(pc), name ? name + 1 : owner.dli_fname, static_cast<unsigned long long>(pc - reinterpret_cast<std::uintptr_t>(owner.dli_fbase)), static_cast<unsigned long long>(context.registers[7]), static_cast<unsigned long long>(context.cfa));
+        return;
+    }
+#endif
+    std::fprintf(stderr, "[unwind] %s pc 0x%llx sp 0x%llx cfa 0x%llx\n", phase, static_cast<unsigned long long>(pc), static_cast<unsigned long long>(context.registers[7]), static_cast<unsigned long long>(context.cfa));
+}
+
+void ReportPhaseTwoFailure(const char* reason, const _Unwind_Context& context) {
+    const auto pc = context.registers[16];
+#if !defined(_WIN32)
+    Dl_info owner{};
+    if (dladdr(reinterpret_cast<const void*>(pc), &owner) != 0 && owner.dli_fname != nullptr) {
+        const char* name = std::strrchr(owner.dli_fname, '/');
+        std::fprintf(stderr, "guest exception: %s in phase 2 at 0x%llx = %s + 0x%llx (cfa 0x%llx)\n", reason, static_cast<unsigned long long>(pc), name ? name + 1 : owner.dli_fname, static_cast<unsigned long long>(pc - reinterpret_cast<std::uintptr_t>(owner.dli_fbase)), static_cast<unsigned long long>(context.cfa));
+        return;
+    }
+#endif
+    std::fprintf(stderr, "guest exception: %s in phase 2 at 0x%llx (cfa 0x%llx)\n", reason, static_cast<unsigned long long>(pc), static_cast<unsigned long long>(context.cfa));
+}
+
 _Unwind_Reason_Code PhaseTwo(_Unwind_Context context, _Unwind_Exception* exception) {
     for (unsigned depth = 0; depth < 65536; ++depth) {
         Frame frame; Rules rules;
         if (!GetRules(context, frame, rules)) {
+            ReportPhaseTwoFailure("no unwind information", context);
             if (exception->private_1) {
                 auto stop = reinterpret_cast<_Unwind_Stop_Fn>(exception->private_1);
                 return stop(1, _Unwind_Action(_UA_FORCE_UNWIND | _UA_CLEANUP_PHASE | _UA_END_OF_STACK), exception->exception_class, exception, &context, reinterpret_cast<void*>(exception->private_2));
@@ -393,13 +534,18 @@ _Unwind_Reason_Code PhaseTwo(_Unwind_Context context, _Unwind_Exception* excepti
                 if (result != _URC_NO_REASON) return result;
             } else if (context.cfa == exception->private_2) actions = _Unwind_Action(actions | _UA_HANDLER_FRAME);
             if (frame.personality) {
-                if (!OwnPersonality(frame.personality)) return _URC_FATAL_PHASE2_ERROR;
+                if (!OwnPersonality(frame.personality)) { ReportPhaseTwoFailure("foreign personality routine", context); return _URC_FATAL_PHASE2_ERROR; }
+                TraceFrame("phase2", context);
                 auto result = __gxx_personality_v0_nid_postfix(1, actions, exception->exception_class, exception, &context);
-                if (result == _URC_INSTALL_CONTEXT) LibcRestoreRegisters(context.registers);
-                if (result != _URC_CONTINUE_UNWIND) return _URC_FATAL_PHASE2_ERROR;
+                if (result == _URC_INSTALL_CONTEXT) {
+                    TraceFrame("install", context);
+                    LibcRestoreRegisters(context.registers);
+                }
+                if (result != _URC_CONTINUE_UNWIND) { ReportPhaseTwoFailure("personality routine failed", context); return _URC_FATAL_PHASE2_ERROR; }
             }
         }
         if (!Step(context)) {
+            ReportPhaseTwoFailure("cannot step past the frame", context);
             if (exception->private_1) {
                 auto stop = reinterpret_cast<_Unwind_Stop_Fn>(exception->private_1);
                 return stop(1, _Unwind_Action(_UA_FORCE_UNWIND | _UA_CLEANUP_PHASE | _UA_END_OF_STACK), exception->exception_class, exception, &context, reinterpret_cast<void*>(exception->private_2));
@@ -412,33 +558,57 @@ _Unwind_Reason_Code PhaseTwo(_Unwind_Context context, _Unwind_Exception* excepti
 }
 
 extern "C" {
+namespace {
+// A raise that finds no handler ends in terminate: the frames walked are worth naming.
+void ReportSearchFailure(const char* reason, const std::uint64_t* frames, unsigned count) {
+    std::fprintf(stderr, "guest exception: %s after %u frame(s)\n", reason, count);
+    for (unsigned index = 0; index < count; ++index) {
+#if !defined(_WIN32)
+        Dl_info owner{};
+        if (dladdr(reinterpret_cast<const void*>(frames[index]), &owner) != 0 && owner.dli_fname != nullptr) {
+            const char* name = std::strrchr(owner.dli_fname, '/');
+            std::fprintf(stderr, "  #%u 0x%llx = %s + 0x%llx\n", index, static_cast<unsigned long long>(frames[index]), name ? name + 1 : owner.dli_fname, static_cast<unsigned long long>(frames[index] - reinterpret_cast<std::uintptr_t>(owner.dli_fbase)));
+            continue;
+        }
+#endif
+        std::fprintf(stderr, "  #%u 0x%llx\n", index, static_cast<unsigned long long>(frames[index]));
+    }
+}
+}
+
 _Unwind_Reason_Code APS5_VABI _Unwind_RaiseException_nid_postfix(_Unwind_Exception* exception) {
     _Unwind_Context start;
     LibcCaptureRegisters(start.registers);
-    if (!LibcUnwind::Step(start)) return _URC_FATAL_PHASE1_ERROR;
+    if (!LibcUnwind::Step(start)) { LibcUnwind::ReportPhaseTwoFailure("cannot step out of the raise routine", start); return _URC_FATAL_PHASE1_ERROR; }
     auto context = start;
     exception->private_1 = 0;
+    std::uint64_t visited[64];
+    unsigned visitedCount = 0;
+    const auto fail = [&](const char* reason, _Unwind_Reason_Code code) { ReportSearchFailure(reason, visited, visitedCount); return code; };
     for (unsigned depth = 0; depth < 65536; ++depth) {
+        if (visitedCount < 64) visited[visitedCount++] = context.registers[16];
         LibcUnwind::Frame frame; LibcUnwind::Rules rules;
-        if (!LibcUnwind::GetRules(context, frame, rules)) return _URC_END_OF_STACK;
+        if (!LibcUnwind::GetRules(context, frame, rules)) return fail("no unwind information for the frame", _URC_END_OF_STACK);
+        LibcUnwind::TraceFrame("phase1", context);
         if (frame.personality) {
-            if (!LibcUnwind::OwnPersonality(frame.personality)) return _URC_FATAL_PHASE1_ERROR;
+            if (!LibcUnwind::OwnPersonality(frame.personality)) return fail("foreign personality routine", _URC_FATAL_PHASE1_ERROR);
             auto result = __gxx_personality_v0_nid_postfix(1, _UA_SEARCH_PHASE, exception->exception_class, exception, &context);
             if (result == _URC_HANDLER_FOUND) {
                 exception->private_2 = context.cfa;
                 return LibcUnwind::PhaseTwo(start, exception);
             }
-            if (result != _URC_CONTINUE_UNWIND) return _URC_FATAL_PHASE1_ERROR;
+            if (result != _URC_CONTINUE_UNWIND) return fail("personality routine failed", _URC_FATAL_PHASE1_ERROR);
         }
-        if (!LibcUnwind::Step(context)) return _URC_END_OF_STACK;
+        if (!LibcUnwind::Step(context)) return fail("cannot step past the frame", _URC_END_OF_STACK);
     }
-    return _URC_FATAL_PHASE1_ERROR;
+    return fail("too many frames", _URC_FATAL_PHASE1_ERROR);
 }
 
 [[noreturn]] void _Unwind_Resume_nid_postfix(_Unwind_Exception* exception) {
     _Unwind_Context context;
     LibcCaptureRegisters(context.registers);
     if (!LibcUnwind::Step(context)) std::abort();
+    LibcUnwind::TraceFrame("resume", context);
     LibcUnwind::PhaseTwo(context, exception);
     std::abort();
 }

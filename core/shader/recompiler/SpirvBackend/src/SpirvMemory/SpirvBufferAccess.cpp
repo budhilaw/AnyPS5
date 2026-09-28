@@ -169,6 +169,15 @@ std::uint32_t EmitMemoryElementPointer(SpirvEmitterState& state, const MemoryRes
     if (access.kind == ResourceKind::Lds || access.kind == ResourceKind::Scratch) {
         const auto pointer = state.module.AllocateId();
         const std::uint32_t storageClass = access.kind == ResourceKind::Scratch ? spv::StorageClassFunction : ShaderWorkgroupInput(state) != nullptr ? spv::StorageClassWorkgroup : spv::StorageClassFunction;
+        if (storageClass == spv::StorageClassWorkgroup) {
+            // Guest waves run in lockstep, so titles exchange LDS data between the lanes of one
+            // wave without barriers (a wave64 fits one host subgroup, or two lanes per invocation).
+            // The host compiler may reorder unsynchronized shared memory accesses, so every LDS
+            // access is fenced at subgroup scope (a SIMD-group barrier on Metal): no access moves
+            // across another and the lockstep order is what the guest expects.
+            const std::uint32_t semantics = spv::MemorySemanticsAcquireReleaseMask | spv::MemorySemanticsWorkgroupMemoryMask;
+            state.module.AddFunction(spv::OpMemoryBarrier, ConstantU32(state, spv::ScopeSubgroup), ConstantU32(state, semantics));
+        }
         state.module.AddFunction(spv::OpAccessChain, TypeU32ElementPointer(state, storageClass), pointer, access.objectPointer, index);
         return pointer;
     }

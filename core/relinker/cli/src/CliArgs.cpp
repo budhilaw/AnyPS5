@@ -33,6 +33,10 @@ Args ParseArgs(int argc, char* argv[]) {
             args.lazyBinding = true;
         } else if (arg == "--autorun") {
             args.autorun = true;
+        } else if (arg == "--macos") {
+            args.toMacOS = true;
+        } else if (arg == "--unself") {
+            args.unselfOnly = true;
         } else if (arg == "--windows-diagnostics") {
             args.windowsDiagnostics = true;
         } else if (arg.rfind("--", 0) == 0 || arg == "unused-filter") {
@@ -48,10 +52,13 @@ Args ParseArgs(int argc, char* argv[]) {
 
     if (args.windowsDiagnostics && !args.toWindows)
         throw std::runtime_error("--windows-diagnostics requires --windows");
+    if (args.toWindows && args.toMacOS)
+        throw std::runtime_error("--windows and --macos are mutually exclusive");
 
     if (args.inputPath.empty() || args.outputPath.empty())
         throw std::runtime_error(
-            "Usage: relinker [--windows] [--windows-diagnostics] [--skip-syscall-check] [--to-intel] [unused-filter=0|1|2] [--registry] [--rpath <path>] [--lazy-binding] [--autorun] <input.elf> <output.elf>\n"
+            "Usage: relinker [--unself] [--windows|--macos] [--windows-diagnostics] [--skip-syscall-check] [--to-intel] [unused-filter=0|1|2] [--registry] [--rpath <path>] [--lazy-binding] [--autorun] <input.elf|input.self> <output.elf>\n"
+            "       relinker --unself <input.self> <output.elf>   (only unwrap a fake-signed SELF)\n"
             "Example: relinker input.elf output.elf"
         );
 

@@ -1,4 +1,5 @@
 #include "prx/libSceAgcDriver/Graphics/include/Draw.hpp"
+#include "prx/libSceAgcDriver/Execution/include/GpuJournal.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ColorTargetTransfer.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/GpuColorTransfer.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/VertexInput.hpp"
@@ -7,8 +8,16 @@
 #include "prx/libc/include/General.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/RenderCache.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/DrawQueue.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/TextureCache.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/GraphicsPipelineCache.hpp"
+#include <span>
+#include <array>
+#include <chrono>
 #include <cstring>
+#include <string>
+#include <cstdio>
+#include <cstdlib>
+#include <mutex>
 #include <limits>
 #include <memory>
 
@@ -19,6 +28,8 @@ struct DrawStorage {
     std::unique_ptr<Buffer> indices;
     std::vector<std::unique_ptr<Buffer>> vertices;
     std::shared_ptr<ResidentColor> color;
+    std::vector<std::shared_ptr<ResidentColor>> extraColors;
+    std::shared_ptr<DepthImage> depth;
     std::shared_ptr<Pipeline> pipeline;
 };
 
@@ -26,10 +37,27 @@ struct DrawStorage {
 
 void Draw(const Context& context, const State& state, const Pm4::DrawParameters& draw, std::span<const CompiledShader> shaders, std::span<const GuestMemorySnapshot> snapshots) {
     PerformanceTimer timing("Graphics.Draw");
+    // ANYPS5_DEBUG_SKIP_DRAW="count:blend,count:blend": diagnostics, skips draws with that index count and blend enable.
+    {
+        static const char* skipList = std::getenv("ANYPS5_DEBUG_SKIP_DRAW");
+        if (skipList != nullptr) {
+            std::string list = skipList;
+            std::size_t at = 0;
+            while (at < list.size()) {
+                const auto comma = list.find(',', at);
+                const auto item = list.substr(at, comma == std::string::npos ? std::string::npos : comma - at);
+                const auto colon = item.find(':');
+                if (colon != std::string::npos && std::strtoul(item.c_str(), nullptr, 10) == draw.indexCount && std::strtoul(item.c_str() + colon + 1, nullptr, 10) == (state.blend.blendEnable ? 1u : 0u)) return;
+                if (comma == std::string::npos) break;
+                at = comma + 1;
+            }
+        }
+    }
     Require(draw.indexed ? draw.flags == 0 : (draw.flags & ~0x20u) == 0, "draw modifiers are unsupported");
     if (draw.indexed) {
         Require(draw.indexSize == 2 || draw.indexSize == 4, "only uint16 and uint32 index buffers are supported");
-        Require(draw.firstVertex == 0 && draw.firstInstance == 0, "indexed draw offsets are unsupported");
+        // firstVertex is the base vertex (a signed offset added to every index), firstInstance the base instance.
+        Require(!state.stages.mesh || (draw.firstVertex == 0 && draw.firstInstance == 0), "indexed mesh draw offsets are unsupported");
     } else {
         Require(draw.indexAddress == 0 && draw.indexSize == 0, "auto draw must not reference an index buffer");
         if (draw.indexCount == 0 || draw.instanceCount == 0) return;
@@ -42,6 +70,20 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
     if (draw.indexed) GuestMemory::CheckRange(reinterpret_cast<const void*>(draw.indexAddress), static_cast<std::size_t>(indexBytes), draw.indexSize);
     Require(!draw.indexed || !state.hasColorTarget || draw.indexAddress + indexBytes <= state.color.address || state.color.address + state.color.bytes <= draw.indexAddress, "index buffer aliases the render target");
     if (state.rectList) Require(draw.indexCount % 3 == 0, "incomplete rect-list primitive");
+    {
+        // The hardware clips against a guard band; Vulkan rejects viewports outside the device
+        // bounds. A viewport that cannot cover the render extent produces no fragments: skip it.
+        const auto& viewport = state.viewport;
+        const float left = std::min(viewport.x, viewport.x + viewport.width), right = std::max(viewport.x, viewport.x + viewport.width);
+        const float top = std::min(viewport.y, viewport.y + viewport.height), bottom = std::max(viewport.y, viewport.y + viewport.height);
+        const bool outsideTarget = right <= 0.0f || bottom <= 0.0f || left >= static_cast<float>(state.renderExtent.width) || top >= static_cast<float>(state.renderExtent.height);
+        const bool outsideDevice = left < context.limits.viewportBoundsRange[0] || right > context.limits.viewportBoundsRange[1] || top < context.limits.viewportBoundsRange[0] || bottom > context.limits.viewportBoundsRange[1];
+        if (outsideTarget || outsideDevice) {
+            static std::once_flag once;
+            std::call_once(once, [&] { APS5_LOG_OUT("skipping draws whose viewport (%g, %g, %g, %g) lies outside the %ux%u target or the device bounds", viewport.x, viewport.y, viewport.width, viewport.height, state.renderExtent.width, state.renderExtent.height); });
+            return;
+        }
+    }
     ValidateShaders(shaders, state, context.subgroup, context.fragmentShaderBarycentric);
     const auto shaderStages = PipelineStages(shaders);
     std::uint32_t meshGroups = 0;
@@ -77,6 +119,11 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
             Require(index <= context.limits.maxDrawIndexedIndexValue, "index exceeds the device's indexed draw limit");
             maxIndex = std::max(maxIndex, index);
         }
+        // The base vertex moves every fetch: the vertex buffers must cover the highest index plus it.
+        const auto baseVertex = static_cast<std::int64_t>(static_cast<std::int32_t>(draw.firstVertex));
+        const auto highest = static_cast<std::int64_t>(maxIndex) + baseVertex;
+        Require(highest >= 0 && highest <= static_cast<std::int64_t>(std::numeric_limits<std::uint32_t>::max()), "indexed draw base vertex moves the fetch range outside the vertex domain");
+        maxIndex = static_cast<std::uint32_t>(highest);
     }
     timing.Mark("index_upload");
     const auto& attributes = shaders.front().program->vertexAttributes;
@@ -86,25 +133,313 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
     std::vector<VkDeviceSize> vertexOffsets(attributes.size(), 0);
     for (const auto& attribute : attributes) {
         const auto bytes = VertexBufferReadSize(attribute, maxIndex, draw.instanceCount, draw.firstInstance);
+        if (IsNullVertexAttribute(attribute)) {
+            auto buffer = std::make_unique<Buffer>(context, bytes, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+            std::memset(buffer->Bytes().data(), 0, bytes);
+            vertexHandles.push_back(buffer->Handle());
+            vertexBuffers.push_back(std::move(buffer));
+            continue;
+        }
         const auto& fields = attribute.resource.fields;
         const auto address = fields[0] | (static_cast<std::uint64_t>(fields[1] & 0xffffu) << 32u);
         Require(!state.hasColorTarget || address + bytes <= state.color.address || state.color.address + state.color.bytes <= address, "vertex buffer aliases the render target");
         GuestMemory::CheckRange(reinterpret_cast<const void*>(address), bytes, 1);
         auto buffer = std::make_unique<Buffer>(context, bytes, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
         GuestMemory::Read(address, buffer->Bytes(), 1);
+        {
+            // ANYPS5_DUMP_FRAME diagnostics: the first vertices of small indexed draws (UI quads).
+            static const bool dumpVertices = std::getenv("ANYPS5_DUMP_FRAME") != nullptr;
+            static int reported = 0;
+            if (dumpVertices && draw.indexed && draw.indexCount <= 12 && reported < 12) {
+                ++reported;
+                std::string text;
+                const auto* words = reinterpret_cast<const std::uint32_t*>(buffer->Bytes().data());
+                for (std::size_t i = 0; i < std::min<std::size_t>(bytes / 4, 16); ++i) {
+                    float value;
+                    std::memcpy(&value, words + i, 4);
+                    char item[40];
+                    std::snprintf(item, sizeof(item), " %08x(%g)", words[i], value);
+                    text += item;
+                }
+                APS5_LOG_OUT("draw vertices: attribute %u at 0x%llx stride %u format 0x%x %zu bytes, indices max %u:%s", attribute.location, static_cast<unsigned long long>(address), (fields[1] >> 16u) & 0x3fffu, (fields[3] >> 12u) & 0x7fu, bytes, maxIndex, text.c_str());
+            }
+        }
         vertexHandles.push_back(buffer->Handle());
         vertexBuffers.push_back(std::move(buffer));
     }
     timing.Mark("vertex_upload");
     auto resources = std::make_shared<ShaderResources>(context, shaders, state.color, draw.indexAddress, static_cast<std::size_t>(indexBytes), snapshots);
     timing.Mark("shader_resources");
-    if (state.hasColorTarget) {
-        const ColorTargetLayout colorLayout(state.color.extent.width, state.color.extent.height, state.color.tileMode);
-        Require(state.color.bytes == colorLayout.Bytes(), "color target transfer size mismatch");
-        storage->color = context.renderCache->Get(state.color, state.blend.blendEnable != 0);
+    {
+        // ANYPS5_DUMP_FRAME diagnostics: the textures a small indexed draw (a UI quad) samples.
+        static const bool journalTextures = std::getenv("ANYPS5_DUMP_FRAME") != nullptr;
+        static const bool journalAllTextures = std::getenv("ANYPS5_JOURNAL_TEXTURES") != nullptr;
+        if (journalAllTextures || (journalTextures && draw.indexed && draw.indexCount <= 12)) GpuJournal::Record("  draw textures:" + resources->DescribeTextures());
+        // ANYPS5_DEBUG_GDS_INPUTS: the small textures (exposure, parameters) a large draw reads.
+        static const char* debugInputsValue = std::getenv("ANYPS5_DEBUG_GDS_INPUTS");
+        static const auto debugStart = std::chrono::steady_clock::now();
+        const bool debugInputs = debugInputsValue != nullptr && std::chrono::duration<double>(std::chrono::steady_clock::now() - debugStart).count() >= std::atof(debugInputsValue);
+        const bool finalBlit = !draw.indexed && draw.indexCount == 3 && state.hasColorTarget && state.color.extent.width == 3840 && state.color.format == VK_FORMAT_B8G8R8A8_SRGB;
+        if (debugInputs && ((draw.indexed && draw.indexCount >= 80000) || finalBlit || state.extraColors.size() >= 3)) {
+            if (context.drawQueue) { context.drawQueue->Flush(); context.drawQueue->Wait(); }
+            APS5_LOG_OUT("[draw-input] draw of %u indices%s (target vk%u +%zu extra, blend %u)", draw.indexCount, finalBlit ? " (final blit)" : "", state.hasColorTarget ? static_cast<unsigned>(state.color.format) : 0u, state.extraColors.size(), state.blend.blendEnable);
+            // The fragment shader (ANYPS5_DUMP_GDS_SHADERS) with its raw image descriptors.
+            for (const auto& shader : shaders) {
+                if (shader.program == nullptr) continue;
+                std::string dumped;
+                if (const char* dumpDirectory = std::getenv("ANYPS5_DUMP_GDS_SHADERS")) {
+                    std::uint64_t hash = 1469598103934665603ull;
+                    for (const auto word : shader.program->spirv) hash = (hash ^ word) * 1099511628211ull;
+                    char name[64];
+                    std::snprintf(name, sizeof(name), "/gbuf_%u_%016llx.spv", static_cast<unsigned>(shader.stage), static_cast<unsigned long long>(hash));
+                    dumped = std::string(dumpDirectory) + name;
+                    if (FILE* file = std::fopen(dumped.c_str(), "wb")) { std::fwrite(shader.program->spirv.data(), sizeof(std::uint32_t), shader.program->spirv.size(), file); std::fclose(file); }
+                }
+                APS5_LOG_OUT("[draw-input]   stage %u %s", static_cast<unsigned>(shader.stage), dumped.c_str());
+                for (const auto& binding : shader.program->bindings) {
+                    if (binding.role != ShaderRecompiler::DescriptorRole::GuestImages) continue;
+                    const auto& d = binding.guestDescriptor;
+                    for (std::size_t element = 0; element + 8 <= d.size(); element += 8) {
+                        APS5_LOG_OUT("[draw-input]   b%u[%zu] T# %08x %08x %08x %08x %08x %08x %08x %08x", binding.binding, element / 8, d[element], d[element + 1], d[element + 2], d[element + 3], d[element + 4], d[element + 5], d[element + 6], d[element + 7]);
+                    }
+                }
+            }
+            for (const auto& texture : resources->Textures()) {
+                if (!finalBlit && texture->Extent().width * texture->Extent().height > 64 * 64) continue;
+                APS5_LOG_OUT("[draw-input]   0x%llx %ux%u vk%u%s:%s", static_cast<unsigned long long>(texture->GuestAddress()), texture->Extent().width, texture->Extent().height, static_cast<unsigned>(texture->GuestFormat()), texture->IsDirectView() ? " direct" : "", context.textureCache->DescribeContents(*texture).c_str());
+            }
+        }
     }
+    if (state.hasColorTarget) {
+        const ColorTargetLayout colorLayout(state.color.extent.width, state.color.extent.height, state.color.tileMode, state.color.bytesPerPixel);
+        Require(state.color.gpuOnly || state.color.bytes == colorLayout.Bytes(), "color target transfer size mismatch");
+        storage->color = context.renderCache->Get(state.color, state.blend.blendEnable != 0);
+        // ANYPS5_DEBUG_GDS_INPUTS: draws into the 3840x2160 packed-float targets show the target's
+        // contents before the draw and every texture they read.
+        {
+            static const char* debugValue = std::getenv("ANYPS5_DEBUG_GDS_INPUTS");
+            static const auto debugStart = std::chrono::steady_clock::now();
+            const bool debugDraw = debugValue != nullptr && std::chrono::duration<double>(std::chrono::steady_clock::now() - debugStart).count() >= std::atof(debugValue);
+            if (debugDraw && (state.color.format == VK_FORMAT_B10G11R11_UFLOAT_PACK32 || state.color.format == VK_FORMAT_R16G16B16A16_SFLOAT) && state.color.extent.width == 3840 && !draw.indexed) {
+                if (context.drawQueue) { context.drawQueue->Flush(); context.drawQueue->Wait(); }
+                GuestTextureResource synthetic{};
+                synthetic.baseAddress = state.color.address;
+                synthetic.width = state.color.extent.width;
+                synthetic.height = state.color.extent.height;
+                synthetic.mipCount = 1;
+                synthetic.tileMode = state.color.tileMode == ColorTileMode::RenderTarget ? TextureTileMode::RenderTarget64KB : TextureTileMode::kLinear;
+                synthetic.dimension = synthetic.viewDimension = TextureDimension::k2D;
+                synthetic.format = state.color.format == VK_FORMAT_R16G16B16A16_SFLOAT ? 0x47 : 0x24;
+                synthetic.dstSelX = 4; synthetic.dstSelY = 5; synthetic.dstSelZ = 6; synthetic.dstSelW = 7;
+                try {
+                    Texture view(context, storage->color, synthetic, VkComponentMapping{VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY}, Texture::DirectView{});
+                    APS5_LOG_OUT("[draw-target] draw of %u indices (%s) into 0x%llx blend %u:%s", draw.indexCount, draw.indexed ? "indexed" : "auto", static_cast<unsigned long long>(state.color.address), state.blend.blendEnable, context.textureCache->DescribeContents(view).c_str());
+                } catch (const std::exception& error) {
+                    APS5_LOG_OUT("[draw-target] 0x%llx: %s", static_cast<unsigned long long>(state.color.address), error.what());
+                }
+                for (const auto& texture : resources->Textures()) {
+                    if (texture->Extent().width * texture->Extent().height < 64 * 64) continue;
+                    APS5_LOG_OUT("[draw-target]   reads 0x%llx %ux%u vk%u%s:%s", static_cast<unsigned long long>(texture->GuestAddress()), texture->Extent().width, texture->Extent().height, static_cast<unsigned>(texture->GuestFormat()), texture->IsDirectView() ? " direct" : "", context.textureCache->DescribeContents(*texture).c_str());
+                }
+                // The vertex data of small draws (quads): the first words of every attribute buffer.
+                if (draw.indexed && draw.indexCount <= 6) {
+                    for (std::size_t v = 0; v < vertexBuffers.size(); ++v) {
+                        const auto bytes = vertexBuffers[v]->Bytes();
+                        std::string text;
+                        for (std::size_t i = 0; i < std::min<std::size_t>(bytes.size() / 4, 24); ++i) {
+                            std::uint32_t word; std::memcpy(&word, bytes.data() + i * 4, 4);
+                            float value; std::memcpy(&value, &word, 4);
+                            char item[48]; std::snprintf(item, sizeof(item), " %08x(%g)", word, value); text += item;
+                        }
+                        APS5_LOG_OUT("[draw-target]   vertex buffer %zu (%zu bytes):%s", v, bytes.size(), text.c_str());
+                    }
+                }
+                // The shaders of the draw (ANYPS5_DUMP_GDS_SHADERS) and their buffer descriptors with the first dwords.
+                for (const auto& shader : shaders) {
+                    if (shader.program == nullptr) continue;
+                    std::string buffers;
+                    for (const auto& binding : shader.program->bindings) {
+                        if (binding.role != ShaderRecompiler::DescriptorRole::GuestBuffers) continue;
+                        const auto& d = binding.guestDescriptor;
+                        for (std::size_t element = 0; element + 4 <= d.size(); element += 4) {
+                            const auto base = d[element] | (static_cast<std::uint64_t>(d[element + 1] & 0xffffu) << 32u);
+                            const auto stride = (d[element + 1] >> 16u) & 0x3fffu;
+                            char item[64];
+                            std::snprintf(item, sizeof(item), " [b%u base 0x%llx stride %u records %u", binding.binding, static_cast<unsigned long long>(base), stride, d[element + 2]);
+                            buffers += item;
+                            if (base != 0 && static_cast<std::uint64_t>(std::max(stride, 1u)) * d[element + 2] <= 4096) {
+                                std::array<std::uint32_t, 8> words{};
+                                try {
+                                    GuestMemory::Read(base, std::as_writable_bytes(std::span(words)), 1);
+                                    buffers += " =";
+                                    for (const auto word : words) { std::snprintf(item, sizeof(item), " %08x", word); buffers += item; }
+                                } catch (...) { buffers += " (unreadable)"; }
+                            }
+                            buffers += "]";
+                        }
+                    }
+                    std::string dumped;
+                    if (const char* dumpDirectory = std::getenv("ANYPS5_DUMP_GDS_SHADERS")) {
+                        std::uint64_t hash = 1469598103934665603ull;
+                        for (const auto word : shader.program->spirv) hash = (hash ^ word) * 1099511628211ull;
+                        char name[64];
+                        std::snprintf(name, sizeof(name), "/draw_%u_%016llx.spv", static_cast<unsigned>(shader.stage), static_cast<unsigned long long>(hash));
+                        dumped = std::string(dumpDirectory) + name;
+                        if (FILE* file = std::fopen(dumped.c_str(), "wb")) { std::fwrite(shader.program->spirv.data(), sizeof(std::uint32_t), shader.program->spirv.size(), file); std::fclose(file); }
+                    }
+                    APS5_LOG_OUT("[draw-target]   stage %u %s buffers:%s", static_cast<unsigned>(shader.stage), dumped.c_str(), buffers.c_str());
+                }
+            }
+        }
+        // ANYPS5_DEBUG_DRAW_TARGETS=<seconds>[:<draws>]: from that time on, the RGBA8 color target
+        // before each of the next draws (40 by default) and the larger textures each draw reads.
+        {
+            static const char* traceValue = std::getenv("ANYPS5_DEBUG_DRAW_TARGETS");
+            static const auto traceStart = std::chrono::steady_clock::now();
+            static int remaining = [] {
+                if (traceValue == nullptr) return 0;
+                const char* colon = std::strchr(traceValue, ':');
+                return colon != nullptr ? std::atoi(colon + 1) : 40;
+            }();
+            const bool rgba8 = state.color.format == VK_FORMAT_R8G8B8A8_UNORM || state.color.format == VK_FORMAT_R8G8B8A8_SRGB || state.color.format == VK_FORMAT_B8G8R8A8_UNORM || state.color.format == VK_FORMAT_B8G8R8A8_SRGB;
+            if (traceValue != nullptr && remaining > 0 && rgba8 && std::chrono::duration<double>(std::chrono::steady_clock::now() - traceStart).count() >= std::atof(traceValue)) {
+                --remaining;
+                if (context.drawQueue) { context.drawQueue->Flush(); context.drawQueue->Wait(); }
+                GuestTextureResource synthetic{};
+                synthetic.baseAddress = state.color.address;
+                synthetic.width = state.color.extent.width;
+                synthetic.height = state.color.extent.height;
+                synthetic.mipCount = 1;
+                synthetic.tileMode = state.color.tileMode == ColorTileMode::RenderTarget ? TextureTileMode::RenderTarget64KB : TextureTileMode::kLinear;
+                synthetic.dimension = synthetic.viewDimension = TextureDimension::k2D;
+                synthetic.format = 0x38;
+                synthetic.dstSelX = 4; synthetic.dstSelY = 5; synthetic.dstSelZ = 6; synthetic.dstSelW = 7;
+                try {
+                    Texture view(context, storage->color, synthetic, VkComponentMapping{VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY}, Texture::DirectView{});
+                    APS5_LOG_OUT("[draw-trace] draw of %u indices into 0x%llx vk%u blend %u (%u,%u,%u) mask 0x%x cull %u front %u; target before:%s", draw.indexCount, static_cast<unsigned long long>(state.color.address), static_cast<unsigned>(state.color.format), state.blend.blendEnable,
+                        static_cast<unsigned>(state.blend.srcColorBlendFactor), static_cast<unsigned>(state.blend.dstColorBlendFactor), static_cast<unsigned>(state.blend.colorBlendOp), static_cast<unsigned>(state.blend.colorWriteMask), static_cast<unsigned>(state.cullMode), static_cast<unsigned>(state.frontFace), context.textureCache->DescribeContents(view).c_str());
+                } catch (const std::exception& error) {
+                    APS5_LOG_OUT("[draw-trace] 0x%llx: %s", static_cast<unsigned long long>(state.color.address), error.what());
+                }
+                for (const auto& texture : resources->Textures()) {
+                    APS5_LOG_OUT("[draw-trace]   reads 0x%llx %ux%u vk%u%s:%s", static_cast<unsigned long long>(texture->GuestAddress()), texture->Extent().width, texture->Extent().height, static_cast<unsigned>(texture->GuestFormat()), texture->IsDirectView() ? " direct" : "", context.textureCache->DescribeContents(*texture).c_str());
+                }
+                {
+                    std::string text;
+                    for (const auto& attribute : shaders.front().program->vertexAttributes) {
+                        const auto& fields = attribute.resource.fields;
+                        char item[64]; std::snprintf(item, sizeof(item), " loc%u@0x%llx", attribute.location, static_cast<unsigned long long>(fields[0] | (static_cast<std::uint64_t>(fields[1] & 0xffffu) << 32u)));
+                        text += item;
+                    }
+                    APS5_LOG_OUT("[draw-trace]   attributes (cache hit %d):%s", shaders.front().program->cacheHit ? 1 : 0, text.c_str());
+                    // The vertex bytes now (after the flush) against what the draw captured.
+                    const auto& attributes0 = shaders.front().program->vertexAttributes;
+                    if (!attributes0.empty() && !vertexBuffers.empty()) {
+                        const auto& fields = attributes0.front().resource.fields;
+                        const auto address = fields[0] | (static_cast<std::uint64_t>(fields[1] & 0xffffu) << 32u);
+                        std::array<float, 16> now{};
+                        try { GuestMemory::Read(address, std::as_writable_bytes(std::span(now)), 1); } catch (...) {}
+                        std::string fresh;
+                        for (const auto value : now) { char item[24]; std::snprintf(item, sizeof(item), " %g", value); fresh += item; }
+                        APS5_LOG_OUT("[draw-trace]   vertex memory now:%s", fresh.c_str());
+                    }
+                }
+                if (draw.indexed && storage->indices) {
+                    std::string text;
+                    for (std::size_t offset = 0; offset < std::min<std::size_t>(indexBytes, 24 * draw.indexSize); offset += draw.indexSize) {
+                        std::uint32_t index = 0;
+                        std::memcpy(&index, storage->indices->Bytes().data() + offset, draw.indexSize);
+                        char item[16]; std::snprintf(item, sizeof(item), " %u", index); text += item;
+                    }
+                    APS5_LOG_OUT("[draw-trace]   indices (size %u, first vertex %u, instances %u):%s", draw.indexSize, draw.firstVertex, draw.instanceCount, text.c_str());
+                }
+                for (std::size_t v = 0; v < vertexBuffers.size() && draw.indexCount <= 6; ++v) {
+                    const auto bytes = vertexBuffers[v]->Bytes();
+                    std::string text;
+                    for (std::size_t i = 0; i < std::min<std::size_t>(bytes.size() / 4, v == 0 ? 56 : 4); ++i) {
+                        float value; std::memcpy(&value, bytes.data() + i * 4, 4);
+                        char item[24]; std::snprintf(item, sizeof(item), " %g", value); text += item;
+                    }
+                    APS5_LOG_OUT("[draw-trace]   vertex buffer %zu:%s", v, text.c_str());
+                }
+                {
+                    const auto push = AssemblePushConstants(shaders);
+                    std::string text;
+                    for (std::size_t i = 0; i + 4 <= push.size() && i < 48 * 4; i += 4) {
+                        std::uint32_t word; std::memcpy(&word, push.data() + i, 4);
+                        char item[16]; std::snprintf(item, sizeof(item), " %08x", word); text += item;
+                    }
+                    APS5_LOG_OUT("[draw-trace]   push constants:%s", text.c_str());
+                    // Pointers among the push constants (pairs with a small high word): what they
+                    // point to, and one level further for the first two qwords.
+                    const auto dumpAt = [&](std::uint64_t address, const char* label) {
+                        std::array<std::uint32_t, 48> words{};
+                        try { GuestMemory::Read(address, std::as_writable_bytes(std::span(words)), 4); } catch (...) { APS5_LOG_OUT("[draw-trace]     %s 0x%llx unreadable", label, static_cast<unsigned long long>(address)); return words; }
+                        std::string line;
+                        for (std::size_t i = 0; i < words.size(); ++i) { float value; std::memcpy(&value, &words[i], 4); char item[32]; std::snprintf(item, sizeof(item), " %08x(%.4g)", words[i], value); line += item; }
+                        APS5_LOG_OUT("[draw-trace]     %s 0x%llx:%s", label, static_cast<unsigned long long>(address), line.c_str());
+                        return words;
+                    };
+                    for (std::size_t i = 0; i + 8 <= push.size() && i < 16 * 4; i += 8) {
+                        std::uint32_t low, high; std::memcpy(&low, push.data() + i, 4); std::memcpy(&high, push.data() + i + 4, 4);
+                        if (high == 0 || high > 0xff) continue;
+                        const auto words = dumpAt(low | (static_cast<std::uint64_t>(high) << 32), "points to");
+                        const auto inner = words[0] | (static_cast<std::uint64_t>(words[1]) << 32);
+                        if (words[1] != 0 && words[1] <= 0xff) dumpAt(inner, "  which points to");
+                    }
+                }
+                for (const auto& shader : shaders) {
+                    if (shader.program == nullptr) continue;
+                    std::string buffers;
+                    for (const auto& binding : shader.program->bindings) {
+                        if (binding.role != ShaderRecompiler::DescriptorRole::GuestBuffers) continue;
+                        const auto& d = binding.guestDescriptor;
+                        for (std::size_t element = 0; element + 4 <= d.size(); element += 4) {
+                            const auto base = d[element] | (static_cast<std::uint64_t>(d[element + 1] & 0xffffu) << 32u);
+                            char item[80];
+                            std::snprintf(item, sizeof(item), " [b%u 0x%llx x%u", binding.binding, static_cast<unsigned long long>(base), d[element + 2]);
+                            buffers += item;
+                            std::array<float, 8> words{};
+                            try {
+                                GuestMemory::Read(base, std::as_writable_bytes(std::span(words)), 1);
+                                buffers += " =";
+                                for (const auto word : words) { std::snprintf(item, sizeof(item), " %g", word); buffers += item; }
+                            } catch (...) { buffers += " (unreadable)"; }
+                            buffers += "]";
+                        }
+                    }
+                    for (const auto& binding : shader.program->bindings) {
+                        if (binding.role != ShaderRecompiler::DescriptorRole::FlattenedSrt && binding.role != ShaderRecompiler::DescriptorRole::ShaderData) continue;
+                        std::string text;
+                        for (std::size_t i = 0; i < std::min<std::size_t>(binding.guestDescriptor.size(), 40); ++i) {
+                            float value; std::memcpy(&value, &binding.guestDescriptor[i], 4);
+                            char item[40]; std::snprintf(item, sizeof(item), " [%zu]%08x(%g)", i, binding.guestDescriptor[i], value); text += item;
+                        }
+                        APS5_LOG_OUT("[draw-trace]   stage %u %s b%u (%zu dwords):%s", static_cast<unsigned>(shader.stage), binding.role == ShaderRecompiler::DescriptorRole::FlattenedSrt ? "srt" : "data", binding.binding, binding.guestDescriptor.size(), text.c_str());
+                    }
+                    std::string dumped;
+                    if (const char* dumpDirectory = std::getenv("ANYPS5_DUMP_GDS_SHADERS")) {
+                        std::uint64_t hash = 1469598103934665603ull;
+                        for (const auto word : shader.program->spirv) hash = (hash ^ word) * 1099511628211ull;
+                        char name[64];
+                        std::snprintf(name, sizeof(name), "/trace_%u_%016llx.spv", static_cast<unsigned>(shader.stage), static_cast<unsigned long long>(hash));
+                        dumped = std::string(dumpDirectory) + name;
+                        if (FILE* file = std::fopen(dumped.c_str(), "wb")) { std::fwrite(shader.program->spirv.data(), sizeof(std::uint32_t), shader.program->spirv.size(), file); std::fclose(file); }
+                    }
+                    APS5_LOG_OUT("[draw-trace]   stage %u %s buffers:%s", static_cast<unsigned>(shader.stage), dumped.c_str(), buffers.c_str());
+                }
+            }
+        }
+        for (std::size_t i = 0; i < state.extraColors.size(); ++i) {
+            const auto& extra = state.extraColors[i];
+            const ColorTargetLayout extraLayout(extra.extent.width, extra.extent.height, extra.tileMode, extra.bytesPerPixel);
+            Require(extra.gpuOnly || extra.bytes == extraLayout.Bytes(), "color target transfer size mismatch");
+            storage->extraColors.push_back(context.renderCache->Get(extra, state.extraBlends[i].blendEnable != 0));
+        }
+    }
+    if (state.hasDepthTarget) storage->depth = context.renderCache->GetDepth(state.depth);
     timing.Mark("render_target_cache");
-    storage->pipeline = context.graphicsPipelines->Get(state, storage->color, *resources, shaders);
+    storage->pipeline = context.graphicsPipelines->Get(state, storage->color, storage->extraColors, storage->depth, *resources, shaders);
     auto& pipeline = *storage->pipeline;
     timing.Mark("pipeline_cache");
     const auto commands = context.drawQueue->Begin(context);
@@ -113,6 +448,8 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
     upload.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_INDEX_READ_BIT | VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_UNIFORM_READ_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
     context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(commands, VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_VERTEX_INPUT_BIT | shaderStages, 0, 1, &upload, 0, nullptr, 0, nullptr);
     if (storage->color) storage->color->Begin(commands);
+    for (const auto& extra : storage->extraColors) extra->Begin(commands);
+    if (storage->depth) storage->depth->Prepare(commands);
     pipeline.Begin(commands, state.renderExtent);
     resources->Bind(commands, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline.Layout());
     pipeline.PushConstants(commands, shaders);
@@ -122,7 +459,7 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
         if (!vertexHandles.empty()) context.Function<PFN_vkCmdBindVertexBuffers>("vkCmdBindVertexBuffers")(commands, 0, static_cast<std::uint32_t>(vertexHandles.size()), vertexHandles.data(), vertexOffsets.data());
         if (draw.indexed) {
             context.Function<PFN_vkCmdBindIndexBuffer>("vkCmdBindIndexBuffer")(commands, indices->Handle(), 0, draw.indexSize == 2 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32);
-            context.Function<PFN_vkCmdDrawIndexed>("vkCmdDrawIndexed")(commands, draw.indexCount, draw.instanceCount, 0, 0, 0);
+            context.Function<PFN_vkCmdDrawIndexed>("vkCmdDrawIndexed")(commands, draw.indexCount, draw.instanceCount, 0, static_cast<std::int32_t>(draw.firstVertex), draw.firstInstance);
         } else {
             context.Function<PFN_vkCmdDraw>("vkCmdDraw")(commands, draw.indexCount, draw.instanceCount, draw.firstVertex, draw.firstInstance);
         }
@@ -130,8 +467,8 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
     context.Function<PFN_vkCmdEndRenderPass>("vkCmdEndRenderPass")(commands);
     VkMemoryBarrier download{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
     download.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-    download.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
-    context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(commands, VK_PIPELINE_STAGE_TRANSFER_BIT | shaderStages, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &download, 0, nullptr, 0, nullptr);
+    download.dstAccessMask = VK_ACCESS_HOST_READ_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT;
+    context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(commands, VK_PIPELINE_STAGE_TRANSFER_BIT | shaderStages, VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &download, 0, nullptr, 0, nullptr);
     timing.Mark("command_record");
     context.drawQueue->Enqueue(std::move(resources), std::move(storage));
     timing.Mark("enqueue");

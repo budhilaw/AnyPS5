@@ -1,3 +1,5 @@
+#include <execinfo.h>
+#include <cstdio>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -72,6 +74,11 @@ void APS5_VABI exit_nid_postfix(int code) {
 ) {
     (void)arg0; (void)arg1; (void)arg2;
     (void)arg3; (void)arg4; (void)arg5;
+    // The title gave up: leave the call chain behind (guest frames show as image offsets).
+    void* frames[32];
+    const int count = ::backtrace(frames, 32);
+    std::fprintf(stderr, "guest abort() called from %p\n", __builtin_return_address(0));
+    ::backtrace_symbols_fd(frames, count, 2);
     std::abort();
 }
 
@@ -84,6 +91,7 @@ int* APS5_VABI __error_nid_postfix() {
 }
 
 [[noreturn]] void __stack_chk_fail_nid_postfix() {
+    std::fprintf(stderr, "guest stack protector failure in the caller of %p\n", __builtin_return_address(0));
     std::abort();
 }
 

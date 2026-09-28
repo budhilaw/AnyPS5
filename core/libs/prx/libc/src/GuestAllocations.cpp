@@ -1,9 +1,17 @@
+#include <atomic>
+#include <cstdio>
 #include "prx/libc/include/GuestAllocations.hpp"
 #include "prx/libc/include/GuestMemoryTracking.hpp"
 #include <limits>
 #include <iterator>
 #include <map>
+#include <vector>
 #include <stdexcept>
+#if defined(__APPLE__)
+#include <cstring>
+#include <mach-o/dyld.h>
+#include <mach-o/loader.h>
+#endif
 #ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -18,6 +26,7 @@ struct Registry {
     std::recursive_mutex& mutex = GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix();
     std::map<std::uint64_t, std::shared_ptr<const Range>> ranges;
     bool mainImageRegistered = false;
+    std::uint32_t registeredImageCount = 0; // Apple: dyld image count at the last guest image scan
 };
 
 Registry& registry() {
@@ -75,6 +84,49 @@ void GuestAllocationsRegisterMainImage_nid_postfix(void*) {
     state.ranges.swap(replacement);
     state.mainImageRegistered = true;
 }
+#elif defined(__APPLE__)
+// Registers the segments of every loaded guest image (the relinked executable and its modules,
+// recognised by their __ANYPS5 segment) so titles can change the protection of their own data.
+// Rescans when dyld has loaded more images since the last call.
+void GuestAllocationsRegisterMainImage_nid_postfix(void*) {
+    auto& state = registry();
+    const auto count = _dyld_image_count();
+    if (state.registeredImageCount == count) return;
+    auto replacement = state.ranges;
+    for (std::uint32_t index = 0; index < count; ++index) {
+        const auto* header = reinterpret_cast<const mach_header_64*>(_dyld_get_image_header(index));
+        if (header == nullptr || header->magic != MH_MAGIC_64) continue;
+        const auto slide = _dyld_get_image_vmaddr_slide(index);
+        std::vector<const segment_command_64*> segments;
+        bool guest = false;
+        const auto* command = reinterpret_cast<const load_command*>(header + 1);
+        for (std::uint32_t i = 0; i < header->ncmds; ++i) {
+            if (command->cmd == LC_SEGMENT_64) {
+                const auto* segment = reinterpret_cast<const segment_command_64*>(command);
+                if (std::strcmp(segment->segname, "__ANYPS5") == 0) guest = true;
+                if (std::strncmp(segment->segname, "__GUEST", 7) == 0 || std::strcmp(segment->segname, "__ANYPS5") == 0) segments.push_back(segment);
+            }
+            command = reinterpret_cast<const load_command*>(reinterpret_cast<const std::byte*>(command) + command->cmdsize);
+        }
+        if (!guest) continue;
+        for (const auto* segment : segments) {
+            const auto address = static_cast<std::uint64_t>(segment->vmaddr) + static_cast<std::uint64_t>(slide);
+            const auto bytes = static_cast<std::size_t>(segment->vmsize);
+            if (bytes == 0) continue;
+            const auto next = replacement.lower_bound(address);
+            if (next != replacement.end() && next->first < address + bytes) continue; // already registered (possibly split by protections)
+            if (next != replacement.begin()) {
+                const auto& previous = *std::prev(next)->second;
+                if (previous.address + previous.bytes > address) continue;
+            }
+            const bool writable = (segment->initprot & VM_PROT_WRITE) != 0;
+            const bool readable = writable || (segment->initprot & VM_PROT_READ) != 0;
+            replacement.emplace(address, std::make_shared<const Range>(Range{address, bytes, readable, writable, address, bytes, false}));
+        }
+    }
+    state.ranges.swap(replacement);
+    state.registeredImageCount = count;
+}
 #endif
 
 void GuestAllocationsAdd_nid_postfix(void*, void* pointer, std::size_t bytes, bool readable, bool writable) {
@@ -111,6 +163,32 @@ void GuestAllocationsRequireAvailable_nid_postfix(void*, const void* pointer, st
     }
 }
 
+bool GuestAllocationsIsReserved_nid_postfix(void*, const void* pointer, std::size_t bytes) {
+    const auto address = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(pointer));
+    if (address == 0 || bytes == 0 || bytes > std::numeric_limits<std::uint64_t>::max() - address) return false;
+    const auto end = address + bytes;
+    auto cursor = address;
+    for (const auto& [base, range] : registry().ranges) {
+        if (base + range->bytes <= cursor) continue;
+        if (base > cursor) return false; // hole
+        if (range->readable || range->writable || !range->releasable) return false;
+        cursor = std::min(end, base + range->bytes);
+        if (cursor == end) return true;
+    }
+    return false;
+}
+
+bool GuestAllocationsQuery_nid_postfix(void*, std::uint64_t address, bool findNext, Range* result) {
+    if (result == nullptr) throw std::invalid_argument("guest allocation query without a result");
+    for (const auto& [base, range] : registry().ranges) {
+        if (base + range->bytes <= address) continue;
+        if (base > address && !findNext) return false;
+        *result = *range;
+        return true;
+    }
+    return false;
+}
+
 Range GuestAllocationsFind_nid_postfix(void*, const void* pointer) {
     const auto address = reinterpret_cast<std::uintptr_t>(pointer);
     for (const auto& [base, range] : registry().ranges) {
@@ -131,7 +209,7 @@ void GuestAllocationsRemove_nid_postfix(void* mutation, const void* pointer) {
 namespace {
 
 std::map<std::uint64_t, std::shared_ptr<const Range>> replaceRange(const void* pointer, std::size_t bytes, bool remove, bool readable, bool writable) {
-    const auto address = reinterpret_cast<std::uintptr_t>(pointer);
+    const auto address = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(pointer));
     require(bytes != 0 && bytes <= std::numeric_limits<std::uint64_t>::max() - address, "invalid guest protection or unmap range");
     require(!writable || readable, "writable guest allocation must be readable");
     const auto end = address + bytes;
@@ -142,7 +220,11 @@ std::map<std::uint64_t, std::shared_ptr<const Range>> replaceRange(const void* p
         const auto finish = base + range.bytes;
         if (finish <= address) continue;
         if (base >= end) break;
-        require(base <= cursor, "guest protection or unmap range has a hole");
+        if (base > cursor) {
+            char message[160];
+            std::snprintf(message, sizeof(message), "guest protection or unmap range has a hole: 0x%llx+0x%llx, unregistered 0x%llx..0x%llx (next range 0x%llx+0x%llx)", static_cast<unsigned long long>(address), static_cast<unsigned long long>(bytes), static_cast<unsigned long long>(cursor), static_cast<unsigned long long>(base), static_cast<unsigned long long>(base), static_cast<unsigned long long>(range.bytes));
+            throw std::runtime_error(message);
+        }
         replacement.erase(base);
         const auto insert = [&](std::uint64_t first, std::uint64_t last, bool canRead, bool canWrite) {
             if (first < last) replacement.emplace(first, std::make_shared<const Range>(Range{first, static_cast<std::size_t>(last - first), canRead, canWrite, range.allocationAddress, range.allocationBytes, range.releasable}));
@@ -152,13 +234,26 @@ std::map<std::uint64_t, std::shared_ptr<const Range>> replaceRange(const void* p
         insert(std::min(finish, end), finish, range.readable, range.writable);
         cursor = std::min(finish, end);
     }
-    require(cursor == end, "guest protection or unmap range is not registered");
+    if (cursor != end) {
+        char message[128];
+        std::snprintf(message, sizeof(message), "guest protection or unmap range is not registered: 0x%llx+0x%llx (registered up to 0x%llx)", static_cast<unsigned long long>(address), static_cast<unsigned long long>(bytes), static_cast<unsigned long long>(cursor));
+        throw std::runtime_error(message);
+    }
     return replacement;
 }
 
 }
 
+namespace {
+std::atomic<std::uint64_t> protectionGeneration{1};
+}
+
+std::uint64_t GuestAllocationsProtectionGeneration_nid_postfix() {
+    return protectionGeneration.load(std::memory_order_acquire);
+}
+
 void GuestAllocationsProtect_nid_postfix(void* mutation, const void* pointer, std::size_t bytes, bool readable, bool writable, const std::function<void()>& apply) {
+    protectionGeneration.fetch_add(1, std::memory_order_acq_rel);
     GuestAllocationsRequireUnpinned_nid_postfix(mutation, pointer, bytes);
     auto replacement = replaceRange(pointer, bytes, false, readable, writable);
     apply();

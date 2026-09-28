@@ -776,8 +776,13 @@ std::uint32_t AppendConsume(SpirvValueEmitContext& ctx, const IrValue& inst, boo
     const auto& mem = SharedMemory(ctx, inst);
     const bool wave64 = state.laneCount == 2u;
     const auto m0 = ctx.Arg(inst, 0);
-    const auto base = Binary(state, spv::OpShiftRightLogical, TypeU32(state), m0, ConstantU32(state, 16u));
-    const auto size = Binary(state, spv::OpBitwiseAnd, TypeU32(state), m0, ConstantU32(state, 0xffffu));
+    // M0 for GDS appends: bits 15:0 are the GDS base address and bits 31:16 the size; LDS keeps its
+    // limit in the low bits and the base in the high ones.
+    const bool gds = mem.kind == ResourceKind::Gds;
+    const auto m0High = Binary(state, spv::OpShiftRightLogical, TypeU32(state), m0, ConstantU32(state, 16u));
+    const auto m0Low = Binary(state, spv::OpBitwiseAnd, TypeU32(state), m0, ConstantU32(state, 0xffffu));
+    const auto base = gds ? m0Low : m0High;
+    const auto size = gds ? m0High : m0Low;
     const auto address = Binary(state, spv::OpIAdd, TypeU32(state), base, ConstantU32(state, mem.offset));
     const auto rawIndex = Binary(state, spv::OpShiftRightLogical, TypeU32(state), address, ConstantU32(state, 2u));
     const auto access = PrepareMemoryResourceAccess(state, mem);
@@ -793,14 +798,19 @@ std::uint32_t AppendConsume(SpirvValueEmitContext& ctx, const IrValue& inst, boo
     const auto sourceLane = wave64 ? Binary(state, spv::OpBitwiseAnd, TypeU32(state), first, ConstantU32(state, 31u)) : first;
     const auto isFirst = Binary(state, spv::OpIEqual, TypeBool(state), EmitSubgroupLocalInvocationId(state), sourceLane);
     const auto storageBounds = EmitMemoryElementInBounds(state, access, index);
-    const auto m0Bounds = mem.kind == ResourceKind::Gds ? Binary(state, spv::OpINotEqual, TypeBool(state), size, ConstantU32(state, 0u)) : Binary(state, spv::OpULessThan, TypeBool(state), ConstantU32(state, mem.offset + 3u), size);
     const auto lanesActive = wave64 ? Binary(state, spv::OpINotEqual, TypeBool(state), count, ConstantU32(state, 0u)) : exec;
-    const auto condition = AndCondition(state, isFirst, AndCondition(state, lanesActive, AndCondition(state, storageBounds, m0Bounds)));
+    auto condition = AndCondition(state, isFirst, AndCondition(state, lanesActive, storageBounds));
+    if (!gds) {
+        // LDS appends are clamped to the M0 limit; GDS appends only use the M0 base (titles pass a
+        // zero size field and the hardware still counts).
+        condition = AndCondition(state, condition, Binary(state, spv::OpULessThan, TypeBool(state), ConstantU32(state, mem.offset + 3u), size));
+    }
     const auto atomic = EmitValueOrZeroIfCondition(state, condition, [&]() {
         const auto value = state.module.AllocateId();
         state.module.AddFunction(append ? spv::OpAtomicIAdd : spv::OpAtomicISub, TypeU32(state), value, EmitMemoryElementPointer(state, access, index), ConstantU32(state, mem.kind == ResourceKind::Gds ? spv::ScopeDevice : spv::ScopeWorkgroup), ConstantU32(state, spv::MemorySemanticsMaskNone), count);
         return value;
     });
+    if (state.singleLane) return atomic;
     const auto result = state.module.AllocateId();
     state.module.AddFunction(spv::OpGroupNonUniformShuffle, TypeU32(state), result, ConstantU32(state, spv::ScopeSubgroup), atomic, sourceLane);
     return result;

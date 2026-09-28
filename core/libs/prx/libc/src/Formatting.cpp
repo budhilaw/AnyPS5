@@ -20,6 +20,9 @@ int APS5_VABI vfprintf_nid_postfix(FileStream* stream, const char* format, VaLis
     const int result = std::fwrite(buffer.data(), 1, static_cast<size_t>(count), native) ==
         static_cast<size_t>(count) ? count : -1;
 #else
+#if defined(__x86_64__)
+    LibcDetail::ReplaceNullStrings(format, *reinterpret_cast<LibcDetail::VaListLayout*>(args));
+#endif
     const int result = std::vfprintf(native, format, *reinterpret_cast<std::va_list*>(args));
 #endif
     stream->SyncStatus();
@@ -82,6 +85,9 @@ int APS5_VABI sprintf_nid_postfix(char* buffer, const char* format, ...) {
 int APS5_VABI printf_nid_postfix(const char* format, ...) {
     std::va_list args;
     va_start(args, format);
+#if defined(__x86_64__)
+    LibcDetail::ReplaceNullStrings(format, *reinterpret_cast<LibcDetail::VaListLayout*>(&args));
+#endif
     const int result = std::vprintf(format, args);
     va_end(args);
     return result;
@@ -90,21 +96,23 @@ int APS5_VABI printf_nid_postfix(const char* format, ...) {
 int APS5_VABI libc_printf_nid_postfix(VA_ARGS) {
     (void)rcx; (void)r8; (void)r9;
     LibcDetail::RegSaveArea regs;
-    LibcDetail::FillRegSaveArea(regs, rsi, rdx, rcx, r8, r9, 0,
+    LibcDetail::FillRegSaveArea(regs, rdi, rsi, rdx, rcx, r8, r9,
         xmm0, xmm1, xmm2, xmm3, xmm4, xmm5, xmm6, xmm7);
     LibcDetail::VaListLayout layout;
-    std::va_list* va = LibcDetail::BuildVaList(layout, regs, 0u,
-        reinterpret_cast<void*>(overflow_arg_area));
+    std::va_list* va = LibcDetail::BuildVaList(layout, regs, 1u,
+        reinterpret_cast<void*>(&overflow_arg_area));
+    LibcDetail::ReplaceNullStrings(reinterpret_cast<const char*>(rdi), layout);
     return std::vprintf(reinterpret_cast<const char*>(rdi), *va);
 }
 
 int APS5_VABI snprintf_nid_postfix(VA_ARGS) {
     LibcDetail::RegSaveArea regs;
-    LibcDetail::FillRegSaveArea(regs, rcx, r8, r9, 0, 0, 0,
+    LibcDetail::FillRegSaveArea(regs, rdi, rsi, rdx, rcx, r8, r9,
         xmm0, xmm1, xmm2, xmm3, xmm4, xmm5, xmm6, xmm7);
     LibcDetail::VaListLayout layout;
-    std::va_list* va = LibcDetail::BuildVaList(layout, regs, 0u,
-        reinterpret_cast<void*>(overflow_arg_area));
+    std::va_list* va = LibcDetail::BuildVaList(layout, regs, 3u,
+        reinterpret_cast<void*>(&overflow_arg_area));
+    LibcDetail::ReplaceNullStrings(reinterpret_cast<const char*>(rdx), layout);
     return std::vsnprintf(
         reinterpret_cast<char*>(rdi),
         static_cast<size_t>(rsi),
@@ -115,11 +123,12 @@ int APS5_VABI snprintf_nid_postfix(VA_ARGS) {
 
 int APS5_VABI sprintf_nid_postfix(VA_ARGS) {
     LibcDetail::RegSaveArea regs;
-    LibcDetail::FillRegSaveArea(regs, rdx, rcx, r8, r9, 0, 0,
+    LibcDetail::FillRegSaveArea(regs, rdi, rsi, rdx, rcx, r8, r9,
         xmm0, xmm1, xmm2, xmm3, xmm4, xmm5, xmm6, xmm7);
     LibcDetail::VaListLayout layout;
-    std::va_list* va = LibcDetail::BuildVaList(layout, regs, 0u,
-        reinterpret_cast<void*>(overflow_arg_area));
+    std::va_list* va = LibcDetail::BuildVaList(layout, regs, 2u,
+        reinterpret_cast<void*>(&overflow_arg_area));
+    LibcDetail::ReplaceNullStrings(reinterpret_cast<const char*>(rsi), layout);
     return std::vsprintf(
         reinterpret_cast<char*>(rdi),
         reinterpret_cast<const char*>(rsi),
@@ -131,11 +140,11 @@ int APS5_VABI sprintf_nid_postfix(VA_ARGS) {
 
 int APS5_VABI sscanf_nid_postfix(VA_ARGS) {
     LibcDetail::RegSaveArea regs;
-    LibcDetail::FillRegSaveArea(regs, rdx, rcx, r8, r9, 0, 0,
+    LibcDetail::FillRegSaveArea(regs, rdi, rsi, rdx, rcx, r8, r9,
         xmm0, xmm1, xmm2, xmm3, xmm4, xmm5, xmm6, xmm7);
     LibcDetail::VaListLayout layout;
-    std::va_list* va = LibcDetail::BuildVaList(layout, regs, 0u,
-        reinterpret_cast<void*>(overflow_arg_area));
+    std::va_list* va = LibcDetail::BuildVaList(layout, regs, 2u,
+        reinterpret_cast<void*>(&overflow_arg_area));
     return std::vsscanf(
         reinterpret_cast<const char*>(rdi),
         reinterpret_cast<const char*>(rsi),
@@ -148,6 +157,9 @@ int APS5_VABI vprintf_nid_postfix(const char* str, VaList* c) {
     return LibcDetail::PrintWindows(str, c);
 #else
     std::va_list* va = reinterpret_cast<std::va_list*>(c);
+#if defined(__x86_64__)
+    LibcDetail::ReplaceNullStrings(str, *reinterpret_cast<LibcDetail::VaListLayout*>(c));
+#endif
     return std::vprintf(str, *va);
 #endif
 }
@@ -156,8 +168,21 @@ int APS5_VABI vsprintf_nid_postfix(char* str, const char* format, VaList* args) 
 #ifdef _WIN32
     return LibcDetail::FormatWindows(str, SIZE_MAX, format, args);
 #else
+#if defined(__x86_64__)
+    LibcDetail::ReplaceNullStrings(format, *reinterpret_cast<LibcDetail::VaListLayout*>(args));
+#endif
     return std::vsprintf(str, format, *reinterpret_cast<std::va_list*>(args));
 #endif
+}
+
+int APS5_VABI vsnprintf_nid_postfix(char* str, size_t size, const char* format, VaList* c);
+
+// C11 Annex K: on overflow the destination becomes an empty string and the call fails.
+int APS5_VABI vsprintf_s_nid_postfix(char* str, size_t size, const char* format, VaList* args) {
+    if (!str || !format || size == 0) return -1;
+    const int written = vsnprintf_nid_postfix(str, size, format, args);
+    if (written < 0 || static_cast<size_t>(written) >= size) { str[0] = '\0'; return -1; }
+    return written;
 }
 
 int APS5_VABI vsnprintf_nid_postfix(char* str, size_t size, const char* format, VaList* c) {
@@ -165,6 +190,9 @@ int APS5_VABI vsnprintf_nid_postfix(char* str, size_t size, const char* format, 
     return LibcDetail::FormatWindows(str, size, format, c);
 #else
     std::va_list* va = reinterpret_cast<std::va_list*>(c);
+#if defined(__x86_64__)
+    LibcDetail::ReplaceNullStrings(format, *reinterpret_cast<LibcDetail::VaListLayout*>(c));
+#endif
     return std::vsnprintf(str, size, format, *va);
 #endif
 }

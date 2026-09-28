@@ -4,6 +4,7 @@
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include <array>
 #include <cstring>
+#include <cstdio>
 #include <stdexcept>
 #include <string>
 
@@ -25,7 +26,9 @@ constexpr std::uint32_t spiShaderColFormat = 0x1C5;
 std::uint32_t read(const Registers& registers, std::uint32_t offset) {
     const auto it = registers.find(offset);
     if (it == registers.end()) {
-        throw std::runtime_error("AGC graphics: missing register at DWORD 0x" + std::to_string(offset));
+        char text[64];
+        std::snprintf(text, sizeof(text), "AGC graphics: missing register at DWORD 0x%x", offset);
+        throw std::runtime_error(text);
     }
     return it->second;
 }
@@ -92,9 +95,7 @@ ShaderRecompiler::ShaderPixelStageInfo DecodePixelStageInfo(const Registers& con
         interpolatorSettings[i] = read(context, spiPsInputCntl0 + i);
     }
     const auto shaderControl = read(context, dbShaderControl);
-    if (((shaderControl >> 9u) & 0x1u) != 0) {
-        throw std::runtime_error("AGC graphics: DB_SHADER_CONTROL.DUAL_EXPORT_ENABLE is unsupported");
-    }
+    const bool dualSourceBlend = ((shaderControl >> 9u) & 0x1u) != 0;
     if (((shaderControl >> 11u) & 0x1u) != 0) {
         throw std::runtime_error("AGC graphics: DB_SHADER_CONTROL.ALPHA_TO_MASK_DISABLE is unsupported");
     }
@@ -136,7 +137,8 @@ ShaderRecompiler::ShaderPixelStageInfo DecodePixelStageInfo(const Registers& con
         zOrder == 1u && !pixelKillEnable && !depthExportEnable && !sampleMaskExportEnable,
         ((shaderControl >> 10u) & 0x1u) != 0,
         targetOutputMode,
-        targetExportMapping
+        targetExportMapping,
+        dualSourceBlend
     };
 }
 

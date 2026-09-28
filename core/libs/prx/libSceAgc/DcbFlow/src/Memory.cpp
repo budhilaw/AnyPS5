@@ -13,10 +13,16 @@ std::uint32_t* APS5_VABI sceAgcDcbAcquireMem(CommandBuffer* buf, std::uint8_t en
     Agc::Command::CheckBits(engine, 1, __func__);
     Agc::Command::CheckBits(cbDbOp, 0x7fffffffu, __func__);
     Agc::Command::CheckBits(gcrControl, 0x7ffffu, __func__);
-    const auto address = reinterpret_cast<std::uintptr_t>(base);
-    Agc::Command::Require((address & 0xffu) == 0 && (address >> 40u) == 0, __func__, "invalid acquire memory base address");
+    // The packet addresses 256-byte blocks: the range is widened to the blocks that contain it.
+    const auto requested = reinterpret_cast<std::uintptr_t>(base);
     const auto wholeAddressSpace = sizeBytes == 0xffffffffffffffffull;
-    Agc::Command::Require(wholeAddressSpace || ((sizeBytes & 0xffu) == 0 && (sizeBytes >> 40u) == 0), __func__, "invalid acquire memory range size");
+    const auto address = requested & ~std::uintptr_t{0xffu};
+    Agc::Command::Require((address >> 40u) == 0, __func__, "invalid acquire memory base address");
+    if (!wholeAddressSpace) {
+        Agc::Command::Require(sizeBytes <= 0xffffffffffffffffull - requested, __func__, "acquire memory range overflow");
+        sizeBytes = ((requested + sizeBytes + 0xffu) & ~std::uint64_t{0xffu}) - address;
+        Agc::Command::Require((sizeBytes >> 40u) == 0, __func__, "invalid acquire memory range size");
+    }
     Agc::Command::Require(pollCycles / 40u <= 0xffffu, __func__, "acquire poll interval overflow");
     return Agc::Command::Emit(buf, 0x58u, {(static_cast<std::uint32_t>(engine) << 31u) | cbDbOp, wholeAddressSpace ? 0u : static_cast<std::uint32_t>(sizeBytes >> 8u), 0, static_cast<std::uint32_t>(address >> 8u), 0, pollCycles / 40u, gcrControl}, __func__);
 }
@@ -27,17 +33,15 @@ uint32_t APS5_VABI sceAgcDcbAcquireMemGetSize(void) {
 }
 
 uint32_t* APS5_VABI sceAgcDcbCopyData(CommandBuffer* buf, uint8_t dst, uint8_t dst_cache_policy, uint64_t dst_address, uint8_t src, uint8_t src_cache_policy, uint64_t src_address_or_immediate, uint8_t item_size, uint8_t write_confirm) {
- (void)buf;
- (void)dst;
- (void)dst_cache_policy;
- (void)dst_address;
- (void)src;
- (void)src_cache_policy;
- (void)src_address_or_immediate;
- (void)item_size;
- (void)write_confirm;
- NotImplemented_nid_no_patch(__func__);
- return nullptr;
+    Agc::Command::Require(buf != nullptr, __func__, "null command buffer");
+    Agc::Command::CheckBits(src, 0x1fu, __func__);
+    Agc::Command::CheckBits(dst, 0x1fu, __func__);
+    Agc::Command::CheckBits(dst_cache_policy, 3, __func__);
+    Agc::Command::CheckBits(src_cache_policy, 3, __func__);
+    Agc::Command::CheckBits(item_size, 1, __func__);
+    Agc::Command::CheckBits(write_confirm, 1, __func__);
+    const auto control = ((static_cast<std::uint32_t>(src) >> 1u) & 0xfu) | (((static_cast<std::uint32_t>(dst) >> 1u) & 0xfu) << 8u) | (static_cast<std::uint32_t>(src_cache_policy) << 13u) | (static_cast<std::uint32_t>(item_size) << 16u) | (static_cast<std::uint32_t>(write_confirm) << 20u) | (static_cast<std::uint32_t>(dst_cache_policy) << 25u) | ((static_cast<std::uint32_t>(src) & 1u) << 30u);
+    return Agc::Command::Emit(buf, 0x40u, {control, static_cast<std::uint32_t>(src_address_or_immediate), static_cast<std::uint32_t>(src_address_or_immediate >> 32u), static_cast<std::uint32_t>(dst_address), static_cast<std::uint32_t>(dst_address >> 32u)}, __func__);
 }
 
 std::uint64_t APS5_VABI sceAgcDcbCopyDataGetSize() {

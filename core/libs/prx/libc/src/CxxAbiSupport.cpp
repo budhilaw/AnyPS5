@@ -25,8 +25,17 @@ void* APS5_VABI __cxa_demangle_nid_postfix(const char* mangled, char* buf, std::
     return abi::__cxa_demangle(mangled, buf, len, status);
 }
 
+#if defined(_LIBCPP_VERSION)
+// libc++abi exports the Itanium entry point but its cxxabi.h does not declare it.
+extern "C" int __cxa_thread_atexit(void (*)(void*), void*, void*) noexcept;
+#endif
+
 int APS5_VABI __cxa_thread_atexit_impl_nid_postfix(void (*func)(void*), void* arg, void* dso) {
+#if defined(_LIBCPP_VERSION)
+    return __cxa_thread_atexit(func, arg, dso);
+#else
     return __cxxabiv1::__cxa_thread_atexit(func, arg, dso);
+#endif
 }
 
 const std::error_category* _ZSt17iostream_categoryv_nid_postfix() { return &std::iostream_category(); }

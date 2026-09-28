@@ -1,3 +1,7 @@
+#include <cstdio>
+#if !defined(_WIN32)
+#include <execinfo.h>
+#endif
 #include "prx/libc/include/GuestMemoryTracking.hpp"
 #include "prx/libc/include/MemoryTrackingPlatform.hpp"
 #include "prx/libc/include/GuestMemoryBacking.hpp"
@@ -35,7 +39,17 @@ Registry& registry() {
 }
 
 std::uint64_t checkedEnd(std::uint64_t address, std::size_t bytes) {
-    if (address == 0 || bytes == 0 || bytes > std::numeric_limits<std::uint64_t>::max() - address) throw std::invalid_argument("invalid tracked guest memory range");
+    if (address == 0 || bytes == 0 || bytes > std::numeric_limits<std::uint64_t>::max() - address) {
+        char message[128];
+        std::snprintf(message, sizeof(message), "invalid tracked guest memory range 0x%llx (%zu bytes)", static_cast<unsigned long long>(address), bytes);
+#if !defined(_WIN32)
+        void* frames[24];
+        const auto count = ::backtrace(frames, 24);
+        std::fprintf(stderr, "%s\n", message);
+        ::backtrace_symbols_fd(frames, count, 2);
+#endif
+        throw std::invalid_argument(message);
+    }
     return address + bytes;
 }
 
@@ -65,6 +79,7 @@ std::vector<std::shared_ptr<Entry>> overlapping(std::uint64_t address, std::size
 }
 
 bool fault(std::uint64_t address, bool writable) {
+    if (address == 0) return false; // a null dereference is never a tracked page
     std::lock_guard lock(registry().mutex);
     const auto entries = overlapping(address, 1);
     if (entries.empty()) return false;
@@ -151,6 +166,20 @@ void GuestMemoryTrackingInvalidate_nid_postfix(std::uint64_t address, std::size_
     for (const auto& entry : overlapping(address, bytes)) {
         resolve(entry, Access::Invalidate);
         entry->active = false;
+    }
+}
+
+void GuestMemoryTrackingDescribe_nid_postfix(std::uint64_t address, std::size_t bytes) {
+    if (bytes == 0) return;
+    auto& entries = registry().entries;
+    std::fprintf(stderr, "  tracking registry: %zu watches, installed %d\n", entries.size(), registry().installed ? 1 : 0);
+    const auto end = address + bytes;
+    auto first = entries.upper_bound(address);
+    if (first != entries.begin()) --first;
+    for (auto it = first; it != entries.end() && it->first < end; ++it) {
+        const auto& entry = *it->second;
+        if (entry.address + entry.bytes <= address) continue;
+        std::fprintf(stderr, "  watch 0x%llx+0x%zx protection %d active %d resolving %d\n", static_cast<unsigned long long>(entry.address), entry.bytes, static_cast<int>(entry.protection), entry.active ? 1 : 0, entry.resolving ? 1 : 0);
     }
 }
 

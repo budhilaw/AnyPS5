@@ -1,3 +1,5 @@
+#include <cxxabi.h>
+#include <cstdio>
 #include <bit>
 #include <chrono>
 #include <limits>
@@ -5,6 +7,7 @@
 
 #include "SDL.h"
 #include "SDL_vulkan.h"
+#include "prx/libSceVideoOut/include/MainThread.hpp"
 #include "prx/libSceVideoOut/include/PadInput.hpp"
 #include "prx/libScePad/include/PadState.hpp"
 #include "prx/libkernel/Equeue/Equeue.hpp"
@@ -176,9 +179,11 @@ VideoOutDriver& VideoOutDriver::Get() {
 }
 
 VideoOutDriver::VideoOutDriver() {
-    if (SDL_InitSubSystem(SDL_INIT_VIDEO) < 0) {
-        throw std::runtime_error(std::string("SDL_InitSubSystem(VIDEO) failed: ") + SDL_GetError());
-    }
+    MainThread::Run([] {
+        if (SDL_InitSubSystem(SDL_INIT_VIDEO) < 0) {
+            throw std::runtime_error(std::string("SDL_InitSubSystem(VIDEO) failed: ") + SDL_GetError());
+        }
+    });
     try {
         AgcDriverWaitIdle_nid_postfix();
         presentThread = std::jthread([this](std::stop_token token) { presentLoop(token); });
@@ -195,7 +200,7 @@ VideoOutDriver::VideoOutDriver() {
             flipQueue->changed.notify_all();
             presentThread.join();
         }
-        SDL_QuitSubSystem(SDL_INIT_VIDEO);
+        MainThread::Run([] { SDL_QuitSubSystem(SDL_INIT_VIDEO); });
         throw;
     }
 }
@@ -227,7 +232,7 @@ void VideoOutDriver::Shutdown() {
         AgcDriverReleaseWindow_nid_postfix(window.Handle());
         window.Destroy();
     }
-    SDL_QuitSubSystem(SDL_INIT_VIDEO);
+    MainThread::Run([] { SDL_QuitSubSystem(SDL_INIT_VIDEO); });
     stopped = true;
     std::lock_guard lock(flipQueue->mutex);
     if (flipQueue->failure) std::rethrow_exception(flipQueue->failure);
@@ -377,7 +382,9 @@ void VideoOutDriver::processFlip(FlipRequest& req) {
     extensions.resize(extensionCount);
     const AgcDriver::PresentationWindow target{window.Handle(), extensions, [](void* context, VkInstance instance) {
         VkSurfaceKHR surface = VK_NULL_HANDLE;
-        if (!SDL_Vulkan_CreateSurface(static_cast<SDL_Window*>(context), instance, &surface)) throw std::runtime_error(std::string("SDL_Vulkan_CreateSurface failed: ") + SDL_GetError());
+        MainThread::Run([&] { // the Metal layer behind the surface is created on the window's thread
+            if (!SDL_Vulkan_CreateSurface(static_cast<SDL_Window*>(context), instance, &surface)) throw std::runtime_error(std::string("SDL_Vulkan_CreateSurface failed: ") + SDL_GetError());
+        });
         return surface;
     }, [](void* context, std::uint32_t* width, std::uint32_t* height) {
         if ((SDL_GetWindowFlags(static_cast<SDL_Window*>(context)) & SDL_WINDOW_MINIMIZED) != 0) {
@@ -440,8 +447,12 @@ void VideoOutDriver::presentLoop(std::stop_token token) {
     PadInput padInput;
     try {
         while (!token.stop_requested()) {
-            SDL_Event event;
-            while (SDL_PollEvent(&event)) {
+            std::vector<SDL_Event> events;
+            MainThread::Run([&] {
+                SDL_Event event;
+                while (SDL_PollEvent(&event)) events.push_back(event);
+            });
+            for (const auto& event : events) {
                 require(event.type != SDL_QUIT, "window was closed");
                 padInput.HandleEvent(event, window);
             }
@@ -485,6 +496,7 @@ void VideoOutDriver::presentLoop(std::stop_token token) {
     } catch (...) {
         auto error = std::current_exception();
         if (!error) std::terminate();
+        try { std::rethrow_exception(error); } catch (const std::exception& e) { std::fprintf(stderr, "VideoOut presentation failed: %s\n", e.what()); } catch (...) { const auto* type = abi::__cxa_current_exception_type(); std::fprintf(stderr, "VideoOut presentation failed: exception of type %s\n", type ? type->name() : "?"); }
         PadReportInputFailure_nid_postfix(error);
         if (current) current->Fail(error);
         std::list<std::shared_ptr<FlipRequest>> failed;

@@ -162,7 +162,9 @@ void TranslationContext::TranslateEmbeddedFetch(const RdnaInstruction& instructi
             std::uint8_t& required = program.Info().vertexFetchComponents[attribute];
             required = static_cast<std::uint8_t>(std::max<std::uint32_t>(required, memoryComponent + 1u));
         } else {
-            throw std::runtime_error("invalid embedded fetch component selector");
+            // Selectors 2 and 3 are reserved; the hardware returns zero for them (titles leave
+            // them in descriptors of unused attributes).
+            value = &ir.Constant(0u);
         }
         writeOperand(offsetOperand(instruction.destination, component), value);
     }

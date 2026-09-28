@@ -17,6 +17,7 @@ constexpr int NpGameIntentUserIdInvalid = -1;
 extern "C" {
 
 int APS5_VABI sceNpGameIntentGetPropertyValueString(const NpGameIntentData* intentData, const char* key, char* valueBuf, size_t bufSize) {
+    Aps5TraceCall_nid_no_patch(__func__);
  if (intentData == nullptr || key == nullptr || valueBuf == nullptr || bufSize == 0) {
   APS5_INVALID_ARG_EX;
  }
@@ -26,11 +27,13 @@ int APS5_VABI sceNpGameIntentGetPropertyValueString(const NpGameIntentData* inte
 }
 
 int APS5_VABI sceNpGameIntentInitialize(const void* initParam) {
+    Aps5TraceCall_nid_no_patch(__func__);
  (void)initParam;
  return 0;
 }
 
 int APS5_VABI sceNpGameIntentReceiveIntent(NpGameIntentInfo* intentInfo) {
+    Aps5TraceCall_nid_no_patch(__func__);
  if (intentInfo == nullptr) {
   APS5_INVALID_ARG_EX;
  }
@@ -43,6 +46,7 @@ int APS5_VABI sceNpGameIntentReceiveIntent(NpGameIntentInfo* intentInfo) {
 }
 
 int APS5_VABI sceNpGameIntentTerminate(void) {
+    Aps5TraceCall_nid_no_patch(__func__);
  return 0;
 }
 

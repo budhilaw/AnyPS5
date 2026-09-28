@@ -61,7 +61,7 @@ ShaderStageKind toShaderStageKind(ShaderStage stage) {
 
 IrProgram PrepareResourceProgram(const RecompileRequest& request) {
     const auto stageKind = toShaderStageKind(request.shader.stage);
-    const auto inputInfo = BuildShaderStageInputInfo(stageKind, request.context);
+    const auto inputInfo = BuildShaderStageInputInfo(stageKind, request.context, request.target.subgroupSize);
 
     constexpr RdnaInstructionDecoder decoder;
     const auto decoded = decoder.Decode(request.shader.code);
@@ -192,7 +192,7 @@ std::shared_ptr<SourceEntry> getSource(const RecompileRequest& request) {
 }
 
 CompiledVariant compileVariant(const RecompileRequest& request, IrProgram program, const ResourceSnapshot& resourceSnapshot, const ResourceSpecialization& resourceSpecialization) {
-    const auto inputInfo = BuildShaderStageInputInfo(toShaderStageKind(request.shader.stage), request.context);
+    const auto inputInfo = BuildShaderStageInputInfo(toShaderStageKind(request.shader.stage), request.context, request.target.subgroupSize);
     constexpr DeadCodeEliminator deadCodeEliminator;
     constexpr ResourceMaterializer resourceMaterializer;
     resourceMaterializer.Apply(program, resourceSpecialization);
@@ -216,6 +216,7 @@ CompiledVariant compileVariant(const RecompileRequest& request, IrProgram progra
     targetOptions.bdaAbiVersion = request.target.bdaAbiVersion;
     targetOptions.supportedCapabilities = request.target.supportedCapabilities;
     targetOptions.supportedExtensions = request.target.supportedExtensions;
+    targetOptions.subgroupStageMask = request.target.subgroupStageMask;
 
     constexpr SpirvEmitter spirvEmitter;
     RecompileResult result;
@@ -270,7 +271,7 @@ bool sameLayout(const BindingLayout& left, const BindingLayout& right) {
 }
 
 RecompileResult RecompileImpl(const RecompileRequest& request) {
-    static_cast<void>(BuildShaderStageInputInfo(toShaderStageKind(request.shader.stage), request.context));
+    static_cast<void>(BuildShaderStageInputInfo(toShaderStageKind(request.shader.stage), request.context, request.target.subgroupSize));
     RequestMemoryView memory(request.context.memory);
     const auto runtime = memory.MakeRuntime(request.context.userData, request.shader.codeAddress);
     ResourceSnapshot snapshot;
@@ -310,7 +311,7 @@ RecompileResult RecompileImpl(const RecompileRequest& request) {
 }
 
 std::shared_ptr<const IrResourcePlan> GetResourcePlan(const RecompileRequest& request) {
-    static_cast<void>(BuildShaderStageInputInfo(toShaderStageKind(request.shader.stage), request.context));
+    static_cast<void>(BuildShaderStageInputInfo(toShaderStageKind(request.shader.stage), request.context, request.target.subgroupSize));
     if (request.useCache) return getSource(request)->plan;
     return makeResourcePlan(request);
 }

@@ -37,10 +37,12 @@ std::uint32_t* APS5_VABI sceAgcCbReleaseMem(CommandBuffer* buf, std::uint8_t act
     } else if (dataSelect == 5) {
         Agc::Command::Require(data == 0, __func__, "GDS release cannot use immediate data");
         value = gdsOffset | (static_cast<std::uint64_t>(gdsSize) << 16u);
-    } else {
-        Agc::Command::Require(gdsOffset == 0 && gdsSize == 0, __func__, "GDS parameters supplied for a non-GDS release");
     }
-    if (dataSelect != 0 && interrupt != 4) {
+    // GDS offset and size only describe a GDS release (data selector 5); titles pass leftover
+    // values otherwise (Unity passes a size of 1), which the hardware ignores.
+    // A null address is allowed at emission: titles patch the label in afterwards through
+    // sceAgcQueueEndOfPipeActionPatchAddress, and the executor rejects a release left unpatched.
+    if (dataSelect != 0 && interrupt != 4 && guestAddress != 0) {
         Agc::Command::CheckAddress(guestAddress, dataSelect == 2 || dataSelect == 3 ? 8 : 4, __func__);
     }
     if (dataSelect == 1) {

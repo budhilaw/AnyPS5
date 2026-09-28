@@ -13,6 +13,8 @@ public:
     GpuColorTransfer(const GpuColorTransfer&) = delete;
     GpuColorTransfer& operator=(const GpuColorTransfer&) = delete;
     void Upload(std::uint64_t address, std::uint32_t width, std::uint32_t height, ColorTileMode mode);
+    // Sizes the transfer buffers for a surface without uploading it (adopted GPU contents).
+    void Prepare(std::uint32_t width, std::uint32_t height, ColorTileMode mode) { prepare(width, height, mode); }
     void Detile(VkCommandBuffer commands, bool swapRedBlue = false);
     void Tile(VkCommandBuffer commands);
     void WriteBack(std::uint64_t address);

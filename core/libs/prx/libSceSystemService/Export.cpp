@@ -1,4 +1,5 @@
 #include <cstddef>
+#include <cstdio>
 #include <cstdint>
 #include <cstring>
 #include <cstdlib>
@@ -7,9 +8,14 @@
 #include "prx/libc/include/General.hpp"
 #include "prx/libSceSystemService/SystemService.hpp"
 
+namespace {
+bool noticeScreenSkip = false;
+}
+
 extern "C" {
 
 int APS5_VABI sceSystemServiceLoadExec(const char* path, const char* const* arguments) {
+    Aps5TraceCall_nid_no_patch(__func__);
     if (!path || !*path) return SYSTEM_SERVICE_ERROR_PARAMETER;
     if (std::strcmp(path, "exit") != 0) {
         NotImplemented_nid_no_patch("sceSystemServiceLoadExec: executable replacement");
@@ -20,29 +26,37 @@ int APS5_VABI sceSystemServiceLoadExec(const char* path, const char* const* argu
 }
 
 int APS5_VABI sceSystemServiceDisableNoticeScreenSkipFlagAutoSet(void) {
- NotImplemented_nid_no_patch(__func__);
- return 0;
+    Aps5TraceCall_nid_no_patch(__func__);
+    return 0;
 }
 
 int APS5_VABI sceSystemServiceGetDisplaySafeAreaInfo(SystemServiceDisplaySafeAreaInfo* info) {
- (void)info;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+    Aps5TraceCall_nid_no_patch(__func__);
+    if (info == nullptr) return SYSTEM_SERVICE_ERROR_PARAMETER;
+    *info = SystemServiceDisplaySafeAreaInfo{};
+    info->ratio = 1.0f; // a monitor shows the whole frame; consoles default to 0.9 for overscan
+    return 0;
 }
 
 int APS5_VABI sceSystemServiceGetHdrToneMapLuminance(SystemServiceHdrToneMapLuminance* luminance) {
- (void)luminance;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+    Aps5TraceCall_nid_no_patch(__func__);
+    if (luminance == nullptr) return SYSTEM_SERVICE_ERROR_PARAMETER;
+    // The window is presented in SDR: report the reference SDR display (100 nits peak).
+    luminance->max_full_frame_tone_map_luminance = 100.0f;
+    luminance->max_tone_map_luminance = 100.0f;
+    luminance->min_tone_map_luminance = 0.0f;
+    return 0;
 }
 
 int APS5_VABI sceSystemServiceGetNoticeScreenSkipFlag(bool* value) {
- (void)value;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+    Aps5TraceCall_nid_no_patch(__func__);
+    if (value == nullptr) return SYSTEM_SERVICE_ERROR_PARAMETER;
+    *value = noticeScreenSkip;
+    return 0;
 }
 
 int APS5_VABI sceSystemServiceGetStatus(SystemServiceStatus* status) {
+    Aps5TraceCall_nid_no_patch(__func__);
  if (status == nullptr) {
   return SYSTEM_SERVICE_ERROR_PARAMETER;
  }
@@ -51,10 +65,12 @@ int APS5_VABI sceSystemServiceGetStatus(SystemServiceStatus* status) {
 }
 
 int APS5_VABI sceSystemServiceHideSplashScreen(void) {
+    Aps5TraceCall_nid_no_patch(__func__);
  return SYSTEM_SERVICE_OK;
 }
 
 int APS5_VABI sceSystemServiceParamGetInt(int paramId, int* value) {
+    Aps5TraceCall_nid_no_patch(__func__);
  if (value == nullptr) {
   return SYSTEM_SERVICE_ERROR_PARAMETER;
  }
@@ -72,6 +88,7 @@ int APS5_VABI sceSystemServiceParamGetInt(int paramId, int* value) {
 }
 
 int APS5_VABI sceSystemServiceParamGetString(int param_id, char* buf, size_t buf_size) {
+    Aps5TraceCall_nid_no_patch(__func__);
  (void)param_id;
  (void)buf;
  (void)buf_size;
@@ -80,11 +97,12 @@ int APS5_VABI sceSystemServiceParamGetString(int param_id, char* buf, size_t buf
 }
 
 int APS5_VABI sceSystemServicePowerTick(void) {
- NotImplemented_nid_no_patch(__func__);
- return 0;
+    Aps5TraceCall_nid_no_patch(__func__);
+    return 0; // host idle timers are not held; the title keeps the display active by rendering
 }
 
 int APS5_VABI sceSystemServiceReceiveEvent(SystemServiceEvent* event) {
+    Aps5TraceCall_nid_no_patch(__func__);
  if (event == nullptr) {
   return SYSTEM_SERVICE_ERROR_PARAMETER;
  }
@@ -94,14 +112,16 @@ int APS5_VABI sceSystemServiceReceiveEvent(SystemServiceEvent* event) {
 }
 
 int APS5_VABI sceSystemServiceReportAbnormalTermination(const void* info) {
- (void)info;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+    Aps5TraceCall_nid_no_patch(__func__);
+    (void)info;
+    std::fprintf(stderr, "sceSystemServiceReportAbnormalTermination: title reported an abnormal termination\n");
+    return 0;
 }
 
 int APS5_VABI sceSystemServiceSetNoticeScreenSkipFlag(void) {
- NotImplemented_nid_no_patch(__func__);
- return 0;
+    Aps5TraceCall_nid_no_patch(__func__);
+    noticeScreenSkip = true;
+    return 0;
 }
 
 }

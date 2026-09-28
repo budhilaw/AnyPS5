@@ -78,6 +78,8 @@ struct SpirvEmitterState {
     SpirvRequirements requirements;
     std::uint32_t laneCount = 1;
     std::uint32_t laneHalf = 0;
+    // The device has no subgroup operations for this stage: every invocation is a wave of one lane.
+    bool singleLane = false;
     std::uint32_t storageBufferVariable = 0;
     std::uint32_t storageBufferU64Variable = 0;
     std::array<std::uint32_t, ShaderInfo::MaxBuffers> memoryByteOffsets {};

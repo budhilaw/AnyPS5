@@ -31,6 +31,42 @@ const std::type_info* APS5_VABI _ZNKSt15__exception_ptr13exception_ptr20__cxa_ex
     return ExceptionPointerType(self);
 }
 
+#if defined(_LIBCPP_VERSION)
+// The guest's exception_ptr follows the libstdc++ ABI: one pointer to the exception object with
+// non-trivial copy and destruction, so it is passed and returned by invisible reference.
+struct GuestExceptionPointer {
+    void* object = nullptr;
+    GuestExceptionPointer() noexcept = default;
+    GuestExceptionPointer(const GuestExceptionPointer& other) noexcept : object(other.object) { if (object) __cxa_increment_exception_refcount_nid_postfix(object); }
+    GuestExceptionPointer& operator=(const GuestExceptionPointer&) = delete;
+    ~GuestExceptionPointer() { if (object) __cxa_decrement_exception_refcount_nid_postfix(object); }
+};
+
+GuestExceptionPointer APS5_VABI _ZSt17current_exceptionv_nid_postfix() noexcept {
+    GuestExceptionPointer result;
+    result.object = __cxa_current_primary_exception_nid_postfix();
+    return result;
+}
+
+[[noreturn]] void APS5_VABI _ZSt17rethrow_exceptionNSt15__exception_ptr13exception_ptrE_nid_postfix(GuestExceptionPointer exception) {
+    __cxa_rethrow_primary_exception_nid_postfix(exception.object);
+    LibcException::Terminate();
+}
+}
+
+void ExceptionPointerAddref(std::exception_ptr* self) noexcept { __cxa_increment_exception_refcount_nid_postfix(*reinterpret_cast<void**>(self)); }
+void ExceptionPointerRelease(std::exception_ptr* self) noexcept {
+    auto& object = *reinterpret_cast<void**>(self);
+    __cxa_decrement_exception_refcount_nid_postfix(object);
+    object = nullptr;
+}
+void* ExceptionPointerGet(const std::exception_ptr* self) noexcept { return *reinterpret_cast<void* const*>(self); }
+void ExceptionPointerConstruct(std::exception_ptr* self, void* exception) noexcept {
+    *reinterpret_cast<void**>(self) = exception;
+    __cxa_increment_exception_refcount_nid_postfix(exception);
+}
+const std::type_info* ExceptionPointerType(const std::exception_ptr* self) noexcept { return LibcException::FromObject(*reinterpret_cast<void* const*>(self))->type; }
+#else
 std::exception_ptr APS5_VABI _ZSt17current_exceptionv_nid_postfix() noexcept {
     return std::current_exception();
 }
@@ -79,3 +115,5 @@ const type_info* exception_ptr::__cxa_exception_type() const noexcept {
 }
 
 }
+
+#endif

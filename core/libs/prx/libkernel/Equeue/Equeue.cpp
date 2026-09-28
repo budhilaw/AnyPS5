@@ -1,3 +1,5 @@
+#include "prx/libc/include/General.hpp"
+#include <string>
 #include "Equeue.hpp"
 
 #include <algorithm>
@@ -246,6 +248,10 @@ KernelEqueueRef EqueuePin_nid_postfix(KernelEqueue eq) {
 }
 
 int APS5_VABI EqueueAddEvent_nid_postfix(KernelEqueue eq, const KernelEqueueEvent& event) {
+    {
+        static int reported = 0;
+        if (reported < 60) { ++reported; APS5_LOG_OUT("equeue add eq=%llu ident=%llu filter=%d flags=0x%x", static_cast<unsigned long long>(eq), static_cast<unsigned long long>(event.event.ident), static_cast<int>(event.event.filter), static_cast<unsigned>(event.event.flags)); }
+    }
     auto owner = EqueuePin_nid_postfix(eq);
     if (!owner) {
         return EQUEUE_ERROR_EBADF;
@@ -271,6 +277,7 @@ int APS5_VABI EqueueDeleteEvent_nid_postfix(KernelEqueue eq, uintptr_t ident, in
 
 
 int APS5_VABI sceKernelCreateEqueue(KernelEqueue* eq, const char* name) {
+    APS5_LOG_OUT("sceKernelCreateEqueue %s", name ? name : "(null)");
     if (eq == nullptr || name == nullptr) {
         return EQUEUE_ERROR_EINVAL;
     }
@@ -317,6 +324,13 @@ int APS5_VABI sceKernelWaitEqueue(KernelEqueue eq, KernelEvent* ev, int num, int
         *out = owner->GetTriggeredEvents(ev, num);
     } else {
         *out = owner->WaitForEvents(ev, num, *timo);
+    }
+    {
+        static int reported = 0;
+        if (reported < 80) {
+            ++reported;
+            APS5_LOG_OUT("sceKernelWaitEqueue eq=%llu num=%d timeout=%s -> %d%s", static_cast<unsigned long long>(eq), num, timo ? std::to_string(*timo).c_str() : "none", *out, *out > 0 ? (std::string(" first ident=") + std::to_string(ev[0].ident) + " filter=" + std::to_string(ev[0].filter) + " data=" + std::to_string(ev[0].data)).c_str() : "");
+        }
     }
     if (*out == EQUEUE_ERROR_EBADF) {
         return EQUEUE_ERROR_EBADF;

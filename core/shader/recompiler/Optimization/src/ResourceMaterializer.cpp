@@ -3,6 +3,7 @@
 #include "Optimization/ShaderStageInputInfo.hpp"
 #include "RdnaDecoder/RdnaDescriptorFormat.hpp"
 #include <algorithm>
+#include <cstdio>
 #include <array>
 #include <cstdint>
 #include <limits>
@@ -285,8 +286,12 @@ void buildResourceSpecialization(const IrResourcePlan& plan, ResourceSnapshot& s
     result.buffers.reserve(plan.info.buffers.size());
     for (std::uint32_t i = 0; i < plan.info.buffers.size(); i++) {
         const ShaderBufferResource decoded = decodeBufferDescriptor(snapshot.buffers[i]);
-        if (decoded.Type() != 0u) {
-            throw std::runtime_error("buffer descriptor uses an unsupported type");
+        // Type 0 is a buffer; titles also bind buffers whose type field reads 3 (the console's
+        // buffer instructions ignore the field), so only image types are rejected.
+        if (decoded.Type() != 0u && decoded.Type() != 3u) {
+            char message[160];
+            std::snprintf(message, sizeof(message), "buffer descriptor %u uses an unsupported type %u: {%08x %08x %08x %08x}", i, decoded.Type(), decoded.fields[0], decoded.fields[1], decoded.fields[2], decoded.fields[3]);
+            throw std::runtime_error(message);
         }
         auto packedStride = decoded.PackedStride();
         const auto stride = packedStride & 0x3fffu;

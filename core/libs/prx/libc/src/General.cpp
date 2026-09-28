@@ -1,3 +1,14 @@
+#include <chrono>
+#include "prx/libc/include/general/LogMacros.hpp"
+
+namespace {
+const auto logClockStart = std::chrono::steady_clock::now();
+}
+
+double Aps5LogSeconds() {
+    return std::chrono::duration<double>(std::chrono::steady_clock::now() - logClockStart).count();
+}
+
 #include <stdexcept>
 #include <string>
 #include <filesystem>
@@ -85,4 +96,10 @@ extern "C" char* APS5_VABI getcwd_nid_postfix(char* buffer, std::size_t size) {
 
 extern "C" void NotImplemented_nid_no_patch(const char* funcName) {
     throw std::runtime_error(std::string(funcName) + " not implemented");
+}
+
+#include <cstdlib>
+extern "C" void Aps5TraceCall_nid_no_patch(const char* funcName) {
+    static const bool enabled = std::getenv("ANYPS5_TRACE_SYSTEM") != nullptr;
+    if (enabled) std::fprintf(stderr, "[%9.3f][system] %s\n", Aps5LogSeconds(), funcName);
 }

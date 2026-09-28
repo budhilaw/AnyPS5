@@ -53,7 +53,9 @@ add_library(libSceAgcDriver SHARED EXCLUDE_FROM_ALL
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/ShaderMemory.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/BdaFeatures.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/Pm4.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/GpuJournal.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/VulkanDevice.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/VulkanLibrary.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/SwapchainState.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/AspectFit.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/PresentationScaler.cpp
@@ -76,6 +78,11 @@ add_library(libSceAgcDriver SHARED EXCLUDE_FROM_ALL
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/TextureTiling.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/TextureDetiler.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/Texture.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/NullTexture.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/DepthTexture.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/GuestBufferCache.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/SlowPipeline.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/PipelineCache.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/Sampler.cpp
         ${agcTextureDetileShaderHeader}
         ${CMAKE_CURRENT_SOURCE_DIR}/Eq/src/Event.cpp
@@ -100,7 +107,7 @@ add_shader_recompiler(shader_recompiler_agc_driver libc)
 
 target_link_libraries(libSceAgcDriver PRIVATE
         shader_recompiler_agc_driver
-        SDL2-static
+        ${ANYPS5_SDL_TARGET}
         libc
 )
 
@@ -196,6 +203,9 @@ add_executable(agc_driver_graphics_tests EXCLUDE_FROM_ALL
         tests/GuestSamplerResource.cpp
         tests/TextureDetiler.cpp
         Graphics/src/State.cpp
+        Graphics/src/Draw.cpp
+        Graphics/src/Pipeline.cpp
+        Graphics/src/GraphicsPipelineCache.cpp
         Graphics/src/ColorTargetLayout.cpp
         Graphics/src/ColorTargetTransfer.cpp
         Graphics/src/Resources.cpp
@@ -211,6 +221,11 @@ add_executable(agc_driver_graphics_tests EXCLUDE_FROM_ALL
         Graphics/src/TextureTiling.cpp
         Graphics/src/TextureDetiler.cpp
         Graphics/src/Texture.cpp
+        Graphics/src/NullTexture.cpp
+        Graphics/src/DepthTexture.cpp
+        Graphics/src/GuestBufferCache.cpp
+        Graphics/src/SlowPipeline.cpp
+        Graphics/src/PipelineCache.cpp
         Graphics/src/Sampler.cpp
         ${agcTextureDetileShaderHeader}
         Execution/src/GuestMemory.cpp
@@ -228,6 +243,7 @@ target_include_directories(agc_driver_graphics_tests PRIVATE
 )
 
 target_link_libraries(agc_driver_graphics_tests PRIVATE
+        shader_recompiler_agc_driver
         libc
 )
 
@@ -249,7 +265,7 @@ target_include_directories(agc_driver_bda_device_tests PRIVATE
         ${CMAKE_SOURCE_DIR}/core/shader/recompiler
         ${CMAKE_SOURCE_DIR}/3rdparty/Vulkan-Headers/include
 )
-target_link_libraries(agc_driver_bda_device_tests PRIVATE SDL2-static libc shader_recompiler_agc_driver)
+target_link_libraries(agc_driver_bda_device_tests PRIVATE ${ANYPS5_SDL_TARGET} libc shader_recompiler_agc_driver)
 set_target_properties(agc_driver_bda_device_tests PROPERTIES CXX_EXTENSIONS OFF)
 configure_windows_unwind(agc_driver_bda_device_tests)
 
@@ -282,6 +298,7 @@ if(AGC_BUILD_VISUAL_TEST)
     add_executable(agc_driver_visual_test EXCLUDE_FROM_ALL
             tests/Visual.cpp
             Execution/src/VulkanDevice.cpp
+            Execution/src/VulkanLibrary.cpp
             Execution/src/SwapchainState.cpp
             Execution/src/AspectFit.cpp
             Execution/src/PresentationScaler.cpp
@@ -304,6 +321,11 @@ if(AGC_BUILD_VISUAL_TEST)
             Graphics/src/TextureTiling.cpp
             Graphics/src/TextureDetiler.cpp
             Graphics/src/Texture.cpp
+            Graphics/src/NullTexture.cpp
+            Graphics/src/DepthTexture.cpp
+            Graphics/src/GuestBufferCache.cpp
+            Graphics/src/SlowPipeline.cpp
+            Graphics/src/PipelineCache.cpp
             Graphics/src/Sampler.cpp
             ${agcTextureDetileShaderHeader}
             ${visualShaders}
@@ -321,7 +343,7 @@ if(AGC_BUILD_VISUAL_TEST)
     )
 
     target_link_libraries(agc_driver_visual_test PRIVATE
-            SDL2-static
+            ${ANYPS5_SDL_TARGET}
             libc
     )
 

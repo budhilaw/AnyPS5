@@ -181,6 +181,13 @@ RelinkResult RelinkerPipeline::Relink(const std::vector<std::uint8_t>& sourceElf
                     throw RelinkerException("RELATIVE relocation has a nonzero symbol index", pos);
                 continue;
             }
+            // Module-local thread storage (R_X86_64_DTPMOD64 / DTPOFF64): the target resolves the
+            // module id and offset; a symbol reference would need another module's TLS.
+            if (relType == 16 || relType == 17) {
+                if (symIdx != 0)
+                    throw RelinkerException("TLS module relocation against a symbol is not supported", pos);
+                continue;
+            }
 
             const FileByteOffset symOff = dynSymTabOffset + static_cast<FileByteOffset>(symIdx) * symEntSize;
             if (symOff + 4 > raw.size())
@@ -272,8 +279,8 @@ RelinkResult RelinkerPipeline::Relink(const std::vector<std::uint8_t>& sourceElf
             std::memcpy(&rAddend, raw.data() + pos + 16, 8);
             const std::uint32_t symIdx = static_cast<std::uint32_t>(rInfo >> 32);
             const std::uint32_t relType = static_cast<std::uint32_t>(rInfo & 0xffffffff);
-            if (symIdx == 0 && relType == R_X86_64_RELATIVE)
-                appendRela(dynSection.RelaData, rOffset, static_cast<std::uint64_t>(R_X86_64_RELATIVE), rAddend);
+            if (symIdx == 0 && (relType == R_X86_64_RELATIVE || relType == 16 || relType == 17))
+                appendRela(dynSection.RelaData, rOffset, static_cast<std::uint64_t>(relType), rAddend);
         }
     };
 

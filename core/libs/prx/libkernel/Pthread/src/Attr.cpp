@@ -4,6 +4,7 @@
 
 static constexpr int SCE_OK = 0;
 static constexpr int SCE_KERNEL_ERROR_ENOMEM = 0x8002000C;
+static constexpr int SCE_KERNEL_ERROR_EINVAL = 0x80020016;
 
 static constexpr std::size_t DEFAULT_STACK_SIZE = 1u << 20;
 static constexpr int DETACH_JOINABLE = 0;
@@ -86,102 +87,91 @@ int APS5_VABI scePthreadAttrGet(Pthread thread, PthreadAttr* attr) {
 }
 
 int APS5_VABI scePthreadAttrGetaffinity(const PthreadAttr* attr, KernelCpumask* mask) {
- (void)attr;
- (void)mask;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+    if (!attr || !*attr || !mask) return SCE_KERNEL_ERROR_EINVAL;
+    *mask = (*attr)->_affinity;
+    return SCE_OK;
 }
 
 int APS5_VABI scePthreadAttrGetdetachstate(const PthreadAttr* attr, int* state) {
- (void)attr;
- (void)state;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+    if (!attr || !*attr || !state) return SCE_KERNEL_ERROR_EINVAL;
+    *state = (*attr)->_detachstate;
+    return SCE_OK;
 }
 
 int APS5_VABI scePthreadAttrGetguardsize(const PthreadAttr* attr, size_t* guard_size) {
- (void)attr;
- (void)guard_size;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+    if (!attr || !*attr || !guard_size) return SCE_KERNEL_ERROR_EINVAL;
+    *guard_size = (*attr)->_guardsize;
+    return SCE_OK;
 }
 
 int APS5_VABI scePthreadAttrGetschedparam(const PthreadAttr* attr, KernelSchedParam* param) {
- (void)attr;
- (void)param;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+    if (!attr || !*attr || !param) return SCE_KERNEL_ERROR_EINVAL;
+    param->sched_priority = (*attr)->_schedpriority;
+    return SCE_OK;
 }
 
 int APS5_VABI scePthreadAttrGetsolosched(const PthreadAttr* attr, int* solosched) {
- (void)attr;
- (void)solosched;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+    if (!attr || !*attr || !solosched) return SCE_KERNEL_ERROR_EINVAL;
+    *solosched = (*attr)->_solosched;
+    return SCE_OK;
 }
 
 int APS5_VABI scePthreadAttrGetstackaddr(const PthreadAttr* attr, void** stack_addr) {
- (void)attr;
- (void)stack_addr;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+    if (!attr || !*attr || !stack_addr) return SCE_KERNEL_ERROR_EINVAL;
+    *stack_addr = (*attr)->stackAddress;
+    return SCE_OK;
 }
 
 int APS5_VABI scePthreadAttrGetstacksize(const PthreadAttr* attr, size_t* stack_size) {
- (void)attr;
- (void)stack_size;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+    if (!attr || !*attr || !stack_size) return SCE_KERNEL_ERROR_EINVAL;
+    *stack_size = (*attr)->_stacksize;
+    return SCE_OK;
 }
 
 int APS5_VABI scePthreadAttrSetaffinity(PthreadAttr* attr, KernelCpumask mask) {
- (void)attr;
- (void)mask;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+    if (!attr || !*attr) return SCE_KERNEL_ERROR_EINVAL;
+    if (mask == 0) return SCE_KERNEL_ERROR_EINVAL;
+    (*attr)->_affinity = mask;
+    return SCE_OK;
 }
 
 int APS5_VABI scePthreadAttrSetguardsize(PthreadAttr* attr, size_t guard_size) {
- (void)attr;
- (void)guard_size;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+    if (!attr || !*attr) return SCE_KERNEL_ERROR_EINVAL;
+    (*attr)->_guardsize = guard_size;
+    return SCE_OK;
 }
 
 int APS5_VABI scePthreadAttrSetinheritsched(PthreadAttr* attr, int inherit_sched) {
- (void)attr;
- (void)inherit_sched;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+    if (!attr || !*attr || (inherit_sched != 0 && inherit_sched != 4)) return SCE_KERNEL_ERROR_EINVAL;
+    (*attr)->_inheritsched = inherit_sched;
+    return SCE_OK;
 }
 
 int APS5_VABI scePthreadAttrSetschedpolicy(PthreadAttr* attr, int policy) {
- (void)attr;
- (void)policy;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+    if (!attr || !*attr || policy < 0 || policy > 3) return SCE_KERNEL_ERROR_EINVAL;
+    (*attr)->_schedpolicy = policy;
+    return SCE_OK;
 }
 
 int APS5_VABI scePthreadAttrSetsolosched(PthreadAttr* attr, int solosched) {
- (void)attr;
- (void)solosched;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+    if (!attr || !*attr || (solosched != 0 && solosched != 1)) return SCE_KERNEL_ERROR_EINVAL;
+    (*attr)->_solosched = solosched; // a core-exclusivity hint the host scheduler does not take
+    return SCE_OK;
 }
 
 int APS5_VABI scePthreadAttrSetstack(PthreadAttr* attr, void* addr, size_t size) {
- (void)attr;
- (void)addr;
- (void)size;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+    if (!attr || !*attr || !addr || size < 16384) return SCE_KERNEL_ERROR_EINVAL;
+    // Caller-provided stacks are recorded for queries; threads still run on host-allocated stacks
+    // of the requested size, since guest memory cannot back a host thread's stack portably.
+    (*attr)->stackAddress = addr;
+    (*attr)->_stacksize = size;
+    return SCE_OK;
 }
 
 int APS5_VABI scePthreadAttrSetstackaddr(PthreadAttr* attr, void* addr) {
- (void)attr;
- (void)addr;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+    if (!attr || !*attr || !addr) return SCE_KERNEL_ERROR_EINVAL;
+    (*attr)->stackAddress = addr;
+    return SCE_OK;
 }
 
 }

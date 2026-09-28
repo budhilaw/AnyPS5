@@ -1,3 +1,4 @@
+#include <cstdio>
 #include "prx/libSceAgc/Command/include/Packet.hpp"
 
 #include <algorithm>
@@ -15,11 +16,21 @@ void Require(bool condition, const char* function, const char* reason) {
 }
 
 void CheckBits(std::uint64_t value, std::uint64_t mask, const char* function) {
-    Require((value & ~mask) == 0, function, "reserved bits are set");
+    if ((value & ~mask) == 0) return;
+    char message[96];
+    std::snprintf(message, sizeof(message), "reserved bits are set in 0x%llx (mask 0x%llx)", static_cast<unsigned long long>(value), static_cast<unsigned long long>(mask));
+    Require(false, function, message);
 }
 
 void CheckAddress(std::uint64_t address, std::uint32_t alignment, const char* function) {
-    Require(address != 0 && (address & (alignment - 1u)) == 0, function, "null or misaligned address");
+    if (address != 0 && (address & (alignment - 1u)) == 0) return;
+    char message[96];
+    std::snprintf(message, sizeof(message), "null or misaligned address 0x%llx (alignment %u)", static_cast<unsigned long long>(address), alignment);
+    Require(false, function, message);
+}
+
+void CheckPatchableAddress(std::uint64_t address, std::uint32_t alignment, const char* function) {
+    if (address != 0) CheckAddress(address, alignment, function);
 }
 
 std::uint32_t Header(std::uint32_t opcode, std::uint32_t count, std::uint32_t flags) {
@@ -132,7 +143,7 @@ std::uint32_t* WriteRegisters(CommandBuffer* buffer, std::uint32_t opcode, const
 
 std::uint32_t* WriteIndirectRegisters(CommandBuffer* buffer, std::uint32_t opcode, const volatile ShaderRegister* registers, std::uint32_t count, const char* function) {
     const auto address = reinterpret_cast<std::uintptr_t>(registers);
-    CheckAddress(address, 4, function);
+    CheckPatchableAddress(address, 4, function); // sceAgcSet*RegIndirectPatchSetAddress completes it
     CheckBits(count, 0x3fffu, function);
     return Emit(buffer, opcode, {static_cast<std::uint32_t>(address), static_cast<std::uint32_t>(address >> 32u), 0x80000000u, count}, function);
 }

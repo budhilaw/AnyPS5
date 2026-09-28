@@ -1,3 +1,4 @@
+#include <cstdio>
 #include <cstring>
 #include <mutex>
 #include <stdexcept>
@@ -31,7 +32,12 @@ extern "C" {
 
 int APS5_VABI sceVideoOutOpen(int userId, int busType, int index, const void* param) {
     if (param != nullptr) {
-        throw std::runtime_error(std::string(__func__) + ": param not implemented");
+        // PS5 titles pass an open-parameter block; its layout is undocumented and every field seen
+        // so far is zero, so it is reported once for diagnosis and otherwise ignored.
+        const auto* bytes = static_cast<const unsigned char*>(param);
+        char text[3 * 32 + 1] = {};
+        for (int i = 0; i < 32; ++i) std::snprintf(text + 3 * i, 4, "%02x ", bytes[i]);
+        APS5_LOG_OUT("sceVideoOutOpen: param bytes %s", text);
     }
     if (userId != 255 && userId != 0) {
         throw std::runtime_error(std::string(__func__) + ": VIDEO_OUT_ERROR_INVALID_VALUE");
@@ -78,7 +84,7 @@ int APS5_VABI sceVideoOutGetFlipStatus(int handle, VideoOutFlipStatus* status) {
     std::unique_lock lock(cfg->mutex);
     cfg->Check();
     *status = cfg->flipStatus;
-    return 0;
+    { static int reported = 0; if (reported < 40) { ++reported; APS5_LOG_OUT("sceVideoOutGetFlipStatus handle=%d count=%llu pending=%d current=%d gcQueue=%d arg=%lld", handle, static_cast<unsigned long long>(status->count), status->flipPendingNum, status->currentBuffer, status->gcQueueNum, static_cast<long long>(status->flipArg)); } return 0; }
 }
 
 int APS5_VABI sceVideoOutGetVblankStatus(int handle, VideoOutVblankStatus* status) {

@@ -4,6 +4,8 @@
 #ifndef VK_NO_PROTOTYPES
 #define VK_NO_PROTOTYPES
 #endif
+#include <atomic>
+#include <cstdint>
 #include <vulkan/vulkan.h>
 #include <cstdint>
 #include <memory>
@@ -11,6 +13,17 @@
 #include <string>
 
 namespace AgcDriver::Graphics {
+
+class PipelineCache;
+class GuestBufferCache;
+class Buffer;
+
+// Counts every queue submission of the process, so an idle wait can be skipped when nothing was
+// submitted since the last one.
+inline std::atomic<std::uint64_t>& QueueSubmissionCounter() {
+    static std::atomic<std::uint64_t> counter{0};
+    return counter;
+}
 
 class TextureDetiler;
 class GpuColorTransfer;
@@ -54,6 +67,7 @@ struct Context {
     bool fragmentShaderBarycentric = false;
     bool samplerAnisotropy = false;
     bool textureCompressionBC = false;
+    bool storageImages = false;
     TextureDetiler* detiler = nullptr;
     GpuColorTransfer* colorTransfer = nullptr;
     mutable std::shared_ptr<BufferPool> bufferPool;
@@ -79,6 +93,18 @@ struct Context {
         }
         throw std::runtime_error("AGC graphics: required Vulkan memory type is unavailable");
     }
+    // The owner of `pipelineCache`, for persisting it after slow compiles (may be null).
+    PipelineCache* pipelineCacheOwner = nullptr;
+    // Persistent GPU mirrors of guest buffers (may be null: every binding then copies).
+    GuestBufferCache* guestBufferCache = nullptr;
+    // The global data share (64 KiB) shaders and CP transfers address by offset (may be null).
+    Buffer* gds = nullptr;
+    // The device clamps depth instead of clipping (PA_CL_CLIP_CNTL near/far clip disabled).
+    bool depthClamp = false;
+    // VK_EXT_external_memory_host: host memory (guest memory's host alias) can back buffers
+    // directly, pointers and sizes aligned to hostPointerAlignment.
+    bool hostPointerImport = false;
+    VkDeviceSize hostPointerAlignment = 0;
 };
 
 }

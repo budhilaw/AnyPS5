@@ -6,9 +6,11 @@
 extern "C" {
 
 int APS5_VABI sceNpSessionSignalingInitialize(void* param) {
- (void)param;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+    Aps5TraceCall_nid_no_patch(__func__);
+    // Session signaling needs PSN; initialization succeeds so offline titles can continue, and
+    // every later use reports itself through the missing-import path.
+    (void)param;
+    return 0;
 }
 
 }

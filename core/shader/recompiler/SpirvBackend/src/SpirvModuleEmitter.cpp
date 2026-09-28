@@ -150,7 +150,7 @@ std::uint32_t EmitAttributeValue(SpirvEmitterState& state, std::uint32_t attr, s
 std::uint32_t EmitInterpolationParameterValue(SpirvEmitterState& state, std::uint32_t attr, std::uint32_t chan, std::uint32_t mode) {
     const auto* input = SpirvInputBindingForParameter(state, attr);
     if (input == nullptr) {
-        throw std::runtime_error("interpolation parameter refers to an undefined attribute");
+        return ConstantU32(state, 0u); // an attribute past the exported parameters reads zero
     }
     if (!input->perVertex) {
         return EmitAttributeValue(state, attr, chan);
@@ -193,7 +193,8 @@ std::uint32_t ExportRawComponent(SpirvValueEmitContext& ctx, std::uint32_t vecto
 std::uint32_t ExportVector(SpirvValueEmitContext& ctx, std::uint32_t data, const ExportInfo& exp, bool uintOutput) {
     auto& state = ctx.state;
     if (exp.compr && !uintOutput) {
-        const auto unpack = MrtOutputMode(state, exp) == 5u ? GLSLstd450UnpackUnorm2x16 : GLSLstd450UnpackHalf2x16;
+        const auto mode = MrtOutputMode(state, exp);
+        const auto unpack = mode == 5u ? GLSLstd450UnpackUnorm2x16 : mode == 6u ? GLSLstd450UnpackSnorm2x16 : GLSLstd450UnpackHalf2x16;
         std::array<std::uint32_t, 4> f32 {ConstantF32(state, 0u), ConstantF32(state, 0u), ConstantF32(state, 0u), ConstantF32(state, 0x3f800000u)};
         for (std::uint32_t pair = 0; pair < 2u; pair++) {
             if ((exp.en & (3u << (pair * 2u))) == 0u) {

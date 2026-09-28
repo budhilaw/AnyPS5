@@ -1,3 +1,4 @@
+#include "prx/libc/include/General.hpp"
 #include "DirectMemory.hpp"
 #include "prx/libc/include/general/VabiMacros.hpp"
 #include <limits>
@@ -31,6 +32,7 @@ extern "C" {
 
 void* APS5_VABI mmap_nid_postfix(void* address, std::size_t length, int protection,
                                 int flags, int descriptor, std::int64_t offset) noexcept {
+    APS5_LOG_OUT("mmap address=%llx length=%llx protection=%llx flags=%llx", (unsigned long long)(uintptr_t)(address), (unsigned long long)(uintptr_t)(length), (unsigned long long)(uintptr_t)(protection), (unsigned long long)(uintptr_t)(flags));
     const auto failed = [](int error) -> void* {
         SetError(error);
         return reinterpret_cast<void*>(static_cast<std::uintptr_t>(-1));
@@ -57,6 +59,7 @@ void* APS5_VABI mmap_nid_postfix(void* address, std::size_t length, int protecti
 }
 
 int APS5_VABI munmap_nid_postfix(void* address, std::size_t length) noexcept {
+    APS5_LOG_OUT("munmap address=%llx length=%llx", (unsigned long long)(uintptr_t)(address), (unsigned long long)(uintptr_t)(length));
     const auto failed = [](int error) {
         SetError(error);
         return -1;

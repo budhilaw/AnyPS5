@@ -220,12 +220,39 @@ void TranslationContext::sWqm(const RdnaInstruction& inst, bool wide) {
     writeRawU32(inst.destination, extractU64(result)[0]);
 }
 
+// M0-relative vector register moves: M0 is a uniform index, so every candidate register inside
+// the shader's vector allocation is visited and the one M0 addresses is selected (a read) or
+// replaced (a write). Registers beyond the allocation are never addressed by valid shaders.
 void TranslationContext::vMovrelsB32(const RdnaInstruction& inst) {
-    throw std::runtime_error("dynamic M0-relative vector register addressing is not supported by this translator");
+    const RdnaOperand& source = sourceAt(inst, 0u);
+    if (source.kind != RdnaOperandKind::VectorRegister) {
+        throw std::runtime_error("v_movrels_b32 requires a vector register source");
+    }
+    IrValue& m0 = ir.GetM0();
+    IrValue* result = &ir.Constant(0u);
+    for (std::uint32_t k = 0; source.reg + k < currentVectorLimit; ++k) {
+        RdnaOperand candidate = source;
+        candidate.reg = source.reg + k;
+        const IrU32 value = readU32(candidate);
+        IrValue& hit = ir.IEqual(m0, ir.Constant(k));
+        result = &ir.Select(hit, value.Value(), *result);
+    }
+    writeOperand(inst.destination, result);
 }
 
 void TranslationContext::vMovreldB32(const RdnaInstruction& inst) {
-    throw std::runtime_error("dynamic M0-relative vector register addressing is not supported by this translator");
+    if (inst.destination.kind != RdnaOperandKind::VectorRegister) {
+        throw std::runtime_error("v_movreld_b32 requires a vector register destination");
+    }
+    const IrU32 value = readU32(sourceAt(inst, 0u));
+    IrValue& m0 = ir.GetM0();
+    for (std::uint32_t k = 0; inst.destination.reg + k < currentVectorLimit; ++k) {
+        RdnaOperand candidate = inst.destination;
+        candidate.reg = inst.destination.reg + k;
+        const IrU32 current = readU32(candidate);
+        IrValue& hit = ir.IEqual(m0, ir.Constant(k));
+        writeRawU32(candidate, IrU32(ir.Select(hit, value.Value(), current.Value())));
+    }
 }
 
 void TranslationContext::vReadfirstlaneB32(const RdnaInstruction& inst) {

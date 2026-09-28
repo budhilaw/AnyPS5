@@ -88,7 +88,9 @@ void ValidateValueReferences(const IrProgram& program, ShaderStageInputInfo inpu
                         (channel->ImmediateU32() >= 4u || attribute->ImmediateU32() >= static_cast<std::uint32_t>(inputInfo.vertex->resourcesNum))) {
                         return Fail("vertex input reference is out of range");
                     }
-                    if (stage == IrShaderStage::Pixel && (channel->ImmediateU32() >= 4u || attribute->ImmediateU32() >= inputInfo.pixel->inputNum)) {
+                    // Pixel attributes past SPI_PS_IN_CONTROL.NUM_INTERP read zero (the hardware
+                    // reads undefined values there when a vertex shader exports fewer parameters).
+                    if (stage == IrShaderStage::Pixel && (channel->ImmediateU32() >= 4u || attribute->ImmediateU32() >= 32u)) {
                         return Fail("pixel input reference is out of range");
                     }
                     break;
@@ -101,7 +103,7 @@ void ValidateValueReferences(const IrProgram& program, ShaderStageInputInfo inpu
                         !component->HasImmediate() || component->Type() != IrType::U32 || !mode->HasImmediate() || mode->Type() != IrType::U32) {
                         return Fail("interpolation parameter reference is invalid");
                     }
-                    if (input->ImmediateU32() >= inputInfo.pixel->inputNum || component->ImmediateU32() >= 4u || mode->ImmediateU32() >= 3u) {
+                    if (input->ImmediateU32() >= 32u || component->ImmediateU32() >= 4u || mode->ImmediateU32() >= 3u) {
                         return Fail("interpolation parameter reference is out of range");
                     }
                     break;

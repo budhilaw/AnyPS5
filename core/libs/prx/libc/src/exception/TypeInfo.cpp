@@ -61,8 +61,60 @@ static_assert(sizeof(TypeInfoVtable) == 11 * sizeof(void*));
 
 }
 
+#if defined(_LIBCPP_VERSION)
+// libc++abi does not export the type_info objects of its RTTI classes. The guest vtables only need
+// objects whose name() yields the mangled class name (see Kind()), so equivalent objects are laid
+// out here in libc++'s type_info shape: a vtable pointer followed by the name pointer.
+namespace {
+struct HostTypeInfo { const void* vtable; const char* name; };
+static_assert(sizeof(HostTypeInfo) == sizeof(std::type_info));
+constexpr HostTypeInfo ClassTypeInfoObject{nullptr, "N10__cxxabiv117__class_type_infoE"};
+constexpr HostTypeInfo SiClassTypeInfoObject{nullptr, "N10__cxxabiv120__si_class_type_infoE"};
+constexpr HostTypeInfo VmiClassTypeInfoObject{nullptr, "N10__cxxabiv121__vmi_class_type_infoE"};
+constexpr HostTypeInfo FundamentalTypeInfoObject{nullptr, "N10__cxxabiv123__fundamental_type_infoE"};
+constexpr HostTypeInfo PointerTypeInfoObject{nullptr, "N10__cxxabiv119__pointer_type_infoE"};
+constexpr HostTypeInfo FunctionTypeInfoObject{nullptr, "N10__cxxabiv120__function_type_infoE"};
+constexpr HostTypeInfo EnumTypeInfoObject{nullptr, "N10__cxxabiv116__enum_type_infoE"};
+}
+#define APS5_RTTI_OBJECT(object) reinterpret_cast<const std::type_info*>(&object)
+extern "C" {
+LibcException::TypeInfoVtable _ZTVN10__cxxabiv117__class_type_infoE_nid_postfix {0, APS5_RTTI_OBJECT(ClassTypeInfoObject)};
+LibcException::TypeInfoVtable _ZTVN10__cxxabiv120__si_class_type_infoE_nid_postfix {0, APS5_RTTI_OBJECT(SiClassTypeInfoObject)};
+LibcException::TypeInfoVtable _ZTVN10__cxxabiv121__vmi_class_type_infoE_nid_postfix {0, APS5_RTTI_OBJECT(VmiClassTypeInfoObject)};
+LibcException::TypeInfoVtable _ZTVN10__cxxabiv123__fundamental_type_infoE_nid_postfix {0, APS5_RTTI_OBJECT(FundamentalTypeInfoObject)};
+LibcException::TypeInfoVtable _ZTVN10__cxxabiv119__pointer_type_infoE_nid_postfix {0, APS5_RTTI_OBJECT(PointerTypeInfoObject)};
+LibcException::TypeInfoVtable _ZTVN10__cxxabiv120__function_type_infoE_nid_postfix {0, APS5_RTTI_OBJECT(FunctionTypeInfoObject)};
+LibcException::TypeInfoVtable _ZTVN10__cxxabiv116__enum_type_infoE_nid_postfix {0, APS5_RTTI_OBJECT(EnumTypeInfoObject)};
+}
+#else
 extern "C" {
 LibcException::TypeInfoVtable _ZTVN10__cxxabiv117__class_type_infoE_nid_postfix {0, &typeid(__cxxabiv1::__class_type_info)};
 LibcException::TypeInfoVtable _ZTVN10__cxxabiv120__si_class_type_infoE_nid_postfix {0, &typeid(__cxxabiv1::__si_class_type_info)};
 LibcException::TypeInfoVtable _ZTVN10__cxxabiv121__vmi_class_type_infoE_nid_postfix {0, &typeid(__cxxabiv1::__vmi_class_type_info)};
+LibcException::TypeInfoVtable _ZTVN10__cxxabiv123__fundamental_type_infoE_nid_postfix {0, &typeid(__cxxabiv1::__fundamental_type_info)};
+LibcException::TypeInfoVtable _ZTVN10__cxxabiv119__pointer_type_infoE_nid_postfix {0, &typeid(__cxxabiv1::__pointer_type_info)};
+LibcException::TypeInfoVtable _ZTVN10__cxxabiv120__function_type_infoE_nid_postfix {0, &typeid(__cxxabiv1::__function_type_info)};
+LibcException::TypeInfoVtable _ZTVN10__cxxabiv116__enum_type_infoE_nid_postfix {0, &typeid(__cxxabiv1::__enum_type_info)};
+}
+#endif
+
+// Guest type_info objects of the fundamental types (a vtable pointer and the mangled name, the
+// Itanium layout) and of const char* (a __pointer_type_info with the const qualifier flag).
+namespace {
+struct GuestFundamentalTypeInfo { const void* vtable; const char* name; };
+struct GuestPointerTypeInfo { const void* vtable; const char* name; unsigned flags; const void* pointee; };
+}
+extern "C" {
+#define APS5_FUNDAMENTAL_TYPE_INFO(mangled, text) \
+    GuestFundamentalTypeInfo _ZTI##mangled##_nid_postfix {reinterpret_cast<const void* const*>(&_ZTVN10__cxxabiv123__fundamental_type_infoE_nid_postfix) + 2, text};
+APS5_FUNDAMENTAL_TYPE_INFO(v, "v")
+APS5_FUNDAMENTAL_TYPE_INFO(b, "b")
+APS5_FUNDAMENTAL_TYPE_INFO(i, "i")
+APS5_FUNDAMENTAL_TYPE_INFO(l, "l")
+APS5_FUNDAMENTAL_TYPE_INFO(f, "f")
+APS5_FUNDAMENTAL_TYPE_INFO(d, "d")
+APS5_FUNDAMENTAL_TYPE_INFO(Dn, "Dn")
+#undef APS5_FUNDAMENTAL_TYPE_INFO
+static GuestFundamentalTypeInfo CharTypeInfo {reinterpret_cast<const void* const*>(&_ZTVN10__cxxabiv123__fundamental_type_infoE_nid_postfix) + 2, "c"};
+GuestPointerTypeInfo _ZTIPKc_nid_postfix {reinterpret_cast<const void* const*>(&_ZTVN10__cxxabiv119__pointer_type_infoE_nid_postfix) + 2, "PKc", 1u, &CharTypeInfo};
 }

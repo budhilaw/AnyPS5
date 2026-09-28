@@ -11,6 +11,7 @@
 #include "prx/libc/include/FileStream.hpp"
 #include "prx/libc/include/ApplicationHeap.hpp"
 #include "prx/libc/include/General.hpp"
+#include "prx/libc/include/GuestMemoryTracking.hpp"
 
 extern "C" {
 
@@ -55,7 +56,13 @@ FileStream* APS5_VABI fopen_nid_postfix(const char* filename, const char* mode) 
             // APS5_LOG_OUT("%s: \"%s\": %s. Sibling: \"%s\"", FOPEN_MSG_NOT_FOUND, abs_path.c_str(), reason, sibling.filename().string().c_str());
             return nullptr;
         }
-        throw std::runtime_error(std::string(__func__) + ": " + FOPEN_MSG_OPEN_FAILED + ": \"" + abs_path + "\": " + reason);
+        // Titles probe for optional files (first-run profiles, settings): a failed open is a normal
+        // result reported through errno, as on the console. The host's errno values below 35 match
+        // the guest's FreeBSD numbering.
+        const int error = errno;
+        APS5_LOG_OUT("%s: \"%s\": %s", FOPEN_MSG_OPEN_FAILED, abs_path.c_str(), reason);
+        errno = error;
+        return nullptr;
     }
     // APS5_LOG_OUT("success: \"%s\"", abs_path.c_str());
     auto stream = std::make_unique<FileStream>(handle.get(), true);
@@ -74,6 +81,9 @@ size_t APS5_VABI fread_nid_postfix(void* buffer, size_t size, size_t count, File
     auto* handle = GetNativeStream(stream);
     if (size == 0 || count == 0) return 0;
     if (!buffer) throw std::runtime_error("fread: null buffer");
+    // Large reads go straight from the kernel into the buffer, which faults (EFAULT) on pages the
+    // GPU caches watch; resolving the watches first lifts their protection.
+    GuestMemoryTracking::GuestMemoryTrackingResolve_nid_postfix(reinterpret_cast<std::uint64_t>(buffer), size * count, true);
     const auto result = std::fread(buffer, size, count, handle);
     stream->SyncStatus();
     if (std::ferror(handle)) throw std::runtime_error("fread: read failed");
@@ -145,8 +155,23 @@ void* APS5_VABI realloc_nid_postfix(void* ptr, size_t newSize) {
     return ApplicationHeapReallocate_nid_no_patch(ptr, newSize);
 }
 
+// PS5 libc: reallocates a block keeping the requested alignment (slot 5 of the title's allocator).
+void* APS5_VABI reallocalign_nid_postfix(void* pointer, size_t size, size_t alignment) {
+    return ApplicationHeapReallocateAligned_nid_no_patch(pointer, size, alignment);
+}
+
 void* APS5_VABI memalign_nid_postfix(size_t alignment, size_t size) {
     return ApplicationHeapAlign_nid_no_patch(alignment, size);
+}
+
+void* APS5_VABI aligned_alloc_nid_postfix(size_t alignment, size_t size) {
+    return ApplicationHeapAlign_nid_no_patch(alignment, size);
+}
+
+void APS5_VABI rewind_nid_postfix(FileStream* stream) {
+    fseek_nid_postfix(stream, 0, SEEK_SET);
+    std::clearerr(GetNativeStream(stream));
+    stream->SyncStatus();
 }
 
 void* APS5_VABI calloc_nid_postfix(size_t count, size_t size) {

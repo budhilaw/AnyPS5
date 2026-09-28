@@ -7,12 +7,16 @@ namespace AgcDriver::Graphics {
 
 class Pipeline {
 public:
-    Pipeline(const Context& context, const State& state, const RenderTarget* target, const ShaderResources& resources, std::span<const CompiledShader> shaders);
+    Pipeline(const Context& context, const State& state, const RenderTarget* target, std::span<const RenderTarget* const> extraTargets, const DepthImage* depth, const ShaderResources& resources, std::span<const CompiledShader> shaders);
     ~Pipeline();
     Pipeline(const Pipeline&) = delete;
     Pipeline& operator=(const Pipeline&) = delete;
     VkPipelineLayout Layout() const;
     void Begin(VkCommandBuffer commands, VkExtent2D extent) const;
+private:
+    VkClearValue clearValues[9]{};
+    std::uint32_t clearValueCount = 0;
+public:
     void PushConstants(VkCommandBuffer commands, std::span<const CompiledShader> shaders) const;
 
 private:

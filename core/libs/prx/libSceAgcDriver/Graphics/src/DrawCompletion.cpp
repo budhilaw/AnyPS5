@@ -12,6 +12,9 @@ void DrawQueue::retire(Batch batch) {
     for (auto& entry : batch.entries) entry.resources->WriteBack();
     timing.Mark("resources_writeback");
     batch.entries.clear();
+    for (auto& completion : batch.completions) completion();
+    batch.completions.clear();
+    timing.Mark("completions");
     available.push_back(std::move(batch.commands));
     timing.Mark("resources_release");
 }

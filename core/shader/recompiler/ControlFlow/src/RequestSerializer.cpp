@@ -297,6 +297,7 @@ void writePixelInfo(Writer& writer, const ShaderPixelStageInfo& info) {
     for (const std::uint8_t value : info.targetOutputMode) {
         writer.WriteU8(value);
     }
+    writer.WriteBool(info.dualSourceBlend);
 }
 
 ShaderPixelStageInfo readPixelInfo(Reader& reader) {
@@ -324,6 +325,7 @@ ShaderPixelStageInfo readPixelInfo(Reader& reader) {
     for (std::uint8_t& value : info.targetOutputMode) {
         value = reader.ReadU8();
     }
+    info.dualSourceBlend = reader.ReadBool();
     return info;
 }
 
@@ -539,6 +541,7 @@ void writeSpirvTarget(Writer& writer, const SpirvTarget& target) {
     if (target.tessellation.has_value()) {
         writeTessellationTargetLimits(writer, *target.tessellation);
     }
+    writer.WriteU32(target.subgroupStageMask);
 }
 
 SpirvTarget readSpirvTarget(Reader& reader, DeserializedRequest& result) {
@@ -572,6 +575,7 @@ SpirvTarget readSpirvTarget(Reader& reader, DeserializedRequest& result) {
         result.tessellation = readTessellationTargetLimits(reader);
         target.tessellation = result.tessellation;
     }
+    target.subgroupStageMask = reader.ReadU32();
     return target;
 }
 

@@ -31,6 +31,7 @@ std::uint32_t BlockBytesFor(TextureTileMode tileMode) {
         case TextureTileMode::kStandard256B: return 256u;
         case TextureTileMode::kStandard4KB: return 4096u;
         case TextureTileMode::RenderTarget64KB:
+        case TextureTileMode::Depth64KB:
         case TextureTileMode::kStandard64KB: return 65536u;
     }
     throw std::runtime_error("AGC graphics: TextureDetiler encountered an unknown tile mode");

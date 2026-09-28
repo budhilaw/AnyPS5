@@ -17,15 +17,11 @@ std::uint32_t* APS5_VABI sceAgcCbSetShRegisterRangeDirect(CommandBuffer* buf, st
 }
 
 uint32_t APS5_VABI sceAgcCbSetShRegisterRangeDirectGetSize(uint32_t num_values) {
- (void)num_values;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+    return (num_values + 2u) * sizeof(std::uint32_t);
 }
 
 std::uint32_t APS5_VABI sceAgcCbSetUcRegisterRangeDirectGetSize(std::uint32_t numValues) {
-    (void)numValues;
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return (numValues + 2u) * sizeof(std::uint32_t);
 }
 
 std::uint32_t* APS5_VABI sceAgcCbSetShRegistersDirect(CommandBuffer* buf, const volatile ShaderRegister* regs, std::uint32_t numRegs) {
@@ -33,9 +29,7 @@ std::uint32_t* APS5_VABI sceAgcCbSetShRegistersDirect(CommandBuffer* buf, const 
 }
 
 std::uint32_t APS5_VABI sceAgcCbSetShRegistersDirectGetSize(std::uint32_t numRegs) {
-    (void)numRegs;
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return numRegs * 3u * sizeof(std::uint32_t);
 }
 
 std::uint32_t* APS5_VABI sceAgcCbSetUcRegistersDirect(CommandBuffer* buf, const volatile ShaderRegister* regs, std::uint32_t numRegs) {
@@ -43,9 +37,7 @@ std::uint32_t* APS5_VABI sceAgcCbSetUcRegistersDirect(CommandBuffer* buf, const 
 }
 
 std::uint32_t APS5_VABI sceAgcCbSetUcRegistersDirectGetSize(std::uint32_t numRegs) {
-    (void)numRegs;
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return numRegs * 3u * sizeof(std::uint32_t);
 }
 
 }

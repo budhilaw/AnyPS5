@@ -252,7 +252,7 @@ void DefineInputs(SpirvEmitterState& state) {
             state.module.AddAnnotation(spv::OpDecorate, input.variableId, spv::DecorationBuiltIn, builtin);
         }
     }
-    if (state.requirements.subgroupLocalInvocationId) {
+    if (state.requirements.subgroupLocalInvocationId && !state.singleLane) {
         const auto variable = DefineInterfaceVariable(state, TypeU32(state), spv::StorageClassInput, "gl_SubgroupInvocationID");
         state.subgroupLocalInvocationIdVariable = variable;
         state.module.AddAnnotation(spv::OpDecorate, variable, spv::DecorationBuiltIn, spv::BuiltInSubgroupLocalInvocationId);
@@ -321,6 +321,13 @@ void DefineOutputs(SpirvEmitterState& state) {
             const bool uintOutput = binding.kind == StageOutputKind::Mrt && state.program.Resources().stage == IrShaderStage::Pixel && binding.index < std::size(PixelInfo(state).targetOutputMode) && PixelInfo(state).targetOutputMode[binding.index] == 7u;
             const auto type = uintOutput ? TypeU32Vector(state, 4u) : TypeF32Vector(state, 4u);
             binding.variableId = DefineInterfaceVariable(state, type, spv::StorageClassOutput, binding.debugName.c_str());
+            if (binding.kind == StageOutputKind::Mrt && state.program.Resources().stage == IrShaderStage::Pixel && PixelInfo(state).psDualSourceBlend) {
+                // Dual-source blending: MRT0 and MRT1 are the two blend sources of color target 0.
+                if (binding.index > 1u) FailEmit("dual-source blending exports more than two color targets");
+                state.module.AddAnnotation(spv::OpDecorate, binding.variableId, spv::DecorationLocation, 0u);
+                state.module.AddAnnotation(spv::OpDecorate, binding.variableId, spv::DecorationIndex, binding.index);
+                break;
+            }
             state.module.AddAnnotation(spv::OpDecorate, binding.variableId, spv::DecorationLocation, binding.location);
             break;
         }

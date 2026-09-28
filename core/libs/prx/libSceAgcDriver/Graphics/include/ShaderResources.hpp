@@ -16,6 +16,11 @@ namespace AgcDriver::Graphics {
 
 class ShaderResources {
 public:
+    const std::vector<std::shared_ptr<Texture>>& Textures() const { return textures; }
+    // The descriptor binding and array element each texture of Textures() is bound at.
+    const std::vector<std::pair<std::uint32_t, std::uint32_t>>& TextureBindings() const { return textureBindings; }
+    // One line naming every bound texture (address, size, format, "store" for storage images).
+    std::string DescribeTextures() const;
     ShaderResources(const Context& context, const ShaderRecompiler::RecompileResult& vertex, const ShaderRecompiler::RecompileResult& fragment, const ColorTarget& target, std::uint64_t indexAddress, std::size_t indexBytes);
     ShaderResources(const Context& context, std::span<const CompiledShader> shaders, const ColorTarget& target, std::uint64_t indexAddress, std::size_t indexBytes, std::span<const GuestMemorySnapshot> snapshots = {});
     ShaderResources(const Context& context, const CompiledShader& compute, std::span<const GuestMemorySnapshot> snapshots = {});
@@ -44,7 +49,7 @@ private:
     };
 
     void build(std::span<const CompiledShader> shaders, const ColorTarget* target, std::uint64_t indexAddress, std::size_t indexBytes);
-    std::size_t addGuestBuffer(std::span<const std::uint32_t> words, const ColorTarget* target, std::uint64_t indexAddress, std::size_t indexBytes);
+    std::size_t addGuestBuffer(std::span<const std::uint32_t> words, bool written, const ColorTarget* target, std::uint64_t indexAddress, std::size_t indexBytes);
     std::size_t addDataBuffer(std::span<const std::uint32_t> words);
     void addImageBinding(const ShaderRecompiler::DescriptorBinding& binding, VkShaderStageFlags flags, std::vector<Binding>& bindings);
     void release() noexcept;
@@ -61,6 +66,7 @@ private:
     std::unique_ptr<DescriptorAllocation> descriptors;
     std::vector<Allocation> allocations;
     std::vector<std::shared_ptr<Texture>> textures;
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> textureBindings;
     std::vector<std::shared_ptr<Sampler>> samplers;
 };
 

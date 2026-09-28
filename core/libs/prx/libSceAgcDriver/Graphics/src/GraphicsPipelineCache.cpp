@@ -1,4 +1,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/GraphicsPipelineCache.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/SlowPipeline.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/PipelineCache.hpp"
+#include <chrono>
 #include "prx/libSceAgcDriver/Graphics/include/VertexInput.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
 #include <type_traits>
@@ -14,12 +17,27 @@ void append(std::string& key, const TValue& value) {
     key.append(reinterpret_cast<const char*>(&value), sizeof(value));
 }
 
-std::string makeKey(const Context& context, const State& state, const std::shared_ptr<ResidentColor>& target, const ShaderResources& resources, std::span<const CompiledShader> shaders) {
+std::string makeKey(const Context& context, const State& state, const std::shared_ptr<ResidentColor>& target, std::span<const std::shared_ptr<ResidentColor>> extraTargets, const std::shared_ptr<DepthImage>& depth, const ShaderResources& resources, std::span<const CompiledShader> shaders) {
     PerformanceTimer timing("Graphics.PipelineKey");
     std::string key;
     key.reserve(512);
     append(key, target ? target->Target().View() : VK_NULL_HANDLE);
     append(key, state.hasColorTarget);
+    append(key, static_cast<std::uint32_t>(extraTargets.size()));
+    for (std::size_t i = 0; i < extraTargets.size(); ++i) {
+        append(key, extraTargets[i]->Target().View());
+        append(key, state.extraColors[i].format);
+        append(key, state.extraBlends[i]);
+    }
+    append(key, depth ? depth->View() : VK_NULL_HANDLE);
+    append(key, state.hasDepthTarget);
+    if (state.hasDepthTarget) {
+        append(key, state.depth.format);
+        const auto& ds = state.depthState;
+        append(key, ds.test); append(key, ds.write); append(key, ds.compare); append(key, ds.stencilTest);
+        append(key, ds.front); append(key, ds.back);
+        append(key, ds.clearDepth); append(key, ds.depthClear); append(key, ds.clearStencil); append(key, ds.stencilClear);
+    }
     append(key, state.rectList);
     append(key, state.renderExtent.width);
     append(key, state.renderExtent.height);
@@ -37,6 +55,10 @@ std::string makeKey(const Context& context, const State& state, const std::share
     append(key, state.scissor.extent.height);
     append(key, state.cullMode);
     append(key, state.frontFace);
+    append(key, state.depthClamp);
+    append(key, state.depthBias);
+    append(key, state.depthBiasConstant);
+    append(key, state.depthBiasSlope);
     append(key, state.blend.blendEnable);
     append(key, state.blend.srcColorBlendFactor);
     append(key, state.blend.dstColorBlendFactor);
@@ -103,9 +125,9 @@ std::string makeKey(const Context& context, const State& state, const std::share
 
 }
 
-std::shared_ptr<Pipeline> GraphicsPipelineCache::Get(const State& state, const std::shared_ptr<ResidentColor>& target, const ShaderResources& resources, std::span<const CompiledShader> shaders) {
+std::shared_ptr<Pipeline> GraphicsPipelineCache::Get(const State& state, const std::shared_ptr<ResidentColor>& target, std::span<const std::shared_ptr<ResidentColor>> extraTargets, const std::shared_ptr<DepthImage>& depth, const ShaderResources& resources, std::span<const CompiledShader> shaders) {
     PerformanceTimer timing("Graphics.PipelineCache");
-    auto key = makeKey(context, state, target, resources, shaders);
+    auto key = makeKey(context, state, target, extraTargets, depth, resources, shaders);
     timing.Mark("key");
     const auto found = lookup.find(key);
     if (found != lookup.end()) {
@@ -116,9 +138,14 @@ std::shared_ptr<Pipeline> GraphicsPipelineCache::Get(const State& state, const s
         return pipeline;
     }
     timing.Mark("miss");
-    auto pipeline = std::make_shared<Pipeline>(context, state, target ? &target->Target() : nullptr, resources, shaders);
+    const auto creationStart = std::chrono::steady_clock::now();
+    std::vector<const RenderTarget*> extraViews;
+    for (const auto& extra : extraTargets) extraViews.push_back(&extra->Target());
+    auto pipeline = std::make_shared<Pipeline>(context, state, target ? &target->Target() : nullptr, extraViews, depth.get(), resources, shaders);
     timing.Mark("create");
-    entries.push_back({std::move(key), target, pipeline});
+    ReportSlowPipeline("graphics", creationStart, shaders);
+    if (context.pipelineCacheOwner && std::chrono::steady_clock::now() - creationStart > std::chrono::milliseconds(100)) context.pipelineCacheOwner->Save();
+    entries.push_back({std::move(key), target, std::vector<std::shared_ptr<ResidentColor>>(extraTargets.begin(), extraTargets.end()), depth, pipeline});
     try {
         const auto it = std::prev(entries.end());
         Require(lookup.emplace(it->key, it).second, "duplicate graphics pipeline cache key");

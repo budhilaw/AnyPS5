@@ -17,10 +17,13 @@ using Free = void (APS5_VABI *)(void*);
 using Reallocate = void* (APS5_VABI *)(void*, std::size_t);
 using Calloc = void* (APS5_VABI *)(std::size_t, std::size_t);
 using Align = void* (APS5_VABI *)(std::size_t, std::size_t);
+using ReallocateAligned = void* (APS5_VABI *)(void*, std::size_t, std::size_t);
 using PosixAlign = int (APS5_VABI *)(void**, std::size_t, std::size_t);
 using Initialize = void (APS5_VABI *)();
 
 std::mutex heapMutex;
+// Slot order of the SceLibcMallocReplace table from offset 0x20: malloc, free, calloc, realloc,
+// memalign, reallocalign, posix_memalign, malloc_stats, malloc_stats_fast, malloc_usable_size.
 std::array<void*, 10> heapApi{};
 std::once_flag heapInitialization;
 std::exception_ptr heapFailure;
@@ -49,12 +52,23 @@ TValue read(const void* pointer, std::size_t offset) {
 
 template<typename TCallback>
 TCallback callback(std::size_t index) {
-    std::lock_guard lock(heapMutex);
-    if (heapFailure) std::rethrow_exception(heapFailure);
-    if (heapFinalized) throw std::runtime_error("application heap: allocator has been finalized");
-    if (heapApi[index] == nullptr) throw std::runtime_error("application heap: allocator API is not registered");
     static_assert(sizeof(TCallback) == sizeof(void*));
     TCallback result;
+    {
+        std::lock_guard lock(heapMutex);
+        if (heapFailure) std::rethrow_exception(heapFailure);
+        if (heapFinalized) throw std::runtime_error("application heap: allocator has been finalized");
+        if (heapApi[index] != nullptr) {
+            std::memcpy(&result, &heapApi[index], sizeof(result));
+            return result;
+        }
+    }
+    // Module initializers allocate before the executable's startup code registers the allocator.
+    // The process parameters already describe it, as they do for the console's loader.
+    ApplicationHeapInitialize_nid_no_patch(ApplicationProcessParameters_nid_no_patch());
+    std::lock_guard lock(heapMutex);
+    if (heapFailure) std::rethrow_exception(heapFailure);
+    if (heapApi[index] == nullptr) throw std::runtime_error("application heap: allocator API is not registered");
     std::memcpy(&result, &heapApi[index], sizeof(result));
     return result;
 }
@@ -142,7 +156,7 @@ void* ApplicationHeapReallocate_nid_no_patch(void* pointer, std::size_t bytes) {
         ApplicationHeapFree_nid_no_patch(pointer);
         return nullptr;
     }
-    const auto reallocate = callback<Reallocate>(2);
+    const auto reallocate = callback<Reallocate>(3);
     CallbackScope scope;
     return requireAllocation(reallocate(pointer, bytes));
 }
@@ -156,9 +170,22 @@ void* ApplicationHeapAlign_nid_no_patch(std::size_t alignment, std::size_t bytes
     return pointer;
 }
 
+void* ApplicationHeapReallocateAligned_nid_no_patch(void* pointer, std::size_t bytes, std::size_t alignment) {
+    requireAlignment(alignment);
+    if (bytes == 0) {
+        ApplicationHeapFree_nid_no_patch(pointer);
+        return nullptr;
+    }
+    const auto reallocate = callback<ReallocateAligned>(5);
+    CallbackScope scope;
+    void* result = requireAllocation(reallocate(pointer, bytes, alignment));
+    if (reinterpret_cast<std::uintptr_t>(result) % alignment != 0) throw std::runtime_error("application heap: allocator returned a misaligned pointer");
+    return result;
+}
+
 void* ApplicationHeapCalloc_nid_no_patch(std::size_t count, std::size_t bytes) {
     if (bytes != 0 && count > std::numeric_limits<std::size_t>::max() / bytes) throw std::length_error("application heap: calloc size overflow");
-    const auto calloc = callback<Calloc>(3);
+    const auto calloc = callback<Calloc>(2);
     CallbackScope scope;
     return requireAllocation(calloc(count, bytes));
 }

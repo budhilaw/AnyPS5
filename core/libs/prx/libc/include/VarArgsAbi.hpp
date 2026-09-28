@@ -43,6 +43,41 @@ inline void FillRegSaveArea(
     regs.fp[7] = fp7;
 }
 
+// The console's printf prints "(null)" for a null %s argument; the host's would fault. Walks the
+// conversions of `format` the way va_arg would and replaces every null string argument in the
+// register save area or the overflow area (the caller's own outgoing argument slots).
+inline void ReplaceNullStrings(const char* format, VaListLayout& layout) {
+    if (format == nullptr) return;
+    static const char* const placeholder = "(null)";
+    auto* regs = static_cast<std::uint64_t*>(layout.regSaveArea);
+    auto* overflow = static_cast<std::uint8_t*>(layout.overflowArgArea);
+    unsigned gpOffset = layout.gpOffset, fpOffset = layout.fpOffset;
+    const auto gpSlot = [&]() -> std::uint64_t* {
+        if (gpOffset < 48) { auto* slot = regs + gpOffset / 8; gpOffset += 8; return slot; }
+        auto* slot = reinterpret_cast<std::uint64_t*>(overflow); overflow += 8; return slot;
+    };
+    const auto fpSlot = [&](bool longDouble) {
+        if (longDouble) { overflow = reinterpret_cast<std::uint8_t*>((reinterpret_cast<std::uintptr_t>(overflow) + 15) & ~std::uintptr_t{15}); overflow += 16; return; }
+        if (fpOffset < 176) fpOffset += 16; else overflow += 8;
+    };
+    for (const char* cursor = format; *cursor != '\0'; ++cursor) {
+        if (*cursor != '%') continue;
+        ++cursor;
+        if (*cursor == '%') continue;
+        while (*cursor == '-' || *cursor == '+' || *cursor == ' ' || *cursor == '#' || *cursor == '0' || *cursor == '\'') ++cursor;
+        if (*cursor == '*') { gpSlot(); ++cursor; } else while (*cursor >= '0' && *cursor <= '9') ++cursor;
+        if (*cursor == '.') { ++cursor; if (*cursor == '*') { gpSlot(); ++cursor; } else while (*cursor >= '0' && *cursor <= '9') ++cursor; }
+        bool longDouble = false;
+        while (*cursor == 'h' || *cursor == 'l' || *cursor == 'q' || *cursor == 'j' || *cursor == 'z' || *cursor == 't' || *cursor == 'L') { if (*cursor == 'L') longDouble = true; ++cursor; }
+        switch (*cursor) {
+        case 'd': case 'i': case 'o': case 'u': case 'x': case 'X': case 'c': case 'p': case 'n': gpSlot(); break;
+        case 's': { auto* slot = gpSlot(); if (*slot == 0) *slot = reinterpret_cast<std::uint64_t>(placeholder); break; }
+        case 'e': case 'E': case 'f': case 'F': case 'g': case 'G': case 'a': case 'A': fpSlot(longDouble); break;
+        default: return; // unknown conversion: the layout past it is unknowable
+        }
+    }
+}
+
 inline std::va_list* BuildVaList(
     VaListLayout& layout, RegSaveArea& regs,
     unsigned int consumedGpRegisters, void* overflowArgArea

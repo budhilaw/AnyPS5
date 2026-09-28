@@ -9,6 +9,7 @@
 extern "C" {
 
 int APS5_VABI sceNpTrophy2GetGameInfo(int context, int handle, NpTrophy2GameDetails* details, NpTrophy2GameData* data) {
+    Aps5TraceCall_nid_no_patch(__func__);
     if (details == nullptr || data == nullptr) {
         APS5_INVALID_ARG_EX;
     }
@@ -37,6 +38,7 @@ int APS5_VABI sceNpTrophy2GetGameInfo(int context, int handle, NpTrophy2GameDeta
 }
 
 int APS5_VABI sceNpTrophy2GetGameIcon(int context, int handle, void* buffer, size_t* size) {
+    Aps5TraceCall_nid_no_patch(__func__);
     (void)context;
     (void)handle;
     (void)buffer;
@@ -47,6 +49,7 @@ int APS5_VABI sceNpTrophy2GetGameIcon(int context, int handle, void* buffer, siz
 }
 
 int APS5_VABI sceNpTrophy2RegisterUnlockCallback(void* callback, void* userdata) {
+    Aps5TraceCall_nid_no_patch(__func__);
     (void)callback;
     (void)userdata;
     return SCE_NP_TROPHY2_OK;

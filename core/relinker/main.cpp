@@ -8,8 +8,10 @@
 #include <elfpatcher/general/ProgramHeaderLayoutBuilder.hpp>
 #include <elfpatcher/general/SectionHeaderTableBuilder.hpp>
 #include <elfpatcher/windows/WindowsElfPatcher.hpp>
+#include <elfpatcher/darwin/MachOPatcher.hpp>
 #include <io/ByteWriter.hpp>
 #include <relinker/parsing/ElfReader.hpp>
+#include <relinker/parsing/SelfUnwrapper.hpp>
 #include <relinker/analysis/ValidationPolicy.hpp>
 #include <relinker/analysis/SyscallScanner.hpp>
 #include <relinker/analysis/CallSiteResolver.hpp>
@@ -39,6 +41,20 @@ int main(const int argc, char* argv[]) {
         auto sourceBytes = fileReader.Read(args.inputPath);
         const std::string absPath = std::filesystem::absolute(args.outputPath).string();
 
+        if (Relinker::IsSelf(sourceBytes)) {
+            auto unwrapped = Relinker::UnwrapSelf(sourceBytes);
+            std::cout << "Input is a fake-signed SELF: unwrapped " << unwrapped.CopiedSegments << " segments into a " << unwrapped.Elf.size() << "-byte ELF\n";
+            for (const auto index : unwrapped.MissingProgramHeaders) std::cout << "  program header " << index << " has no SELF segment data (left zero-filled)\n";
+            sourceBytes = std::move(unwrapped.Elf);
+            if (args.unselfOnly) {
+                fileWriter.Write(absPath, std::move(sourceBytes));
+                std::cout << "Output file: " << absPath << '\n';
+                return 0;
+            }
+        } else if (args.unselfOnly) {
+            throw Domain::RelinkerException("--unself requires a SELF input");
+        }
+
         if (args.toIntel) {
             std::cout << "Mode: Intel instruction conversion; system unchanged; unused-filter=" << args.unusedFilterLevel << " (not applied)\n";
 
@@ -53,6 +69,11 @@ int main(const int argc, char* argv[]) {
         }
 
         auto elfReader = std::make_shared<Relinker::ElfReader>(sourceBytes);
+        // A module has no entry point to anchor reachability on; every import stays.
+        if (sourceBytes.size() > 18 && sourceBytes[16] == 0x18 && sourceBytes[17] == 0xFE && args.unusedFilterLevel != 0) {
+            std::cout << "Input is a module; unused-filter forced to 0\n";
+            args.unusedFilterLevel = 0;
+        }
 
         const auto pipeline = std::make_shared<Relinker::RelinkerPipeline>(
             elfReader,
@@ -64,7 +85,7 @@ int main(const int argc, char* argv[]) {
             args.unusedFilterLevel
         );
 
-        std::cout << "System: " << (args.toWindows ? "Windows" : "Linux") << "; unused-filter=" << args.unusedFilterLevel << "\n";
+        std::cout << "System: " << (args.toWindows ? "Windows" : args.toMacOS ? "macOS" : "Linux") << "; unused-filter=" << args.unusedFilterLevel << "\n";
         auto result = pipeline->Relink(sourceBytes);
         for (const auto& patch : result.Patches) {
             if (patch.Offset > sourceBytes.size() || patch.Bytes.size() > sourceBytes.size() - patch.Offset)
@@ -83,6 +104,8 @@ int main(const int argc, char* argv[]) {
         std::shared_ptr<Elfpatcher::IElfPatcher> patcher;
         if (args.toWindows) {
             patcher = std::make_shared<Elfpatcher::Windows::WindowsPePatcher>();
+        } else if (args.toMacOS) {
+            patcher = std::make_shared<Elfpatcher::Darwin::MachOPatcher>(std::filesystem::path(absPath).filename().string());
         } else {
             patcher = std::make_shared<Elfpatcher::Linux::LinuxElfPatcher>(
                 std::make_shared<Elfpatcher::EntryStubBuilder>(),
@@ -98,7 +121,10 @@ int main(const int argc, char* argv[]) {
         fileWriter.Write(absPath, patcher->Patch(sourceBytes, result.OriginalHeaders, result.DynamicSection, result.OriginalPltGotVaddr, args.runPath, args.lazyBinding, args.windowsDiagnostics));
         std::cout << "External prx references: " << result.RegistryEntries.size() << "\nOutput file: " << absPath << '\n';
 
-        if (args.autorun) return Cli::Autorun(absPath, args.toWindows);
+        if (args.autorun) {
+            if (args.toMacOS) throw Domain::RelinkerException("--autorun is not supported for the macOS target");
+            return Cli::Autorun(absPath, args.toWindows);
+        }
 
     } catch (const Domain::RelinkerException& e) {
         std::cerr << "FAIL: " << e.what();

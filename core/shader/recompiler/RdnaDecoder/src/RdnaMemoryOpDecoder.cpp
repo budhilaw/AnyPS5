@@ -382,7 +382,14 @@ RdnaInstruction DecodeRdnaSmem(std::uint32_t programCounter, std::span<const std
     setRawWords(instruction, code, wordIndex, 2u);
 
     instruction.destination = scalarDestination(sdst);
-    instruction.source0 = scalarDescriptorBase(sbase * 2u, 2u, "SMEM base register range overflow");
+    if (sbase * 2u == 106u) {
+        // s[106:107] is VCC: compilers load through a 64-bit address held there. The translator
+        // reads scalar codes 106/107 as VCC.
+        instruction.source0.kind = RdnaOperandKind::ScalarRegister;
+        instruction.source0.reg = 106u;
+    } else {
+        instruction.source0 = scalarDescriptorBase(sbase * 2u, 2u, "SMEM base register range overflow");
+    }
     instruction.source1 = scalarSource(soffsetCode);
     instruction.sourceCount = 2;
     return instruction;

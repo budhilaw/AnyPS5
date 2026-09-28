@@ -172,6 +172,16 @@ std::vector<std::uint32_t> ShaderDataDwordsFor(const IrBindingLayout& layout, st
         }
         result[i] = snapshot.userData[reg - userDataBase];
     }
+    // Per-buffer byte offsets: host storage buffer views need aligned offsets (up to 256 bytes on
+    // Vulkan), so the driver binds each guest buffer from its 256-byte aligned base and the shader
+    // adds the base address's low byte to every access.
+    for (std::uint32_t i = 0; i < layout.memoryOffsetCount; i++) {
+        if (i >= snapshot.buffers.size() || snapshot.buffers[i].dwordCount != 4u) {
+            fail("DescriptorBindingBuilder::Populate memory offset buffer index is out of range");
+        }
+        const auto residue = snapshot.buffers[i].dwords[0] & 0xffu;
+        result.at(layout.memoryOffsetDword + i / 4u) |= residue << ((i % 4u) * 8u);
+    }
     return result;
 }
 
@@ -199,6 +209,10 @@ void DescriptorBindingBuilder::Populate(BindingAllocationResult& allocation, con
         switch (physical.role) {
         case DescriptorRole::GuestBuffers:
             physical.guestDescriptor = GuestBuffersDescriptor(logical.resources, snapshot);
+            for (const std::uint32_t r : logical.resources) {
+                const auto& buffer = info.buffers.at(r);
+                physical.elementWritten.push_back(buffer.written || buffer.atomic);
+            }
             break;
         case DescriptorRole::GuestImages:
             physical.guestDescriptor = GuestImagesDescriptor(logical.resources, snapshot);

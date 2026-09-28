@@ -1,6 +1,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/GuestTextureResource.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Context.hpp"
 #include <stdexcept>
+#include <cstdio>
 #include <string>
 
 namespace AgcDriver::Graphics {
@@ -18,6 +19,8 @@ TextureTileMode resolveTileMode(std::uint32_t raw) {
         case 0x05: return TextureTileMode::kStandard4KB;
         case 0x09: return TextureTileMode::kStandard64KB;
         case 0x1b: return TextureTileMode::RenderTarget64KB;
+        case 0x08:
+        case 0x18: return TextureTileMode::Depth64KB;
         default: throw std::runtime_error("AGC graphics: guest texture descriptor uses an unsupported tile mode " + std::to_string(raw));
     }
 }
@@ -26,6 +29,7 @@ TextureDimension resolveDimension(std::uint32_t raw) {
     switch (raw) {
         case 8: return TextureDimension::k1D;
         case 9: return TextureDimension::k2D;
+        case 10: return TextureDimension::k3D;
         case 11: return TextureDimension::kCube;
         case 13: return TextureDimension::k2DArray;
         default: throw std::runtime_error("AGC graphics: guest texture descriptor uses an unsupported image type " + std::to_string(raw));
@@ -94,10 +98,18 @@ GuestTextureResource DecodeTextureResource(std::span<const std::uint32_t> words)
     Require(bcSwizzle == 0, "guest texture descriptor uses a BC swizzle which is not implemented");
 
     Require(baseLevel <= lastLevel, "guest texture descriptor has a base mip level past its last mip level");
-    Require(lastLevel == maxMip, "guest texture descriptor must expose every mip level down to the last one");
+    Require(lastLevel <= maxMip, "guest texture descriptor exposes mip levels past the surface");
 
-    const auto tileMode = resolveTileMode(tileModeRaw);
-    const auto dimension = resolveDimension(typeRaw);
+    TextureTileMode tileMode;
+    TextureDimension dimension;
+    try {
+        tileMode = resolveTileMode(tileModeRaw);
+        dimension = resolveDimension(typeRaw);
+    } catch (const std::runtime_error& error) {
+        char detail[200];
+        std::snprintf(detail, sizeof(detail), " (%ux%u format 0x%x type %u mips %u-%u/%u words {%08x %08x %08x %08x %08x %08x %08x %08x})", width, height, format, typeRaw, baseLevel, lastLevel, maxMip, words[0], words[1], words[2], words[3], words[4], words[5], words[6], words[7]);
+        throw std::runtime_error(error.what() + std::string(detail));
+    }
 
     switch (dimension) {
         case TextureDimension::k1D:
@@ -108,6 +120,9 @@ GuestTextureResource DecodeTextureResource(std::span<const std::uint32_t> words)
             break;
         case TextureDimension::k2DArray:
             Require(baseArray <= depth, "guest 2D array texture descriptor has a base array past its last array slice");
+            break;
+        case TextureDimension::k3D:
+            Require(baseArray == 0, "guest 3D texture descriptor has a nonzero base array");
             break;
         case TextureDimension::kCube:
             Require(width == height, "guest cube texture descriptor is not square");
@@ -124,8 +139,10 @@ GuestTextureResource DecodeTextureResource(std::span<const std::uint32_t> words)
     result.baseArray = baseArray;
     result.mipCount = maxMip + 1u;
     result.baseLevel = baseLevel;
+    result.lastLevel = lastLevel;
     result.tileMode = tileMode;
     result.dimension = dimension;
+    result.viewDimension = dimension;
     result.format = format;
     result.dstSelX = static_cast<std::uint8_t>(dstSelX);
     result.dstSelY = static_cast<std::uint8_t>(dstSelY);
@@ -140,7 +157,7 @@ bool MatchesGuestDimension(ShaderRecompiler::DescriptorImageShape shape, Texture
         case ShaderRecompiler::DescriptorImageShape::Image2D: return dimension == TextureDimension::k2D;
         case ShaderRecompiler::DescriptorImageShape::Image2DArray: return dimension == TextureDimension::k2DArray;
         case ShaderRecompiler::DescriptorImageShape::ImageCube: return dimension == TextureDimension::kCube;
-        case ShaderRecompiler::DescriptorImageShape::Image3D: return false;
+        case ShaderRecompiler::DescriptorImageShape::Image3D: return dimension == TextureDimension::k3D;
     }
     throw std::runtime_error("AGC graphics: MatchesGuestDimension encountered an unknown descriptor image shape");
 }

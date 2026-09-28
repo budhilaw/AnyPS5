@@ -71,9 +71,14 @@ extern "C" _Unwind_Reason_Code APS5_VABI __gxx_personality_v0_nid_postfix(
     return _URC_CONTINUE_UNWIND;
 }
 
+#if !defined(__APPLE__)
+// Linux and Windows route host exceptions through this runtime as well. On macOS the host keeps
+// libc++abi: a definition here would capture every personality reference inside the library
+// under the two-level namespace and hand libunwind contexts to this runtime.
 extern "C" _Unwind_Reason_Code __gxx_personality_v0(
     int version, _Unwind_Action actions, std::uint64_t exceptionClass,
     _Unwind_Exception* exception, _Unwind_Context* context
 ) {
     return __gxx_personality_v0_nid_postfix(version, actions, exceptionClass, exception, context);
 }
+#endif

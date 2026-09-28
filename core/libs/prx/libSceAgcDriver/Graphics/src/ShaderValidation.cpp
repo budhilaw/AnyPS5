@@ -1,3 +1,4 @@
+#include <cstdio>
 #include "BdaAbi.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Pipeline.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/VertexInput.hpp"
@@ -183,13 +184,17 @@ Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysi
                 }
                 const bool isSubgroupCapability = subgroupOperations != 0;
                 if (isSubgroupCapability) {
-                    Require((subgroup.supportedStages & VulkanStage(stage)) != 0, "subgroup capability " + std::to_string(instruction[1]) + " is unsupported for shader stage " + std::to_string(VulkanStage(stage)));
+                    Require((subgroup.supportedStages & VulkanStage(stage)) != 0, "subgroup capability " + std::to_string(instruction[1]) + " is unsupported for shader stage " + std::to_string(VulkanStage(stage)) + " (device subgroup stages 0x" + [](std::uint32_t v) { char b[16]; std::snprintf(b, sizeof(b), "%x", v); return std::string(b); }(subgroup.supportedStages) + ")");
                     Require((subgroup.supportedOperations & subgroupOperations) == subgroupOperations, "device lacks operations for subgroup capability " + std::to_string(instruction[1]));
                 }
 
                 const bool isBaseCapability =
                     capability == spv::CapabilityShader ||
-                    capability == spv::CapabilitySignedZeroInfNanPreserve;
+                    capability == spv::CapabilitySignedZeroInfNanPreserve ||
+                    capability == spv::CapabilityStorageImageReadWithoutFormat ||
+                    capability == spv::CapabilityStorageImageWriteWithoutFormat ||
+                    capability == spv::CapabilitySampled1D ||
+                    capability == spv::CapabilityImage1D;
 
                 const bool isBdaCapability =
                     shader.bdaAbiVersion == ShaderRecompiler::BdaAbi::Version &&
@@ -274,7 +279,8 @@ Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysi
                     Require(!field->has_value(), "duplicate SPIR-V decoration");
                     *field = instruction[3];
                 }
-                Require(kind != spv::DecorationComponent && kind != spv::DecorationIndex && kind != spv::DecorationStream && kind != spv::DecorationXfbBuffer && kind != spv::DecorationXfbStride, "unsupported shader interface packing or transform feedback");
+                Require(kind != spv::DecorationComponent && kind != spv::DecorationStream && kind != spv::DecorationXfbBuffer && kind != spv::DecorationXfbStride, "unsupported shader interface packing or transform feedback");
+                if (kind == spv::DecorationIndex) Require(count == 4 && instruction[3] <= 1, "dual-source blend index must be 0 or 1");
                 if (kind == spv::DecorationPatch) decoration.patch = true;
                 if (kind == spv::DecorationPerPrimitiveEXT) decoration.perPrimitive = true;
                 if (kind == spv::DecorationPerVertexKHR) {
@@ -417,7 +423,6 @@ Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysi
             const auto binding = std::find_if(shader.bindings.begin(), shader.bindings.end(), [&](const auto& item) { return item.descriptorSet == key.first && item.binding == key.second; });
             Require(binding != shader.bindings.end(), "SPIR-V resource is absent from recompiler binding metadata");
             Require(binding->kind == ShaderRecompiler::DescriptorKind::Sampler || binding->kind == ShaderRecompiler::DescriptorKind::SampledImage || binding->kind == ShaderRecompiler::DescriptorKind::StorageImage, "SPIR-V descriptor type disagrees with recompiler binding metadata");
-            Require(binding->kind != ShaderRecompiler::DescriptorKind::StorageImage, "storage image resources are not implemented");
         } else {
             Require(variable.storage == spv::StorageClassStorageBuffer && decoration.set && decoration.binding, "unsupported or unbound shader resource");
             const auto key = std::make_pair(*decoration.set, *decoration.binding);
@@ -561,7 +566,14 @@ void ValidateShaders(std::span<const CompiledShader> shaders, const State& state
         }
         previous = current;
     }
-    Require(previous->outputs.size() == 1 && previous->outputs.contains(0) && previous->outputs.at(0) == "vertex:f32x4", "fragment shader must export one float4 color at location zero");
+    // Color exports: one four-component vector per written target at locations 0..7 (a uint
+    // vector for integer targets); location zero must exist since targets are contiguous.
+    // A depth-only pass (shadow maps) may export nothing; with a color target, target zero is written.
+    Require(!state.hasColorTarget || previous->outputs.contains(0), "fragment shader must export a color at location zero");
+    for (const auto& [location, signature] : previous->outputs) {
+        Require(location < 8, "fragment shader exports a color beyond location seven");
+        Require(signature == "vertex:f32x4" || signature == "vertex:u32x4", "fragment shader color export at location " + std::to_string(location) + " is not a four-component vector: " + signature);
+    }
 }
 
 void ValidateShaderPair(const ShaderRecompiler::RecompileResult& vertex, const ShaderRecompiler::RecompileResult& fragment) {

@@ -1,9 +1,11 @@
+#include <string>
 #include <cstdint>
 #include <cstddef>
 #include <ctime>
 #include <cstring>
 
 #include "prx/libc/include/General.hpp"
+#include "prx/libc/include/GuestTime.hpp"
 
 extern "C" {
 
@@ -25,58 +27,85 @@ double APS5_VABI difftime_nid_postfix(int64_t time1, int64_t time0) {
     return std::difftime(static_cast<std::time_t>(time1), static_cast<std::time_t>(time0));
 }
 
-std::tm* APS5_VABI libc_gmtime_nid_postfix(const int64_t* timer) {
-    static thread_local std::tm result;
+GuestTm* APS5_VABI libc_gmtime_nid_postfix(const int64_t* timer) {
+    static thread_local GuestTm result;
     const std::time_t t = static_cast<std::time_t>(*timer);
-    const std::tm* converted = std::gmtime(&t);
-    if (converted == nullptr) return nullptr;
-    result = *converted;
+    std::tm converted{};
+    if (gmtime_r(&t, &converted) == nullptr) return nullptr;
+    result = ToGuestTm(converted);
     return &result;
 }
 
-std::tm* APS5_VABI libc_localtime_nid_postfix(const int64_t* timer) {
-    static thread_local std::tm result;
+GuestTm* APS5_VABI libc_localtime_nid_postfix(const int64_t* timer) {
+    static thread_local GuestTm result;
     const std::time_t t = static_cast<std::time_t>(*timer);
-    const std::tm* converted = std::localtime(&t);
-    if (converted == nullptr) return nullptr;
-    result = *converted;
+    std::tm converted{};
+    if (localtime_r(&t, &converted) == nullptr) return nullptr;
+    result = ToGuestTm(converted);
     return &result;
 }
 
-std::tm* APS5_VABI localtime_nid_postfix(const int64_t* timer) {
+GuestTm* APS5_VABI localtime_nid_postfix(const int64_t* timer) {
     return libc_localtime_nid_postfix(timer);
 }
 
-int APS5_VABI localtime_s_nid_postfix(std::tm* result, const int64_t* timer) {
+// C11 Annex K order, as Sony's libc declares them: struct tm* gmtime_s(const time_t*, struct tm*)
+// (the Microsoft order would write the structure over the caller's time value).
+GuestTm* APS5_VABI localtime_s_nid_postfix(const int64_t* timer, GuestTm* result) {
+    if (timer == nullptr || result == nullptr) return nullptr;
     const std::time_t t = static_cast<std::time_t>(*timer);
-    const std::tm* converted = std::localtime(&t);
-    if (converted == nullptr) return -1;
-    *result = *converted;
-    return 0;
+    std::tm converted{};
+    if (localtime_r(&t, &converted) == nullptr) return nullptr;
+    *result = ToGuestTm(converted);
+    return result;
 }
 
-int APS5_VABI gmtime_s_nid_postfix(std::tm* result, const int64_t* timer) {
+GuestTm* APS5_VABI gmtime_s_nid_postfix(const int64_t* timer, GuestTm* result) {
+    if (timer == nullptr || result == nullptr) return nullptr;
     const std::time_t t = static_cast<std::time_t>(*timer);
-    const std::tm* converted = std::gmtime(&t);
-    if (converted == nullptr) return -1;
-    *result = *converted;
-    return 0;
+    std::tm converted{};
+    if (gmtime_r(&t, &converted) == nullptr) return nullptr;
+    *result = ToGuestTm(converted);
+    return result;
 }
 
-int64_t APS5_VABI libc_mktime_nid_postfix(std::tm* timeptr) {
-    return static_cast<int64_t>(std::mktime(timeptr));
+int64_t APS5_VABI libc_mktime_nid_postfix(GuestTm* timeptr) {
+    std::tm host = ToHostTm(*timeptr);
+    const auto result = std::mktime(&host);
+    *timeptr = ToGuestTm(host); // mktime normalizes the fields
+    return static_cast<int64_t>(result);
 }
 
-int64_t APS5_VABI mktime_nid_postfix(std::tm* timeptr) {
-    return static_cast<int64_t>(std::mktime(timeptr));
+int64_t APS5_VABI mktime_nid_postfix(GuestTm* timeptr) {
+    std::tm host = ToHostTm(*timeptr);
+    const auto result = std::mktime(&host);
+    *timeptr = ToGuestTm(host); // mktime normalizes the fields
+    return static_cast<int64_t>(result);
 }
 
-size_t APS5_VABI libc_strftime_nid_postfix(char* str, size_t count, const char* format, const std::tm* timeptr) {
-    return std::strftime(str, count, format, timeptr);
+size_t APS5_VABI libc_strftime_nid_postfix(char* str, size_t count, const char* format, const GuestTm* timeptr) {
+    const std::tm host = ToHostTm(*timeptr);
+    return std::strftime(str, count, format, &host);
 }
 
-size_t APS5_VABI strftime_nid_postfix(char* str, size_t count, const char* format, const std::tm* timeptr) {
-    return std::strftime(str, count, format, timeptr);
+size_t APS5_VABI strftime_nid_postfix(char* str, size_t count, const char* format, const GuestTm* timeptr) {
+    const std::tm host = ToHostTm(*timeptr);
+    return std::strftime(str, count, format, &host);
+}
+
+// The guest's wchar_t is 16 bits wide; the C locale's conversions produce ASCII only.
+size_t APS5_VABI wcsftime_nid_postfix(std::uint16_t* str, size_t count, const std::uint16_t* format, const GuestTm* guestTime) {
+    if (!str || !format || !guestTime || count == 0) return 0;
+    const std::tm hostTime = ToHostTm(*guestTime);
+    const std::tm* timeptr = &hostTime;
+    std::string narrowFormat;
+    for (const auto* c = format; *c; ++c) narrowFormat.push_back(*c < 0x80 ? static_cast<char>(*c) : '?');
+    std::string narrow(count * 4 + 64, '\0');
+    const auto length = std::strftime(narrow.data(), narrow.size(), narrowFormat.c_str(), timeptr);
+    if (length == 0 || length >= count) return 0;
+    for (size_t i = 0; i < length; ++i) str[i] = static_cast<unsigned char>(narrow[i]);
+    str[length] = 0;
+    return length;
 }
 
 }

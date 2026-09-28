@@ -63,6 +63,10 @@ void Unmap(const Mapping& mapping) {
     check(munmap(mapping.alias, mapping.bytes) == 0, "munmap guest alias");
 }
 
+void Protect(std::uint64_t address, std::size_t bytes, int protection) {
+    check(mprotect(reinterpret_cast<void*>(address), bytes, protection) == 0, "mprotect guest backing protect");
+}
+
 void Deactivate(std::uint64_t address, std::size_t bytes) {
     check(mprotect(reinterpret_cast<void*>(address), bytes, PROT_NONE) == 0, "mprotect guest backing unmap");
 }

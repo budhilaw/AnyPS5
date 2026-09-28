@@ -1,3 +1,7 @@
+#include "prx/libSceAgcDriver/Execution/include/GpuJournal.hpp"
+#include "RdnaDecoder/RdnaInstructionDecoder.hpp"
+#include <cxxabi.h>
+#include <cstdio>
 #include "prx/libSceAgcDriver/Execution/include/Driver.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
@@ -9,6 +13,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/ShaderInputState.hpp"
 #include "prx/libc/include/Shutdown.hpp"
 #include "prx/libSceAgcDriver/Execution/include/MemoryAccessScope.hpp"
+#include "prx/libSceAgcDriver/Eq/include/Event.hpp"
 #include "prx/libc/include/GuestMemoryTracking.hpp"
 #include <bit>
 #include <algorithm>
@@ -16,6 +21,10 @@
 #include <condition_variable>
 #include <cstring>
 #include <deque>
+#include "prx/libc/include/General.hpp"
+#include <cstdlib>
+#include <chrono>
+#include <set>
 #include <exception>
 #include <limits>
 #include <map>
@@ -48,6 +57,10 @@ struct Submission {
     std::uint64_t serial;
     std::uint32_t queue;
     std::vector<std::uint32_t> commands;
+    // Indirect register lists copied at submission: titles recycle the ring holding them as soon
+    // as their own fences allow, which can precede the host's delayed execution. Stable storage:
+    // the packets point at these copies.
+    std::deque<std::vector<std::uint32_t>> registerLists;
     std::map<std::uint64_t, std::shared_ptr<const ShaderSnapshot>> shaders;
     std::map<std::size_t, std::shared_ptr<IFlipRequest>> flips;
     std::map<std::size_t, std::shared_ptr<IRenderingWait>> renderingWaits;
@@ -61,8 +74,27 @@ struct Submission {
 
 std::uint32_t readRegister(const Registers& registers, std::uint32_t offset) {
     const auto it = registers.find(offset);
-    require(it != registers.end(), "required shader register has not been written");
+    if (it == registers.end()) {
+        std::string message = "required shader register 0x" + std::to_string(offset) + " has not been written; written neighbours:";
+        for (const auto& [key, value] : registers) {
+            if (key + 16 < offset || key > offset + 16) continue;
+            char text[40];
+            std::snprintf(text, sizeof(text), " 0x%x=0x%x", key, value);
+            message += text;
+        }
+        require(false, message.c_str());
+    }
     return it->second;
+}
+
+// User-data SGPRs a program declares but the title never wrote hold whatever the console's
+// registers held (typically zero after boot); they read as zero here, logged once.
+std::uint32_t readUserData(const Registers& registers, std::uint32_t offset) {
+    const auto it = registers.find(offset);
+    if (it != registers.end()) return it->second;
+    static std::once_flag once;
+    std::call_once(once, [&] { APS5_LOG_OUT("user-data register 0x%x was never written; reading zero", offset); });
+    return 0;
 }
 
 class Driver {
@@ -108,7 +140,7 @@ public:
         if (descriptor.dw_num != 0) {
             require(descriptor.dw_num <= std::numeric_limits<std::size_t>::max() / sizeof(std::uint32_t), "command size overflow");
             GuestMemory::CheckRange(descriptor.addr, static_cast<std::size_t>(descriptor.dw_num) * sizeof(std::uint32_t), alignof(std::uint32_t));
-            submission.commands.assign(descriptor.addr, descriptor.addr + descriptor.dw_num);
+            appendCommands(submission.commands, submission.registerLists, descriptor.addr, descriptor.dw_num, 0);
         }
         submission.copied = FrameTiming::Clock::now();
         validate(submission.commands, queue);
@@ -146,12 +178,11 @@ public:
         changed.notify_all();
     }
 
+    // Waits until every accepted submission has executed and the GPU is idle: a boundary
+    // submission drains the device on the worker (submissions themselves complete as soon as
+    // their packets are recorded; the GPU finishes them asynchronously).
     void WaitIdle() {
-        require(std::this_thread::get_id() != worker.get_id(), "worker cannot wait for itself");
-        std::unique_lock lock(mutex);
-        const auto target = accepted;
-        changed.wait(lock, [&] { return failure != nullptr || completed >= target; });
-        rethrowFailure();
+        SuspendPoint();
     }
 
     void SuspendPoint() {
@@ -196,6 +227,8 @@ public:
     }
 
     void ReportFailure(std::exception_ptr error) {
+        try { if (error) std::rethrow_exception(error); } catch (const std::exception& e) { std::fprintf(stderr, "AGC driver failed: %s\n", e.what()); } catch (...) { const auto* type = abi::__cxa_current_exception_type(); std::fprintf(stderr, "AGC driver failed: exception of type %s\n", type ? type->name() : "?"); }
+        GpuJournal::Dump("AGC driver: last GPU work before the failure, oldest first:");
         require(error != nullptr, "null asynchronous failure");
         {
             std::lock_guard lock(mutex);
@@ -262,11 +295,13 @@ public:
 
     void RegisterShader(const Shader* shader) {
         CheckFailure();
-        GuestMemory::CheckRange(shader, sizeof(Shader), alignof(Shader));
+        // The header is a packed 4-byte-aligned file structure in the title's shader blob; its
+        // pointer fields are read on x86-64, which tolerates the misalignment.
+        GuestMemory::CheckRange(shader, sizeof(Shader), 4);
         require(shader->file_header == 0x34333231u && shader->version == 0x18u, "invalid shader header");
         require(shader->header_size >= sizeof(Shader), "shader header is smaller than its fixed fields");
         require(shader->shader_size != 0 && (shader->shader_size & 3u) == 0, "invalid shader size");
-        GuestMemory::CheckRange(shader, shader->header_size, alignof(Shader));
+        GuestMemory::CheckRange(shader, shader->header_size, 4);
         const auto* code = const_cast<const void*>(shader->code);
         GuestMemory::CheckRange(code, shader->shader_size, 256);
         ShaderSnapshot snapshot{reinterpret_cast<std::uintptr_t>(code), reinterpret_cast<std::uintptr_t>(shader), shader->type, {}, {}};
@@ -292,9 +327,10 @@ private:
     std::shared_ptr<VulkanDevice> device;
     std::uint64_t accepted = 0;
     std::uint64_t completed = 0;
+    std::set<std::uint64_t> inFlight;
+    std::uint64_t dequeuedSerial = 0;
     std::exception_ptr failure;
     bool stopping = false;
-    bool resetGraphics = false;
     std::shared_ptr<FrameTiming> frameTiming;
     std::uint64_t frameSerial = 0;
     std::thread worker;
@@ -311,6 +347,55 @@ private:
     void rethrowFailure() const {
         if (failure != nullptr) {
             std::rethrow_exception(failure);
+        }
+    }
+
+    // Copies a command stream, following INDIRECT_BUFFER packets: a call (chain bit clear) runs
+    // the target and continues after the packet, a chain runs the target and ends the stream.
+    static void appendCommands(std::vector<std::uint32_t>& out, std::deque<std::vector<std::uint32_t>>& registerLists, const std::uint32_t* words, std::uint32_t count, unsigned depth) {
+        require(depth <= 32, "indirect buffer nesting is too deep");
+        for (std::uint32_t cursor = 0; cursor < count;) {
+            const auto header = words[cursor];
+            require((header & 0xc0000000u) == 0xc0000000u, "unsupported PM4 packet type");
+            const auto size = ((header >> 16u) & 0x3fffu) + 2u;
+            require(size <= count - cursor, "truncated PM4 packet");
+            if (((header >> 8u) & 0xffu) == 0x3f) {
+                require(size == 4, "invalid INDIRECT_BUFFER packet size");
+                const auto target = static_cast<std::uint64_t>(words[cursor + 1]) | (static_cast<std::uint64_t>(words[cursor + 2]) << 32u);
+                const auto targetCount = words[cursor + 3] & 0xfffffu;
+                const bool chain = (words[cursor + 3] & 0x100000u) != 0;
+                require(target != 0 && target % 4 == 0 && targetCount != 0, "invalid indirect buffer target");
+                try {
+                    GuestMemory::CheckRange(reinterpret_cast<const void*>(target), static_cast<std::size_t>(targetCount) * sizeof(std::uint32_t), alignof(std::uint32_t));
+                } catch (const std::exception& error) {
+                    char text[240];
+                    std::snprintf(text, sizeof(text), "%s: INDIRECT_BUFFER {%08x %08x %08x %08x} at DWORD %u of the buffer at %p (%u DWORDs, depth %u)", error.what(), words[cursor], words[cursor + 1], words[cursor + 2], words[cursor + 3], cursor, static_cast<const void*>(words), count, depth);
+                    throw std::runtime_error(text);
+                }
+                require(out.size() <= (std::size_t{1} << 26) - targetCount, "command stream is too large");
+                appendCommands(out, registerLists, reinterpret_cast<const std::uint32_t*>(target), targetCount, depth + 1);
+                if (chain) return;
+            } else {
+                const auto opcode = (header >> 8u) & 0xffu;
+                out.insert(out.end(), words + cursor, words + cursor + size);
+                if ((opcode == 0x63 || opcode == 0x64 || opcode == 0x9f) && size == 5 && words[cursor + 3] == 0x80000000u && words[cursor + 4] != 0) {
+                    const auto source = static_cast<std::uint64_t>(words[cursor + 1]) | (static_cast<std::uint64_t>(words[cursor + 2]) << 32u);
+                    const auto pairs = words[cursor + 4] & 0x3fffu;
+                    if (source != 0 && source % 4 == 0) {
+                        registerLists.emplace_back(static_cast<std::size_t>(pairs) * 2);
+                        auto& copy = registerLists.back();
+                        try {
+                            GuestMemory::Read(source, std::as_writable_bytes(std::span(copy)), 4);
+                            const auto host = reinterpret_cast<std::uintptr_t>(copy.data());
+                            out[out.size() - 4] = static_cast<std::uint32_t>(host);
+                            out[out.size() - 3] = static_cast<std::uint32_t>(host >> 32u);
+                        } catch (const std::exception&) {
+                            registerLists.pop_back(); // unreadable now: the executor reads it in place later
+                        }
+                    }
+                }
+            }
+            cursor += size;
         }
     }
 
@@ -343,7 +428,13 @@ private:
         const auto userCount = (readRegister(queue.shader, 0x213) >> 1u) & 0x1fu;
         std::vector<std::uint32_t> userData;
         for (std::uint32_t i = 0; i < userCount; ++i) {
-            userData.push_back(readRegister(queue.shader, 0x240 + i));
+            userData.push_back(readUserData(queue.shader, 0x240 + i));
+        }
+        static const bool traceDispatch = std::getenv("ANYPS5_TRACE_INDIRECT") != nullptr;
+        if (traceDispatch) {
+            std::string text;
+            for (std::size_t i = 0; i < userData.size() && i < 16; ++i) { char item[12]; std::snprintf(item, sizeof(item), " %08x", userData[i]); text += item; }
+            std::fprintf(stderr, "[dispatch] program 0x%llx groups %ux%ux%u user data:%s\n", static_cast<unsigned long long>(address), packet[1], packet[2], packet[3], text.c_str());
         }
         const auto compute = Graphics::DecodeComputeStageInfo(queue.shader);
         const std::array<ShaderRecompiler::MemoryRegion, 2> memory{{{snapshot.codeAddress, std::as_bytes(std::span(snapshot.code))}, {snapshot.headerAddress, snapshot.header}}};
@@ -369,9 +460,60 @@ private:
         timing.Mark("request_memory");
         const auto compiled = ShaderRecompiler::Recompile(request);
         timing.Mark(compiled.cacheHit ? "shader_cache_hit" : "shader_compile");
+        if (traceDispatch) {
+            bool gds = false;
+            for (const auto& binding : compiled.bindings) gds = gds || binding.role == ShaderRecompiler::DescriptorRole::Gds;
+            static const bool traceAllBuffers = std::getenv("ANYPS5_TRACE_DISPATCH_BUFFERS") != nullptr;
+            if (gds || traceAllBuffers) {
+                std::string buffers;
+                for (const auto& binding : compiled.bindings) {
+                    if (binding.role != ShaderRecompiler::DescriptorRole::GuestBuffers) continue;
+                    for (std::size_t element = 0; element + 4 <= binding.guestDescriptor.size(); element += 4) {
+                        const auto& d = binding.guestDescriptor;
+                        char item[96];
+                        const auto base = d[element] | (static_cast<std::uint64_t>(d[element + 1] & 0xffffu) << 32u);
+                        const auto stride = (d[element + 1] >> 16u) & 0x3fffu;
+                        std::snprintf(item, sizeof(item), " [base 0x%llx stride %u records %u%s", static_cast<unsigned long long>(base), stride, d[element + 2], element / 4 < binding.elementWritten.size() && binding.elementWritten[element / 4] ? " written" : "");
+                        buffers += item;
+                        // Small buffers show their first dwords (constants), read from guest memory now.
+                        if (traceAllBuffers && static_cast<std::uint64_t>(std::max(stride, 1u)) * d[element + 2] <= 4096 && base != 0) {
+                            std::array<std::uint32_t, 8> words{};
+                            try {
+                                GuestMemory::Read(base, std::as_writable_bytes(std::span(words)), 1);
+                                buffers += " =";
+                                for (const auto word : words) { std::snprintf(item, sizeof(item), " %08x", word); buffers += item; }
+                            } catch (...) {
+                                buffers += " (unreadable)";
+                            }
+                        }
+                        buffers += "]";
+                    }
+                }
+                std::fprintf(stderr, "[dispatch] program 0x%llx groups %ux%ux%u %s; %zu user dwords; buffers:%s\n", static_cast<unsigned long long>(address), packet[1], packet[2], packet[3], gds ? "binds GDS" : "no GDS", userData.size(), buffers.c_str());
+                // ANYPS5_DUMP_GDS_SHADERS=<directory>: the guest instructions of every GDS program, once each.
+                if (static const char* dumpDirectory = std::getenv("ANYPS5_DUMP_GDS_SHADERS"); dumpDirectory != nullptr && (gds || traceAllBuffers)) {
+                    static std::set<std::uint64_t> dumped;
+                    if (dumped.insert(address).second) {
+                        char name[64];
+                        std::snprintf(name, sizeof(name), "/gds_%llx.rdna.txt", static_cast<unsigned long long>(address));
+                        if (FILE* file = std::fopen((std::string(dumpDirectory) + name).c_str(), "wb")) {
+                            constexpr ShaderRecompiler::RdnaInstructionDecoder decoder;
+                            const auto text = ShaderRecompiler::RdnaProgramToString(decoder.Decode(request.shader.code));
+                            std::fwrite(text.data(), 1, text.size(), file);
+                            std::fclose(file);
+                        }
+                    }
+                }
+            }
+        }
         std::vector<Graphics::GuestMemorySnapshot> snapshots;
         for (const auto& region : captured) snapshots.push_back({region.guestAddress, region.bytes});
         timing.Mark("snapshots");
+        {
+            char text[160];
+            std::snprintf(text, sizeof(text), "dispatch program 0x%llx groups %ux%ux%u wave%u%s", static_cast<unsigned long long>(address), packet[1], packet[2], packet[3], (packet[4] & 0x8000u) != 0 ? 32u : 64u, journalIndirect ? " (indirect)" : "");
+            GpuJournal::Record(text);
+        }
         device->Dispatch(compiled, packet[1], packet[2], packet[3], snapshots);
         timing.Mark("dispatch_and_resource_release");
     }
@@ -411,7 +553,7 @@ private:
                 {},
                 {{{snapshot.codeAddress, std::as_bytes(std::span(snapshot.code))}, {snapshot.headerAddress, snapshot.header}}}
             };
-            for (std::uint32_t i = 0; i < userCount; ++i) result.userData.push_back(readRegister(queue.shader, userDataBase + i));
+            for (std::uint32_t i = 0; i < userCount; ++i) result.userData.push_back(readUserData(queue.shader, userDataBase + i));
             return result;
         };
         using Stage = ShaderRecompiler::ShaderStage;
@@ -457,6 +599,26 @@ private:
         }
         append(0x008, 1, Stage::Fragment, 0x00b, 0x00c, Role::Fragment);
         programs.back().firstUserSgpr = 0;
+        // ANYPS5_DUMP_GDS_SHADERS with ANYPS5_DEBUG_DRAW_TARGETS: the guest instructions of every
+        // graphics program, once each.
+        if (static const char* dumpDirectory = std::getenv("ANYPS5_DUMP_GDS_SHADERS"); dumpDirectory != nullptr && std::getenv("ANYPS5_DEBUG_DRAW_TARGETS") != nullptr) {
+            static std::set<std::uint64_t> dumped;
+            for (const auto& program : programs) {
+                if (!dumped.insert(program.binary.codeAddress).second) continue;
+                char name[64];
+                std::snprintf(name, sizeof(name), "/gfx_%llx.rdna.txt", static_cast<unsigned long long>(program.binary.codeAddress));
+                if (FILE* file = std::fopen((std::string(dumpDirectory) + name).c_str(), "wb")) {
+                    constexpr ShaderRecompiler::RdnaInstructionDecoder decoder;
+                    const auto text = ShaderRecompiler::RdnaProgramToString(decoder.Decode(program.binary.code));
+                    std::fwrite(text.data(), 1, text.size(), file);
+                    std::string users = "user data:";
+                    for (const auto word : program.userData) { char item[16]; std::snprintf(item, sizeof(item), " %08x", word); users += item; }
+                    users += "\n";
+                    std::fwrite(users.data(), 1, users.size(), file);
+                    std::fclose(file);
+                }
+            }
+        }
         const auto pixel = Graphics::DecodePixelStageInfo(queue.context, graphics.hasColorTarget, graphics.color.componentMapping);
         std::vector<ShaderRecompiler::MemoryRegion> memory;
         std::vector<ShaderRecompiler::LinkedProgram> linked;
@@ -464,6 +626,21 @@ private:
             const auto& program = programs[i];
             memory.insert(memory.end(), program.memory.begin(), program.memory.end());
             linked.push_back({roles[i], program.binary, program.userDataBase, program.firstUserSgpr, program.userData});
+        }
+        {
+            char text[320];
+            std::snprintf(text, sizeof(text), "draw programs 0x%llx/0x%llx %s count %u instances %u target %ux%u format %u%s mask 0x%x blend %u vp %.0fx%.0f@%.0f,%.0f sc %ux%u@%d,%d depth %s%s%s", static_cast<unsigned long long>(programs.front().binary.codeAddress), static_cast<unsigned long long>(programs.back().binary.codeAddress), drawParameters.indexed ? "indexed" : "auto", drawParameters.indexCount, drawParameters.instanceCount, graphics.renderExtent.width, graphics.renderExtent.height, graphics.hasColorTarget ? static_cast<unsigned>(graphics.color.format) : 0u, graphics.hasDepthTarget ? " depth" : "", graphics.blend.colorWriteMask, graphics.blend.blendEnable, graphics.viewport.width, graphics.viewport.height, graphics.viewport.x, graphics.viewport.y, graphics.scissor.extent.width, graphics.scissor.extent.height, graphics.scissor.offset.x, graphics.scissor.offset.y, graphics.depthState.test ? "test" : "-", graphics.depthState.write ? "+write" : "", graphics.hasColorTarget ? (graphics.color.gpuOnly ? " gpuonly" : "") : "");
+            if (graphics.blend.blendEnable) {
+                char blend[96];
+                std::snprintf(blend, sizeof(blend), " blend(%u,%u,%u a %u,%u,%u)", static_cast<unsigned>(graphics.blend.srcColorBlendFactor), static_cast<unsigned>(graphics.blend.dstColorBlendFactor), static_cast<unsigned>(graphics.blend.colorBlendOp), static_cast<unsigned>(graphics.blend.srcAlphaBlendFactor), static_cast<unsigned>(graphics.blend.dstAlphaBlendFactor), static_cast<unsigned>(graphics.blend.alphaBlendOp));
+                std::strncat(text, blend, sizeof(text) - std::strlen(text) - 1);
+            }
+            if (graphics.depthState.stencilTest) {
+                char stencil[96];
+                std::snprintf(stencil, sizeof(stencil), " stencil(ref %u cmp %u wmask 0x%x ops %u/%u/%u)", graphics.depthState.front.reference, static_cast<unsigned>(graphics.depthState.front.compareOp), graphics.depthState.front.writeMask, static_cast<unsigned>(graphics.depthState.front.failOp), static_cast<unsigned>(graphics.depthState.front.passOp), static_cast<unsigned>(graphics.depthState.front.depthFailOp));
+                std::strncat(text, stencil, sizeof(text) - std::strlen(text) - 1);
+            }
+            GpuJournal::Record(text);
         }
         timing.Mark("prepare");
         std::lock_guard gpuLock(gpuMutex);
@@ -499,7 +676,11 @@ private:
             results.push_back(ShaderRecompiler::Recompile(request));
             shaderTiming.Mark(results.back().cacheHit ? "cache_hit" : "compile");
             const auto& result = results.back();
-            if (!drawParameters.indexed && i == 0) {
+            // The base vertex and instance live in user SGPRs the fetch adds to the vertex and
+            // instance ids; the host applies them as the draw's offsets (for indexed draws too:
+            // titles batch many meshes in one vertex buffer and select them by base vertex).
+            static const bool indexedOffsets = std::getenv("ANYPS5_NO_INDEXED_BASE_VERTEX") == nullptr; // diagnostics
+            if (i == 0 && !graphics.stages.mesh && (indexedOffsets || !drawParameters.indexed)) {
                 const auto offsetValue = [&](std::int32_t sgpr) {
                     require(sgpr >= 0 && static_cast<std::uint32_t>(sgpr) >= program.firstUserSgpr, "invalid draw offset SGPR");
                     const auto index = static_cast<std::uint32_t>(sgpr) - program.firstUserSgpr;
@@ -542,8 +723,47 @@ private:
         }
     }
 
-    void execute(const Submission& submission) {
-        includeSubmission(submission, true);
+    // One submission being executed: packets are stepped one at a time so that queues take
+    // turns like the console's graphics and compute pipes, and a WAIT_REG_MEM only blocks its
+    // own queue.
+    struct Execution {
+        Submission submission;
+        std::size_t cursor = 0;
+        bool started = false;
+        bool blocked = false;
+        bool waitTraced = false;
+        FrameTiming::Clock::time_point blockedSince{};
+    };
+    enum class Step { Progressed, Blocked, Finished };
+    std::map<std::uint32_t, std::deque<Execution>> queued; // worker-owned, per queue
+
+    // Label writes deferred to the completion of the GPU work before them: the value a wait
+    // packet sees meanwhile (the console's command processor executes them in order).
+    struct DeferredWrite {
+        std::uint32_t bytes;
+        std::uint64_t value;
+        bool known;
+        std::uint64_t id;
+    };
+    bool journalIndirect = false; // the dispatch being recorded resolved indirect arguments
+    std::mutex deferredMutex;
+    std::map<std::uint64_t, DeferredWrite> deferred;
+    std::uint64_t deferredSerial = 0;
+
+    bool lookupDeferred(std::uint64_t address, std::uint32_t, std::uint64_t& value) {
+        std::lock_guard lock(deferredMutex);
+        const auto it = deferred.find(address);
+        if (it == deferred.end() || !it->second.known) return false;
+        value = it->second.value;
+        return true;
+    }
+
+    Step step(Execution& execution) {
+        const Submission& submission = execution.submission;
+        if (!execution.started) {
+            execution.started = true;
+            includeSubmission(submission, true);
+        }
         if (submission.suspend) {
             PerformanceContext timingContext(frameTiming.get());
             PerformanceTimer timing("Driver.Suspend");
@@ -551,15 +771,19 @@ private:
             timing.Mark("gpu_mutex_wait");
             if (device != nullptr) device->WaitIdle();
             timing.Mark("device_idle_wait");
-            resetGraphics = true;
-            return;
+            // A suspend point drains the GPU; the register state survives it (titles draw
+            // afterwards without rewriting their shader registers).
+            return Step::Finished;
         }
-        if (submission.queue == 0 && resetGraphics) {
-            queues.erase(0);
-            resetGraphics = false;
-        }
+        if (execution.cursor >= submission.commands.size()) return Step::Finished;
+        // Each queue (pipe) keeps its own register state, like the console's graphics and
+        // compute pipes; nothing resets it between submissions.
         auto& queue = queues[submission.queue];
-        for (std::size_t cursor = 0; cursor < submission.commands.size();) {
+        queue.id = submission.queue;
+        static const bool traceLabels = std::getenv("ANYPS5_TRACE_LABELS") != nullptr;
+        if (traceLabels && execution.cursor == 0) std::fprintf(stderr, "[submit] executing serial %llu queue 0x%x (%zu dwords)\n", static_cast<unsigned long long>(submission.serial), submission.queue, submission.commands.size());
+        {
+            const auto cursor = execution.cursor;
             if (frameTiming == nullptr) includeSubmission(submission, false);
             const auto header = submission.commands[cursor];
             const auto count = static_cast<std::size_t>((header >> 16u) & 0x3fffu) + 2;
@@ -570,23 +794,61 @@ private:
                 PerformanceTimer timing("Driver.Packet");
                 CheckFailure();
                 timing.Mark("failure_check");
-                if (opcode == 0x37 || opcode == 0x40 || opcode == 0x50 || opcode == 0x42 || opcode == 0x46 || opcode == 0x58 || header == FlipPacketHeader) {
+                std::uint64_t writeAddress = 0, writeValue = 0;
+                std::uint32_t writeBytes = 0;
+                bool writeKnown = false;
+                if (device != nullptr && (opcode == 0x37 || opcode == 0x40 || opcode == 0x50 || opcode == 0x49) && Pm4::DeferrableWrite(packet, writeAddress, writeBytes, writeValue, writeKnown) && device->HasPendingWork()) {
+                    // A label write behind pending GPU work completes with that work instead of
+                    // draining the device now; waits see its value meanwhile (lookupDeferred).
+                    const auto id = ++deferredSerial;
+                    {
+                        std::lock_guard lock(deferredMutex);
+                        deferred[writeAddress] = {writeBytes, writeValue, writeKnown, id};
+                    }
+                    std::vector<std::uint32_t> copy(packet.begin(), packet.end());
+                    const auto interrupt = opcode == 0x49 ? (packet[2] >> 24u) & 7u : 0u;
+                    const auto interruptId = opcode == 0x49 && packet.size() > 7 ? packet[7] & 0x7ffffffu : 0u;
+                    QueueState* queuePointer = &queue;
+                    device->Defer([this, copy = std::move(copy), queuePointer, id, writeAddress, interrupt, interruptId] {
+                        Pm4::Execute(std::span<const std::uint32_t>(copy), *queuePointer);
+                        if (interrupt != 0) AgcDriver::Eq::Trigger(interruptId);
+                        std::lock_guard lock(deferredMutex);
+                        const auto it = deferred.find(writeAddress);
+                        if (it != deferred.end() && it->second.id == id) deferred.erase(it);
+                    });
+                    timing.Mark("deferred_write");
+                    execution.cursor += count;
+                    return Step::Progressed;
+                }
+                if (opcode == 0x37 || opcode == 0x40 || opcode == 0x50 || opcode == 0x42 || opcode == 0x46 || opcode == 0x49 || opcode == 0x58 || header == FlipPacketHeader) {
                     std::lock_guard gpuLock(gpuMutex);
                     timing.Mark("gpu_mutex_wait");
-                    const auto eventType = opcode == 0x46 ? packet[1] & 0x3fu : 0u;
                     const auto memoryTransfer = opcode == 0x37 || opcode == 0x40 || opcode == 0x50;
-                    const auto waitDraws = memoryTransfer || opcode == 0x42 || (opcode == 0x46 && (eventType == 0x07 || eventType == 0x0f || eventType == 0x10));
-                    const auto gpuCacheBarrier = opcode == 0x58 && Pm4::UsesGpuCacheBarrier(packet);
                     if (device != nullptr) {
-                        if (gpuCacheBarrier) device->AcquireGpuMemory();
-                        else if (waitDraws) device->WaitDraws();
-                        else {
-                            const auto scope = header == FlipPacketHeader ? "Driver.FlipWait" : opcode == 0x58 ? "Driver.AcquireMemoryWait" : "Driver.CacheEventWait";
+                        if (opcode == 0x58) {
+                            // ACQUIRE_MEM: GPU caches meet GPU work; a barrier inside the queue.
+                            device->AcquireGpuMemory();
+                            timing.Mark("gpu_cache_barrier");
+                        } else if (opcode == 0x42 || opcode == 0x46) {
+                            // PFP_SYNC_ME and cache events order GPU work against GPU work: a
+                            // barrier inside the queue, no host wait.
+                            device->RecordBarrier();
+                            timing.Mark("gpu_barrier");
+                        } else if (memoryTransfer) {
+                            // Executed on the host: only pending GPU writes to its ranges matter.
+                            std::uint64_t destination = 0, source = 0;
+                            std::size_t destinationBytes = 0, sourceBytes = 0;
+                            Pm4::TransferRanges(packet, destination, destinationBytes, source, sourceBytes);
+                            device->ResolveGpuWrites(destination, destinationBytes);
+                            device->ResolveGpuWrites(source, sourceBytes);
+                            timing.Mark("transfer_resolve");
+                        } else {
+                            const auto scope = header == FlipPacketHeader ? "Driver.FlipWait" : "Driver.ReleaseWait";
                             PerformanceTimer waitTiming(scope);
                             device->WaitIdle();
+                            timing.Mark("device_idle_wait");
                         }
                     }
-                    timing.Mark(gpuCacheBarrier ? "gpu_cache_barrier" : waitDraws ? "draw_wait" : "device_idle_wait");
                 }
                 if (header == RenderingWaitPacketHeader) {
                     submission.renderingWaits.at(cursor)->Wait();
@@ -594,6 +856,16 @@ private:
                 } else if (header == FlipPacketHeader) {
                     CheckFailure();
                     timing.Mark("flip_prepare");
+                } else if (opcode == 0x3c || opcode == 0x93) {
+                    // Outside the GPU lock: the title's threads write the label, or another
+                    // queue releases it, so those run meanwhile and this queue stays here.
+                    if (traceLabels && !execution.waitTraced) {
+                        execution.waitTraced = true;
+                        std::fprintf(stderr, "[label] wait 0x%llx function %u reference 0x%llx (queue 0x%x)\n", static_cast<unsigned long long>(static_cast<std::uint64_t>(packet[2]) | (static_cast<std::uint64_t>(packet[3]) << 32u)), packet[1] & 7u, static_cast<unsigned long long>(((packet[0] >> 8u) & 0xffu) == 0x93 ? (static_cast<std::uint64_t>(packet[4]) | (static_cast<std::uint64_t>(packet[5]) << 32u)) : packet[4]), submission.queue);
+                    }
+                    if (!Pm4::TryWait(packet, [this](std::uint64_t address, std::uint32_t bytes, std::uint64_t& value) { return lookupDeferred(address, bytes, value); })) return Step::Blocked;
+                    execution.waitTraced = false;
+                    timing.Mark("label_wait");
                 } else if (opcode == 0x15) {
                     dispatch(queue, packet, submission);
                 } else if (opcode == 0x16) {
@@ -605,9 +877,19 @@ private:
                         });
                         direct = Pm4::ResolveDispatch(packet, queue);
                     }
+                    journalIndirect = true;
                     dispatch(queue, direct, submission);
-                } else if (opcode == 0x35 || opcode == 0x2d) {
+                    journalIndirect = false;
+                } else if (opcode == 0x35 || opcode == 0x2d || opcode == 0x27 || opcode == 0x24 || opcode == 0x25) {
                     draw(queue, packet, submission);
+                } else if (opcode == 0x50 && (Pm4::DmaGdsDestination(packet) || Pm4::DmaGdsSource(packet))) {
+                    std::lock_guard gpuLock(gpuMutex);
+                    require(device != nullptr, "GDS transfer without a device");
+                    const GuestMemory::MemoryAccessScope memoryScope(device.get(), [](void* context, std::uint64_t address, std::size_t bytes, bool writable) {
+                        if (context) static_cast<VulkanDevice*>(context)->ResolveMemory(address, bytes, writable);
+                    });
+                    device->GdsTransfer(packet);
+                    timing.Mark("gds_transfer");
                 } else if (opcode != 0x42 && opcode != 0x46 && opcode != 0x58) {
                     std::lock_guard gpuLock(gpuMutex);
                     const GuestMemory::MemoryAccessScope memoryScope(device.get(), [](void* context, std::uint64_t address, std::size_t bytes, bool writable) {
@@ -615,6 +897,10 @@ private:
                     });
                     Pm4::Execute(packet, queue);
                     timing.Mark("pm4_execute");
+                    if (opcode == 0x49 && ((packet[2] >> 24u) & 7u) != 0) {
+                        AgcDriver::Eq::Trigger(packet[7] & 0x7ffffffu); // the release requested an interrupt
+                        timing.Mark("release_interrupt");
+                    }
                 }
             }
             if (header == FlipPacketHeader) {
@@ -622,53 +908,114 @@ private:
                 const auto completedFrame = std::exchange(frameTiming, nullptr);
                 submission.flips.at(cursor)->GpuReady(completedFrame);
             }
-            cursor += count;
+            execution.cursor += count;
         }
+        return execution.cursor >= submission.commands.size() ? Step::Finished : Step::Progressed;
     }
 
+    // Executes a dequeued submission to completion and publishes its completion. Requires the
+    // serial to be registered in `inFlight` (see dequeue).
+    // Publishes a finished submission's completion (the GPU is drained first).
+    void complete(const Submission& submission) {
+        {
+            // ANYPS5_TRACE_TIMING: report the running frame's metrics every few seconds when the
+            // title keeps submitting without flipping.
+            static const bool traceTiming = std::getenv("ANYPS5_TRACE_TIMING") != nullptr;
+            static auto lastReport = FrameTiming::Clock::now();
+            const auto now = FrameTiming::Clock::now();
+            if (traceTiming && frameTiming != nullptr && now - lastReport > std::chrono::seconds(3)) {
+                lastReport = now;
+                frameTiming->PrintPartial("no flip for 3 s");
+            }
+        }
+        {
+            PerformanceContext timingContext(frameTiming.get());
+            PerformanceTimer timing("Driver.Completion");
+            std::lock_guard lock(mutex);
+            timing.Mark("mutex_wait");
+            rethrowFailure();
+            inFlight.erase(submission.serial);
+            // Submissions may complete out of order (another queue ran during a label wait);
+            // `completed` names the serial below which everything is done.
+            completed = inFlight.empty() ? dequeuedSerial : *inFlight.begin() - 1;
+        }
+        changed.notify_all();
+    }
+
+    // Runs one pending submission of a queue other than `current`, if any; the caller is
+    // blocked on a label that this may release.
+    bool gpuPending = false;
+
     void run() noexcept {
-        Submission submission;
         try {
             for (;;) {
                 {
                     PerformanceContext timingContext(frameTiming.get());
                     PerformanceTimer timing("Driver.Worker");
-                    submission = Submission{};
-                    timing.Mark("submission_release");
                     std::unique_lock lock(mutex);
                     timing.Mark("queue_mutex_wait");
-                    changed.wait(lock, [&] { return failure || stopping || !pending.empty(); });
+                    const bool haveWork = std::any_of(queued.begin(), queued.end(), [](const auto& entry) { return !entry.second.empty(); });
+                    if (!haveWork) {
+                        // Pending GPU work still has completions (label writes) to deliver.
+                        if (gpuPending) changed.wait_for(lock, std::chrono::microseconds(500), [&] { return failure || stopping || !pending.empty(); });
+                        else changed.wait(lock, [&] { return failure || stopping || !pending.empty(); });
+                    }
                     timing.Mark("wait_for_submission");
                     rethrowFailure();
-                    if (pending.empty()) {
-                        break;
+                    if (!haveWork && pending.empty() && (stopping || failure)) break;
+                    while (!pending.empty()) {
+                        Execution execution{std::move(pending.front())};
+                        pending.pop_front();
+                        execution.submission.dequeued = FrameTiming::Clock::now();
+                        inFlight.insert(execution.submission.serial);
+                        dequeuedSerial = std::max(dequeuedSerial, execution.submission.serial);
+                        queued[execution.submission.queue].push_back(std::move(execution));
                     }
-                    submission = std::move(pending.front());
-                    pending.pop_front();
-                    submission.dequeued = FrameTiming::Clock::now();
                 }
-                execute(submission);
                 {
-                    PerformanceContext timingContext(frameTiming.get());
-                    PerformanceTimer timing("Driver.SubmissionCompletion");
+                    // Completed GPU batches deliver their write-backs and label writes.
                     std::lock_guard gpuLock(gpuMutex);
-                    if (device) device->WaitIdle();
+                    if (device != nullptr) {
+                        device->Collect();
+                        gpuPending = device->HasPendingWork();
+                    } else gpuPending = false;
                 }
-                {
-                    PerformanceContext timingContext(frameTiming.get());
-                    PerformanceTimer timing("Driver.Completion");
-                    std::lock_guard lock(mutex);
-                    timing.Mark("mutex_wait");
-                    rethrowFailure();
-                    completed = submission.serial;
+                // Every queue steps one packet per round; a queue blocked on a label waits for
+                // the others (or the title) to release it.
+                bool progressed = false;
+                bool anyQueued = false;
+                FrameTiming::Clock::time_point oldestBlock = FrameTiming::Clock::time_point::max();
+                for (auto& [id, fifo] : queued) {
+                    if (fifo.empty()) continue;
+                    anyQueued = true;
+                    auto& execution = fifo.front();
+                    const auto result = step(execution);
+                    if (result == Step::Finished) {
+                        Submission finished = std::move(execution.submission);
+                        fifo.pop_front();
+                        complete(finished);
+                        progressed = true;
+                    } else if (result == Step::Progressed) {
+                        execution.blocked = false;
+                        progressed = true;
+                    } else {
+                        if (!execution.blocked) {
+                            execution.blocked = true;
+                            execution.blockedSince = FrameTiming::Clock::now();
+                        }
+                        oldestBlock = std::min(oldestBlock, execution.blockedSince);
+                    }
                 }
-                changed.notify_all();
+                if (anyQueued && !progressed) {
+                    require(FrameTiming::Clock::now() - oldestBlock < std::chrono::seconds(30), "WAIT_REG_MEM did not complete within 30 seconds (no queue or title thread releases the label)");
+                    std::this_thread::sleep_for(std::chrono::microseconds(20));
+                }
             }
             std::lock_guard gpuLock(gpuMutex);
             device.reset();
         } catch (...) {
             const auto error = std::current_exception();
-            for (const auto& [offset, flip] : submission.flips) flip->Fail(error);
+            for (auto& [id, fifo] : queued) for (auto& execution : fifo) for (const auto& [offset, flip] : execution.submission.flips) flip->Fail(error);
             ReportFailure(error);
             {
                 std::lock_guard gpuLock(gpuMutex);
@@ -681,7 +1028,14 @@ private:
 }
 
 void Submit(const Packet* packet, std::uint32_t queue) {
-    Driver::Get().Submit(packet, queue);
+    try {
+        Driver::Get().Submit(packet, queue);
+    } catch (const std::exception& error) {
+        // Reported here because the exception unwinds into the title's thread.
+        std::fprintf(stderr, "AGC driver: submission failed on the title's thread: %s\n", error.what());
+        GpuJournal::Dump("AGC driver: last GPU work before the failure, oldest first:");
+        throw;
+    }
 }
 
 void WaitIdle() {

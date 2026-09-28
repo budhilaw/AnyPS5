@@ -1,10 +1,14 @@
 #include "prx/libSceAgcDriver/Graphics/include/ShaderResources.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/Resources.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureCache.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
 #include "prx/libc/include/General.hpp"
 #include "Optimization/include/Optimization/ShaderStageInputInfo.hpp"
 #include <cstring>
+#include <cstdio>
+#include <cstdlib>
+#include <mutex>
 #include <limits>
 #include <set>
 #include <string>
@@ -85,9 +89,11 @@ void ShaderResources::build(std::span<const CompiledShader> shaders, const Color
                 Require(binding.descriptorSet == 0, "unexpected descriptor set: every shader resource must use descriptor set zero");
                 Require(occupied.insert(binding.binding).second, "duplicate shader binding");
                 const bool addressRole = binding.role == ShaderRecompiler::DescriptorRole::BdaPagetable || binding.role == ShaderRecompiler::DescriptorRole::FaultBuffer;
-                const bool bufferRole = addressRole || binding.role == ShaderRecompiler::DescriptorRole::GuestBuffers || binding.role == ShaderRecompiler::DescriptorRole::ShaderData || binding.role == ShaderRecompiler::DescriptorRole::FlattenedSrt;
+                const bool gdsRole = binding.role == ShaderRecompiler::DescriptorRole::Gds;
+                const bool bufferRole = addressRole || gdsRole || binding.role == ShaderRecompiler::DescriptorRole::GuestBuffers || binding.role == ShaderRecompiler::DescriptorRole::ShaderData || binding.role == ShaderRecompiler::DescriptorRole::FlattenedSrt;
                 const bool imageRole = binding.role == ShaderRecompiler::DescriptorRole::GuestImages || binding.role == ShaderRecompiler::DescriptorRole::GuestSamplers;
                 if (imageRole) {
+                    PerformanceTimer imageTiming("Graphics.ImageBinding");
                     addImageBinding(binding, flags, bindings);
                     continue;
                 }
@@ -101,10 +107,30 @@ void ShaderResources::build(std::span<const CompiledShader> shaders, const Color
                 Binding item{{binding.binding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, binding.count, flags, nullptr}, {}};
                 if (binding.role == ShaderRecompiler::DescriptorRole::GuestBuffers) {
                     Require(binding.guestDescriptor.size() == static_cast<std::uint64_t>(binding.count) * 4, "guest buffer descriptor must contain four DWORDs per array element");
-                    for (std::uint32_t element = 0; element < binding.count; ++element) item.allocations.push_back(addGuestBuffer(std::span<const std::uint32_t>(binding.guestDescriptor).subspan(static_cast<std::size_t>(element) * 4, 4), target, indexAddress, indexBytes));
+                    for (std::uint32_t element = 0; element < binding.count; ++element) {
+                        // Without write metadata every buffer counts as written (and is written back).
+                        static const bool writeBackAll = std::getenv("ANYPS5_DEBUG_WRITEBACK_ALL") != nullptr; // diagnostics
+                        const bool written = writeBackAll || element >= binding.elementWritten.size() || binding.elementWritten[element];
+                        item.allocations.push_back(addGuestBuffer(std::span<const std::uint32_t>(binding.guestDescriptor).subspan(static_cast<std::size_t>(element) * 4, 4), written, target, indexAddress, indexBytes));
+                    }
                 } else if (addressRole) {
                     item.allocations.push_back(allocations.size());
                     allocations.push_back({0, 0, false, nullptr, binding.role});
+                } else if (gdsRole) {
+                    Require(context.gds != nullptr, "GDS is unavailable on this device");
+                    static const bool traceGds = std::getenv("ANYPS5_TRACE_INDIRECT") != nullptr;
+                    if (traceGds) { static int reported = 0; if (reported++ < 40) APS5_LOG_OUT("shader binds GDS (stage flags 0x%x, binding %u)", static_cast<unsigned>(flags), binding.binding); }
+                    // ANYPS5_DUMP_GDS_SHADERS=<directory>: the SPIR-V of every shader that binds GDS, once each.
+                    if (static const char* dumpDirectory = std::getenv("ANYPS5_DUMP_GDS_SHADERS"); dumpDirectory != nullptr) {
+                        static std::set<const void*> dumped;
+                        if (dumped.insert(shader.program).second) {
+                            const std::string name = std::string(dumpDirectory) + "/gds_" + std::to_string(dumped.size()) + ".spv";
+                            if (FILE* file = std::fopen(name.c_str(), "wb")) { std::fwrite(shader.program->spirv.data(), sizeof(std::uint32_t), shader.program->spirv.size(), file); std::fclose(file); }
+                        }
+                    }
+                    Require(binding.count == 1, "GDS descriptors must not be arrays");
+                    item.allocations.push_back(allocations.size());
+                    allocations.push_back({0, context.gds->Bytes().size(), false, nullptr, binding.role});
                 } else {
                     Require(binding.count == 1, "shader data and flattened SRT descriptors must not be arrays");
                     Require(!binding.guestDescriptor.empty(), "empty shader data descriptor");
@@ -126,7 +152,13 @@ void ShaderResources::build(std::span<const CompiledShader> shaders, const Color
         }
         std::vector<VkDescriptorPoolSize> sizes;
         if (storageBuffers != 0) sizes.push_back({VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, static_cast<std::uint32_t>(storageBuffers)});
-        if (!textures.empty()) sizes.push_back({VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, static_cast<std::uint32_t>(textures.size())});
+        std::uint32_t sampledImages = 0, storageImages = 0;
+        for (const auto& binding : bindings) {
+            if (binding.layout.descriptorType == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE) sampledImages += binding.layout.descriptorCount;
+            if (binding.layout.descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE) storageImages += binding.layout.descriptorCount;
+        }
+        if (sampledImages != 0) sizes.push_back({VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, sampledImages});
+        if (storageImages != 0) sizes.push_back({VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, storageImages});
         if (!samplers.empty()) sizes.push_back({VK_DESCRIPTOR_TYPE_SAMPLER, static_cast<std::uint32_t>(samplers.size())});
         if (!context.descriptorCache) context.descriptorCache = std::make_shared<DescriptorCache>();
         descriptors = context.descriptorCache->Take(layoutKey);
@@ -154,7 +186,11 @@ void ShaderResources::build(std::span<const CompiledShader> shaders, const Color
                     write.pBufferInfo = buffers.data() + bufferOffset;
                     break;
                 case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE:
-                    for (const auto index : binding.imageAllocations) images.push_back({VK_NULL_HANDLE, textures[index]->View(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL});
+                    for (const auto index : binding.imageAllocations) images.push_back({VK_NULL_HANDLE, textures[index]->View(), textures[index]->Layout()});
+                    write.pImageInfo = images.data() + imageOffset;
+                    break;
+                case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE:
+                    for (const auto index : binding.imageAllocations) images.push_back({VK_NULL_HANDLE, textures[index]->StorageView(), VK_IMAGE_LAYOUT_GENERAL});
                     write.pImageInfo = images.data() + imageOffset;
                     break;
                 case VK_DESCRIPTOR_TYPE_SAMPLER:
@@ -173,11 +209,15 @@ void ShaderResources::build(std::span<const CompiledShader> shaders, const Color
     }
 }
 
-std::size_t ShaderResources::addGuestBuffer(std::span<const std::uint32_t> words, const ColorTarget* target, std::uint64_t indexAddress, std::size_t indexBytes) {
+std::size_t ShaderResources::addGuestBuffer(std::span<const std::uint32_t> words, bool written, const ColorTarget* target, std::uint64_t indexAddress, std::size_t indexBytes) {
     Require(words.size() == 4, "buffer descriptor must contain four DWORDs");
     Require((words[1] & 0x40000000u) == 0, "buffer descriptor has reserved bits set");
     const ShaderRecompiler::ShaderBufferResource descriptor{{words[0], words[1], words[2], words[3]}};
-    Require(descriptor.Type() == 0u, "buffer descriptor uses an unsupported type");
+    if (descriptor.Type() != 0u && descriptor.Type() != 3u) {
+        char message[160];
+        std::snprintf(message, sizeof(message), "buffer descriptor uses an unsupported type %u: {%08x %08x %08x %08x}", descriptor.Type(), words[0], words[1], words[2], words[3]);
+        throw std::runtime_error(std::string("AGC graphics: ") + message);
+    }
     const auto address = descriptor.Base48();
     const auto byteSize = descriptor.GetSize();
     Require(address != 0, "null shader buffer descriptor address");
@@ -185,10 +225,24 @@ std::size_t ShaderResources::addGuestBuffer(std::span<const std::uint32_t> words
     Require(byteSize <= context.limits.maxStorageBufferRange, "shader buffer exceeds descriptor range limit");
     Require(byteSize <= std::numeric_limits<std::size_t>::max(), "shader buffer size exceeds host address space");
     const auto size = static_cast<std::size_t>(byteSize);
-    GuestMemory::CheckRange(reinterpret_cast<const void*>(address), size, 1, true);
+    try {
+        GuestMemory::CheckRange(reinterpret_cast<const void*>(address), size, 1, true);
+    } catch (const std::exception& error) {
+        // A descriptor over unmapped memory (a null descriptor with a baked-in offset): the
+        // console's GPU reads zeros there and drops writes, so the shader gets a zeroed buffer.
+        static std::once_flag once;
+        std::call_once(once, [&] { APS5_LOG_OUT("shader buffer at 0x%llx (%zu bytes) is not mapped (%s); binding zeros", static_cast<unsigned long long>(address), size, error.what()); });
+        // The shader adds the address residue to its accesses (see GuestBufferMemory::Descriptor).
+        const auto padded = size + static_cast<std::size_t>(address % GuestBufferMemory::ViewAlignment);
+        auto buffer = std::make_unique<Buffer>(context, padded, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+        std::memset(buffer->Bytes().data(), 0, padded);
+        allocations.push_back({0, padded, false, std::move(buffer)});
+        return allocations.size() - 1;
+    }
     Require(target == nullptr || !overlap(address, size, target->address, target->bytes), "shader buffer aliases the render target");
-    Require(!overlap(address, size, indexAddress, indexBytes), "writable shader buffer aliases the index buffer");
-    guestMemory.AddWritable(address, size);
+    Require(!written || !overlap(address, size, indexAddress, indexBytes), "writable shader buffer aliases the index buffer");
+    if (written) guestMemory.AddWritable(address, size);
+    else guestMemory.AddReadOnly(address, size);
     allocations.push_back({address, size, true, nullptr});
     return allocations.size() - 1;
 }
@@ -205,29 +259,59 @@ std::size_t ShaderResources::addDataBuffer(std::span<const std::uint32_t> words)
 void ShaderResources::addImageBinding(const ShaderRecompiler::DescriptorBinding& binding, VkShaderStageFlags flags, std::vector<Binding>& bindings) {
     Require(binding.count != 0, "empty descriptor binding");
     const bool sampledImage = binding.kind == ShaderRecompiler::DescriptorKind::SampledImage;
+    const bool storageImage = binding.kind == ShaderRecompiler::DescriptorKind::StorageImage;
     const bool samplerKind = binding.kind == ShaderRecompiler::DescriptorKind::Sampler;
-    Require(sampledImage || samplerKind, std::string("unsupported descriptor kind ") + kindName(binding.kind) + " for role " + roleName(binding.role));
-    Require((sampledImage && binding.role == ShaderRecompiler::DescriptorRole::GuestImages) || (samplerKind && binding.role == ShaderRecompiler::DescriptorRole::GuestSamplers), "guest image descriptor role disagrees with its kind");
+    Require(sampledImage || storageImage || samplerKind, std::string("unsupported descriptor kind ") + kindName(binding.kind) + " for role " + roleName(binding.role));
+    Require(((sampledImage || storageImage) && binding.role == ShaderRecompiler::DescriptorRole::GuestImages) || (samplerKind && binding.role == ShaderRecompiler::DescriptorRole::GuestSamplers), "guest image descriptor role disagrees with its kind");
     Require(binding.guestDescriptor.size() % binding.count == 0, "guest image descriptor size is not a multiple of the binding count");
     const auto elementWords = binding.guestDescriptor.size() / binding.count;
 
-    Binding item{{binding.binding, sampledImage ? VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE : VK_DESCRIPTOR_TYPE_SAMPLER, binding.count, flags, nullptr}, {}, {}};
+    Binding item{{binding.binding, sampledImage ? VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE : storageImage ? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE : VK_DESCRIPTOR_TYPE_SAMPLER, binding.count, flags, nullptr}, {}, {}};
 
-    if (sampledImage) {
+    if (sampledImage || storageImage) {
         Require(elementWords == 8, "guest texture descriptor must contain 8 dwords");
         Require(binding.imageShape.has_value(), "guest image binding is missing an image shape");
         Require(context.detiler != nullptr, "device texture detiler is unavailable");
         Require(context.textureCache != nullptr, "device texture cache is unavailable");
-        Require(binding.count <= context.limits.maxPerStageDescriptorSampledImages, "shader sampled-image descriptors exceed per-stage limits");
+        Require(!storageImage || context.storageImages, "device does not support format-less storage images");
+        Require(binding.count <= (storageImage ? context.limits.maxPerStageDescriptorStorageImages : context.limits.maxPerStageDescriptorSampledImages), "shader image descriptors exceed per-stage limits");
         for (std::uint32_t element = 0; element < binding.count; ++element) {
             const auto words = std::span<const std::uint32_t>(binding.guestDescriptor).subspan(static_cast<std::size_t>(element) * elementWords, elementWords);
-            const auto resource = DecodeTextureResource(words);
-            Require(MatchesGuestDimension(*binding.imageShape, resource.dimension), "guest texture dimension disagrees with the shader's declared image shape");
+            if (words[0] == 0 && (words[1] & 0xffu) == 0) {
+                // A null descriptor: titles leave unused slots empty and the hardware reads zeros.
+                TextureDimension dimension = TextureDimension::k2D;
+                for (const auto candidate : {TextureDimension::k2D, TextureDimension::k2DArray, TextureDimension::kCube, TextureDimension::k1D}) if (MatchesGuestDimension(*binding.imageShape, candidate)) { dimension = candidate; break; }
+                textures.push_back(context.textureCache->Null(dimension));
+                textureBindings.emplace_back(binding.binding, element);
+                item.imageAllocations.push_back(textures.size() - 1);
+                continue;
+            }
+            auto resource = DecodeTextureResource(words);
+            if (!MatchesGuestDimension(*binding.imageShape, resource.dimension)) {
+                // Titles sample a 2D texture through an array sampler (one layer), a cube map as a
+                // six-layer array or the first layer/face through a 2D sampler; the hardware
+                // addresses these alike, so the view follows the shader's shape.
+                using Shape = ShaderRecompiler::DescriptorImageShape;
+                const auto shape = *binding.imageShape;
+                bool converted = true;
+                if (shape == Shape::Image2DArray && (resource.dimension == TextureDimension::k2D || resource.dimension == TextureDimension::kCube)) resource.viewDimension = TextureDimension::k2DArray;
+                else if (shape == Shape::Image2D && (resource.dimension == TextureDimension::k2DArray || resource.dimension == TextureDimension::kCube)) resource.viewDimension = TextureDimension::k2D;
+                else if (shape == Shape::ImageCube && resource.dimension == TextureDimension::k2DArray && (resource.depthOrLastArray + 1u) % 6u == 0) resource.viewDimension = TextureDimension::kCube;
+                else converted = false;
+                if (!converted) throw std::runtime_error("AGC graphics: guest texture dimension " + std::to_string(static_cast<int>(resource.dimension)) + " disagrees with the shader's declared image shape " + std::to_string(static_cast<int>(shape)));
+                static std::once_flag once;
+                std::call_once(once, [&] { APS5_LOG_OUT("sampling textures through a differently shaped sampler (dimension %d as shape %d)", static_cast<int>(resource.dimension), static_cast<int>(shape)); });
+            }
             const VkComponentMapping components{ComponentSwizzleFor(resource.dstSelX), ComponentSwizzleFor(resource.dstSelY), ComponentSwizzleFor(resource.dstSelZ), ComponentSwizzleFor(resource.dstSelW)};
             textures.push_back(context.textureCache->Get(words, resource, components));
+            textureBindings.emplace_back(binding.binding, element);
+            // Stores stay on the device: the cache keeps serving this image while the guest copy is
+            // untouched, so later reads see the shader's writes (see docs/TechnicalDebt.md).
+            Require(!storageImage || textures.back()->StorageView() != VK_NULL_HANDLE, "storage image format or source does not support shader stores");
+            if (storageImage) textures.back()->MarkStored();
             item.imageAllocations.push_back(textures.size() - 1);
         }
-        Require(textures.size() <= context.limits.maxDescriptorSetSampledImages, "pipeline sampled-image descriptors exceed device limits");
+        Require(textures.size() <= context.limits.maxDescriptorSetSampledImages, "pipeline image descriptors exceed device limits");
     } else {
         Require(elementWords == 4, "guest sampler descriptor must contain 4 dwords");
         Require(binding.count <= context.limits.maxPerStageDescriptorSamplers, "shader sampler descriptors exceed per-stage limits");
@@ -265,9 +349,21 @@ void ShaderResources::Bind(VkCommandBuffer commands, VkPipelineBindPoint bindPoi
     context.Function<PFN_vkCmdBindDescriptorSets>("vkCmdBindDescriptorSets")(commands, bindPoint, layout, 0, 1, &_set, 0, nullptr);
 }
 
+std::string ShaderResources::DescribeTextures() const {
+    std::string text;
+    for (std::size_t i = 0; i < textures.size(); ++i) {
+        const auto& texture = textures[i];
+        char item[112];
+        std::snprintf(item, sizeof(item), " b%u[%u]=0x%llx(%ux%u vk%u m%u l%u d%u%s%s)", textureBindings.at(i).first, textureBindings.at(i).second, static_cast<unsigned long long>(texture->GuestAddress()), texture->Extent().width, texture->Extent().height, static_cast<unsigned>(texture->GuestFormat()), texture->GuestMipCount(), texture->GuestLayers(), texture->GuestDimension(), texture->SharesImage() ? " view" : "", texture->Stored() ? " store" : "");
+        text += item;
+    }
+    return text;
+}
+
 void ShaderResources::WriteBack() {
     if (bda) bda->CheckFault();
     guestMemory.WriteBack();
+    for (auto& texture : textures) texture->FlushStores();
 }
 
 }

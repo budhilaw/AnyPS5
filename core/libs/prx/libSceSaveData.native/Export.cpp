@@ -51,22 +51,26 @@ static bool dir_name_match(const char* str, const char* pattern) {
 extern "C" {
 
 int APS5_VABI sceSaveDataBackup(const SaveDataBackup* backup) {
+    Aps5TraceCall_nid_no_patch(__func__);
     (void)backup;
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
 int APS5_VABI sceSaveDataCommit(const SaveDataCommitParam* param) {
+    Aps5TraceCall_nid_no_patch(__func__);
     (void)param;
     return SAVE_DATA_OK;
 }
 
 int APS5_VABI sceSaveDataCreateTransactionResource(uint32_t size) {
+    Aps5TraceCall_nid_no_patch(__func__);
     (void)size;
     return g_transaction_counter.fetch_add(1);
 }
 
 int APS5_VABI sceSaveDataDelete(const SaveDataDelete* del) {
+    Aps5TraceCall_nid_no_patch(__func__);
     if (del == nullptr || del->dir_name == nullptr) {
         throw std::runtime_error("sceSaveDataDelete: null argument");
     }
@@ -78,11 +82,13 @@ int APS5_VABI sceSaveDataDelete(const SaveDataDelete* del) {
 }
 
 int APS5_VABI sceSaveDataDeleteTransactionResource(int32_t resource) {
+    Aps5TraceCall_nid_no_patch(__func__);
     (void)resource;
     return SAVE_DATA_OK;
 }
 
 int APS5_VABI sceSaveDataDirNameSearch(const SaveDataDirNameSearchCond* cond, SaveDataDirNameSearchResult* result) {
+    Aps5TraceCall_nid_no_patch(__func__);
     if (cond == nullptr || result == nullptr) {
         throw std::runtime_error("sceSaveDataDirNameSearch: null argument");
     }
@@ -118,6 +124,7 @@ int APS5_VABI sceSaveDataDirNameSearch(const SaveDataDirNameSearchCond* cond, Sa
 }
 
 int APS5_VABI sceSaveDataGetEventResult(const void* event_param, SaveDataEvent* event) {
+    Aps5TraceCall_nid_no_patch(__func__);
     (void)event_param;
     (void)event;
     NotImplemented_nid_no_patch(__func__);
@@ -125,6 +132,7 @@ int APS5_VABI sceSaveDataGetEventResult(const void* event_param, SaveDataEvent* 
 }
 
 int APS5_VABI sceSaveDataGetMountInfo(const SaveDataMountPoint* mount_point, SaveDataMountInfo* info) {
+    Aps5TraceCall_nid_no_patch(__func__);
     if (mount_point == nullptr || info == nullptr) {
         throw std::runtime_error("sceSaveDataGetMountInfo: null argument");
     }
@@ -138,6 +146,7 @@ int APS5_VABI sceSaveDataGetMountInfo(const SaveDataMountPoint* mount_point, Sav
 }
 
 int APS5_VABI sceSaveDataGetParam(const SaveDataMountPoint* mount_point, uint32_t param_type, void* param_buf, size_t param_buf_size, size_t* got_size) {
+    Aps5TraceCall_nid_no_patch(__func__);
     (void)param_type;
     if (mount_point == nullptr || param_buf == nullptr) {
         throw std::runtime_error("sceSaveDataGetParam: null argument");
@@ -153,12 +162,14 @@ int APS5_VABI sceSaveDataGetParam(const SaveDataMountPoint* mount_point, uint32_
 }
 
 int APS5_VABI sceSaveDataGetSaveDataMemory2(SaveDataMemoryGet2* get_param) {
+    Aps5TraceCall_nid_no_patch(__func__);
     (void)get_param;
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
 int APS5_VABI sceSaveDataInitialize3(const void* init) {
+    Aps5TraceCall_nid_no_patch(__func__);
     (void)init;
     // NotImplemented_nid_no_patch(__func__);
     if (g_initialized) {
@@ -169,6 +180,7 @@ int APS5_VABI sceSaveDataInitialize3(const void* init) {
 }
 
 int APS5_VABI sceSaveDataLoadIcon(const SaveDataMountPoint* mount_point, SaveDataIcon* icon) {
+    Aps5TraceCall_nid_no_patch(__func__);
     (void)icon;
     if (mount_point == nullptr) {
         throw std::runtime_error("sceSaveDataLoadIcon: null mount_point");
@@ -183,6 +195,7 @@ int APS5_VABI sceSaveDataLoadIcon(const SaveDataMountPoint* mount_point, SaveDat
 }
 
 int APS5_VABI sceSaveDataMount3(const SaveDataMount3* mount, SaveDataMountResult* mount_result) {
+    Aps5TraceCall_nid_no_patch(__func__);
     if (mount == nullptr || mount_result == nullptr || mount->dir_name == nullptr) {
         throw std::runtime_error("sceSaveDataMount3: null argument");
     }
@@ -201,15 +214,11 @@ int APS5_VABI sceSaveDataMount3(const SaveDataMount3* mount, SaveDataMountResult
     }
     const std::string dirName(mount->dir_name->data, static_cast<std::size_t>(nameEnd - mount->dir_name->data));
     if (dirName.empty() || dirName == "." || dirName == ".." || dirName.find_first_of("/\\:") != std::string::npos) {
-        throw std::runtime_error("sceSaveDataMount3: invalid directory name");
+        return SAVE_DATA_ERROR_PARAMETER; // the console rejects the name; titles report it and go on
     }
     const std::string real_path = save_root() + "/" + dirName;
-    const std::string mountPoint = "/" + real_path;
-    if (mountPoint.size() >= sizeof(mount_result->mount_point.data)) {
-        throw std::runtime_error("sceSaveDataMount3: directory path exceeds mount point capacity");
-    }
-    if (find_slot_by_mount_point(mountPoint.c_str()) != -1) {
-        return SAVE_DATA_ERROR_BUSY;
+    for (const auto& mounted : g_slots) {
+        if (mounted.used && mounted.real_path == real_path) return SAVE_DATA_ERROR_BUSY;
     }
     const bool exists = std::filesystem::is_directory(real_path);
     if (create && exists) {
@@ -225,6 +234,14 @@ int APS5_VABI sceSaveDataMount3(const SaveDataMount3* mount, SaveDataMountResult
     if (create || create2) {
         std::filesystem::create_directories(real_path);
     }
+    // Console-style mount points (/savedata0, ...) fit the 16-byte mount point field whatever the
+    // directory name; guest paths resolve under the working directory, where a link names the
+    // save directory.
+    const std::string mountPoint = "/savedata" + std::to_string(slot);
+    const std::filesystem::path link = mountPoint.substr(1);
+    std::error_code linkError;
+    std::filesystem::remove(link, linkError);
+    std::filesystem::create_directory_symlink(real_path, link);
     g_slots[slot].used = true;
     g_slots[slot].mount_point = mountPoint;
     g_slots[slot].real_path = real_path;
@@ -235,12 +252,14 @@ int APS5_VABI sceSaveDataMount3(const SaveDataMount3* mount, SaveDataMountResult
 }
 
 int APS5_VABI sceSaveDataPrepare(const SaveDataMountPoint* mount_point, const SaveDataPrepareParam* param) {
+    Aps5TraceCall_nid_no_patch(__func__);
     (void)mount_point;
     (void)param;
     return SAVE_DATA_OK;
 }
 
 int APS5_VABI sceSaveDataSaveIcon(const SaveDataMountPoint* mount_point, const SaveDataIcon* icon) {
+    Aps5TraceCall_nid_no_patch(__func__);
     (void)icon;
     if (mount_point == nullptr) {
         throw std::runtime_error("sceSaveDataSaveIcon: null mount_point");
@@ -252,12 +271,14 @@ int APS5_VABI sceSaveDataSaveIcon(const SaveDataMountPoint* mount_point, const S
 }
 
 int APS5_VABI sceSaveDataSaveIconByPath(const SaveDataMountPoint* mount_point, const char* path) {
+    Aps5TraceCall_nid_no_patch(__func__);
     (void)mount_point;
     (void)path;
     return SAVE_DATA_OK;
 }
 
 int APS5_VABI sceSaveDataSetParam(const SaveDataMountPoint* mount_point, uint32_t param_type, const void* param_buf, size_t param_buf_size) {
+    Aps5TraceCall_nid_no_patch(__func__);
     (void)param_type;
     (void)param_buf;
     (void)param_buf_size;
@@ -271,12 +292,14 @@ int APS5_VABI sceSaveDataSetParam(const SaveDataMountPoint* mount_point, uint32_
 }
 
 int APS5_VABI sceSaveDataSetSaveDataMemory2(const SaveDataMemorySet2* set_param) {
+    Aps5TraceCall_nid_no_patch(__func__);
     (void)set_param;
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
 int APS5_VABI sceSaveDataSetupSaveDataMemory2(const SaveDataMemorySetup2* setup_param, SaveDataMemorySetupResult* result) {
+    Aps5TraceCall_nid_no_patch(__func__);
     (void)setup_param;
     (void)result;
     NotImplemented_nid_no_patch(__func__);
@@ -284,12 +307,14 @@ int APS5_VABI sceSaveDataSetupSaveDataMemory2(const SaveDataMemorySetup2* setup_
 }
 
 int APS5_VABI sceSaveDataSyncSaveDataMemory(const void* sync_param) {
+    Aps5TraceCall_nid_no_patch(__func__);
     (void)sync_param;
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
 int APS5_VABI sceSaveDataTerminate(void) {
+    Aps5TraceCall_nid_no_patch(__func__);
     if (!g_initialized) {
         return SAVE_DATA_ERROR_NOT_INITIALIZED;
     }
@@ -301,6 +326,7 @@ int APS5_VABI sceSaveDataTerminate(void) {
 }
 
 int APS5_VABI sceSaveDataTransferringMount(const SaveDataTransferringMount* mount, SaveDataMountResult* mount_result) {
+    Aps5TraceCall_nid_no_patch(__func__);
     (void)mount;
     (void)mount_result;
     NotImplemented_nid_no_patch(__func__);
@@ -308,6 +334,7 @@ int APS5_VABI sceSaveDataTransferringMount(const SaveDataTransferringMount* moun
 }
 
 int APS5_VABI sceSaveDataUmount2(uint32_t mode, const SaveDataMountPoint* mount_point) {
+    Aps5TraceCall_nid_no_patch(__func__);
     (void)mode;
     if (mount_point == nullptr) {
         throw std::runtime_error("sceSaveDataUmount2: null mount_point");
@@ -316,6 +343,8 @@ int APS5_VABI sceSaveDataUmount2(uint32_t mode, const SaveDataMountPoint* mount_
     if (slot == -1) {
         return SAVE_DATA_ERROR_NOT_MOUNTED;
     }
+    std::error_code linkError;
+    std::filesystem::remove(std::filesystem::path(g_slots[slot].mount_point.substr(1)), linkError);
     g_slots[slot] = MountSlot{};
     return SAVE_DATA_OK;
 }

@@ -11,6 +11,8 @@
 #include <windows.h>
 #elif defined(__linux__)
 #include "prx/libc/include/specifics/linux/ElfTypes.hpp"
+#elif defined(__APPLE__)
+#include "prx/libc/include/specifics/darwin/GuestImage.hpp"
 #endif
 
 const void* ApplicationProcessParameters_nid_no_patch() {
@@ -68,6 +70,10 @@ const void* ApplicationProcessParameters_nid_no_patch() {
     }, &search);
     if (search.invalid || search.parameters == nullptr) throw std::runtime_error("application heap: invalid or missing process parameters");
     return search.parameters;
+#elif defined(__APPLE__)
+    const auto parameters = GuestImage::FindProcessParameters();
+    if (!parameters) throw std::runtime_error("application heap: process metadata is missing; relink the executable");
+    return parameters->address;
 #else
     throw std::runtime_error("application heap: unsupported executable format");
 #endif

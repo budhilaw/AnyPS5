@@ -18,6 +18,7 @@ struct SpirvTargetOptions {
     std::uint32_t bdaAbiVersion;
     std::span<const std::uint32_t> supportedCapabilities;
     std::span<const std::string_view> supportedExtensions;
+    std::uint32_t subgroupStageMask = 0xffffffffu;
 };
 
 class SpirvEmitter {

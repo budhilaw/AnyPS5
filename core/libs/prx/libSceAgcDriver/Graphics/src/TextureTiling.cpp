@@ -46,6 +46,7 @@ BlockLayout GetBlockLayout(TextureTileMode tileMode, std::uint32_t bytesPerEleme
         case TextureTileMode::kStandard256B: return {256u, 1u << kLog2BlockThin256B[index].width, 1u << kLog2BlockThin256B[index].height};
         case TextureTileMode::kStandard4KB: return {4096u, 1u << kLog2BlockThin4KB[index].width, 1u << kLog2BlockThin4KB[index].height};
         case TextureTileMode::RenderTarget64KB:
+        case TextureTileMode::Depth64KB:
         case TextureTileMode::kStandard64KB: return {65536u, 1u << kLog2BlockThin64KB[index].width, 1u << kLog2BlockThin64KB[index].height};
     }
     throw std::runtime_error("AGC graphics: GetBlockLayout encountered an unknown tile mode");
@@ -93,6 +94,7 @@ bool GetMipTailLayout(TextureTileMode tileMode, const BlockLayout& block, std::u
             out = MakeMipTailLayout(kMipTailThin4KB[index], block.blockWidth >> 1u, block.blockHeight);
             return true;
         case TextureTileMode::RenderTarget64KB:
+        case TextureTileMode::Depth64KB:
         case TextureTileMode::kStandard64KB:
             out = MakeMipTailLayout(kMipTailThin64KB[index], block.blockWidth >> 1u, block.blockHeight);
             return true;

@@ -103,6 +103,7 @@ inline std::FILE* GetNativeStream(FileStream* stream) {
 extern "C" {
 extern FileStream _Stdout_nid_postfix;
 extern FileStream _Stderr_nid_postfix;
+extern FileStream _Stdin_nid_postfix;
 }
 
 #endif

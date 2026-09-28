@@ -2,6 +2,8 @@
 #define CORE_LIBS_PRX_LIBSCEAGCDRIVER_EXECUTION_INCLUDE_VULKANDEVICE_HPP
 
 #define VK_NO_PROTOTYPES
+#include <span>
+#include <functional>
 #include <vulkan/vulkan.h>
 #include "Recompiler.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Presentation.hpp"
@@ -20,6 +22,18 @@ public:
     ShaderRecompiler::SpirvTarget Target() const;
     void WaitIdle();
     void WaitDraws();
+    // Runs `action` when the GPU work queued so far completes (see DrawQueue::EnqueueCompletion).
+    void Defer(std::function<void()> action);
+    bool HasPendingWork();
+    // Retires completed GPU work (runs its write-backs and completion actions) without waiting.
+    void Collect();
+    // A GPU-side cache/pipeline barrier between the work recorded before and after it.
+    void RecordBarrier();
+    // Waits for pending GPU work only if it writes [address, address + bytes).
+    void ResolveGpuWrites(std::uint64_t address, std::size_t bytes);
+    // A DMA_DATA packet with a GDS source or destination: completes the GPU work recorded so far
+    // (GDS holds counters that work updates) and copies through the host-visible GDS buffer.
+    void GdsTransfer(std::span<const std::uint32_t> packet);
     void AcquireGpuMemory();
     void ResolveMemory(std::uint64_t address, std::size_t bytes, bool writable);
     void* Window() const;

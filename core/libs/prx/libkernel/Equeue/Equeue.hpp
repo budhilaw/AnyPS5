@@ -15,6 +15,7 @@
 
 static constexpr int16_t EVFILT_USER = -11;
 static constexpr int16_t EVFILT_VIDEO_OUT = -13;
+static constexpr int16_t EVFILT_GRAPHICS_CORE = -14;
 static constexpr int16_t EVFILT_HRTIMER = -15;
 
 static constexpr uint16_t EV_ADD = 0x0001;

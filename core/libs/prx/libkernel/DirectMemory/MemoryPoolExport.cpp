@@ -15,6 +15,7 @@ int APS5_VABI sceKernelMemoryPoolBatch(const KernelMemoryPoolBatchEntry* entries
 }
 
 int APS5_VABI sceKernelMemoryPoolCommit(void* addr, size_t len, int type, int prot, int flags) {
+    APS5_LOG_OUT("pool commit %p+0x%zx type %d prot 0x%x flags 0x%x", addr, len, type, prot, flags);
  (void)addr;
  (void)len;
  (void)type;
@@ -25,6 +26,7 @@ int APS5_VABI sceKernelMemoryPoolCommit(void* addr, size_t len, int type, int pr
 }
 
 int APS5_VABI sceKernelMemoryPoolDecommit(void* addr, size_t len, int flags) {
+    APS5_LOG_OUT("pool decommit %p+0x%zx flags 0x%x", addr, len, flags);
  (void)addr;
  (void)len;
  (void)flags;
@@ -50,6 +52,7 @@ int APS5_VABI sceKernelMemoryPoolGetBlockStats(KernelMemoryPoolBlockStats* outpu
 }
 
 int APS5_VABI sceKernelMemoryPoolReserve(void* addr_in, size_t len, size_t alignment, int flags, void** addr_out) {
+    APS5_LOG_OUT("pool reserve %p+0x%zx align 0x%zx flags 0x%x", addr_in, len, alignment, flags);
  (void)addr_in;
  (void)len;
  (void)alignment;

@@ -85,6 +85,14 @@ std::uint32_t SpirvValueEmitContext::HalfArg(const IrValue& inst, std::size_t in
 
 std::uint32_t SpirvValueEmitContext::Ballot(const IrValue* predicate) {
     const auto ballotType = TypeU32Vector(state, 4u);
+    if (state.singleLane) {
+        // Lane 0 is the only lane: the ballot is bit 0 of the predicate.
+        const auto bit = state.module.AllocateId();
+        const auto ballot = state.module.AllocateId();
+        state.module.AddFunction(spv::OpSelect, TypeU32(state), bit, Def(predicate), ConstantU32(state, 1u), ConstantU32(state, 0u));
+        state.module.AddFunction(spv::OpCompositeConstruct, ballotType, ballot, bit, ConstantU32(state, 0u), ConstantU32(state, 0u), ConstantU32(state, 0u));
+        return ballot;
+    }
     const auto scope = ConstantU32(state, spv::ScopeSubgroup);
     const auto low = state.module.AllocateId();
     state.module.AddFunction(spv::OpGroupNonUniformBallot, ballotType, low, scope, otherHalf == nullptr || half == 0u ? Def(predicate) : otherHalf->Def(predicate));
@@ -103,6 +111,7 @@ std::uint32_t SpirvValueEmitContext::Ballot(const IrValue* predicate) {
 }
 
 std::uint32_t SpirvValueEmitContext::FirstLane(std::uint32_t ballot) {
+    if (state.singleLane) return ConstantU32(state, 0u);
     if (otherHalf == nullptr) {
         const auto result = state.module.AllocateId();
         state.module.AddFunction(spv::OpGroupNonUniformBallotFindLSB, TypeU32(state), result, ConstantU32(state, spv::ScopeSubgroup), ballot);
@@ -124,6 +133,7 @@ std::uint32_t SpirvValueEmitContext::FirstLane(std::uint32_t ballot) {
 }
 
 std::uint32_t SpirvValueEmitContext::Shuffle(const IrValue& inst, std::size_t index, std::uint32_t lane) {
+    if (state.singleLane) return Arg(inst, index); // only the caller's own lane exists
     const auto type = TypeId(state, inst.Argument(index)->Type());
     const auto scope = ConstantU32(state, spv::ScopeSubgroup);
     const auto low = state.module.AllocateId();
@@ -215,6 +225,22 @@ std::vector<std::uint32_t> SpirvEmitter::Emit(const IrProgram& program, const Sh
     state.module.RequireVersion(target.spirvVersion);
     const auto* workgroup = ShaderWorkgroupInputFor(state);
     state.laneCount = workgroup != nullptr && program.WaveSize() == 64u && workgroup->hostSubgroupSize == 32u ? 2u : 1u;
+    {
+        const auto stageBit = [&]() -> std::uint32_t {
+            switch (program.Resources().stage) {
+                case IrShaderStage::Compute: return 1u << 0u;
+                case IrShaderStage::Vertex: return 1u << 1u;
+                case IrShaderStage::TessellationControl: return 1u << 2u;
+                case IrShaderStage::TessellationEvaluation: return 1u << 3u;
+                case IrShaderStage::Pixel: return 1u << 5u;
+                case IrShaderStage::Local: return 1u << 6u;
+                case IrShaderStage::Mesh: return 1u << 7u;
+                default: return 1u << 4u;
+            }
+        }();
+        state.singleLane = (target.subgroupStageMask & stageBit) == 0;
+        if (state.singleLane && state.laneCount == 2u) FailProgram(program, "wave64 emulation on a 32-wide subgroup needs subgroup operations the device lacks for this stage");
+    }
     EmitModuleHeader(state, bindings);
     EmitProgram(state);
     state.module.EmitEntryPoint(ExecutionModelForStage(state.program.Resources().stage), state.mainFunc, "main", state.interfaceVariables);

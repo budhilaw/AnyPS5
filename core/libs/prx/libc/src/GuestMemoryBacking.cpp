@@ -14,7 +14,10 @@ namespace {
 struct Allocation {
     Platform::Mapping mapping;
     std::map<std::uint64_t, std::uint64_t> ranges;
+    std::uint64_t serial = 0;  // distinguishes a mapping from a later one at the same address
 };
+
+std::uint64_t nextSerial = 1;
 
 std::map<std::uint64_t, Allocation>& allocations() {
     static auto* value = new std::map<std::uint64_t, Allocation>;
@@ -47,7 +50,7 @@ void* GuestMemoryBackingMap_nid_postfix(void* address, std::size_t bytes, std::s
             const auto& previous = std::prev(next)->second.mapping;
             if (previous.address + previous.bytes > mapping.address) throw std::runtime_error("guest mapping overlaps a retained backing reservation");
         }
-        Allocation allocation{mapping, {{mapping.address, mapping.address + bytes}}};
+        Allocation allocation{mapping, {{mapping.address, mapping.address + bytes}}, nextSerial++};
         if (!allocations().emplace(mapping.address, std::move(allocation)).second) throw std::runtime_error("duplicate guest backing mapping");
     } catch (...) {
         Platform::Unmap(mapping);
@@ -80,9 +83,42 @@ void GuestMemoryBackingUnmap_nid_postfix(void* pointer, std::size_t bytes) {
     }
 }
 
+void GuestMemoryBackingActivate_nid_postfix(std::uint64_t address, std::size_t bytes, int protection) {
+    const auto pageSize = GuestMemoryTracking::GuestMemoryTrackingPageSize_nid_postfix();
+    if (address % pageSize != 0 || bytes % pageSize != 0 || (protection & ~7) != 0) throw std::invalid_argument("misaligned guest backing activation");
+    std::lock_guard lock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
+    static_cast<void>(find(address, bytes));
+    Platform::Protect(address, bytes, protection);
+}
+
 void GuestMemoryBackingRequire_nid_postfix(std::uint64_t address, std::size_t bytes) {
     std::lock_guard lock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
     static_cast<void>(find(address, bytes));
+}
+
+void* GuestMemoryBackingAlias_nid_postfix(std::uint64_t address, std::size_t bytes) {
+    std::lock_guard lock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
+    try {
+        auto& allocation = find(address, bytes);
+        return static_cast<std::byte*>(allocation.mapping.alias) + (address - allocation.mapping.address);
+    } catch (const std::exception&) {
+        return nullptr;
+    }
+}
+
+bool GuestMemoryBackingExtent_nid_postfix(std::uint64_t address, std::size_t bytes, GuestMemoryBackingExtentInfo* info) {
+    if (info == nullptr) return false;
+    std::lock_guard lock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
+    try {
+        const auto& allocation = find(address, bytes);
+        info->address = allocation.mapping.address;
+        info->bytes = allocation.mapping.bytes;
+        info->alias = allocation.mapping.alias;
+        info->serial = allocation.serial;
+        return true;
+    } catch (const std::exception&) {
+        return false;
+    }
 }
 
 void GuestMemoryBackingWrite_nid_postfix(std::uint64_t address, const void* source, std::size_t bytes) {

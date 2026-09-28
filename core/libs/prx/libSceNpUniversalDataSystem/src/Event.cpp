@@ -29,15 +29,18 @@ int APS5_VABI sceNpUniversalDataSystemCreateEvent(
 }
 
 int APS5_VABI sceNpUniversalDataSystemDestroyEvent(NpUniversalDataSystemEvent* event) {
+    Aps5TraceCall_nid_no_patch(__func__);
     delete event;
     return SCE_NP_UNIVERSAL_DATA_SYSTEM_OK;
 }
 
 int APS5_VABI sceNpUniversalDataSystemPostEvent(int context, int handle, const void* event, uint64_t options) {
+    Aps5TraceCall_nid_no_patch(__func__);
     return SCE_NP_UNIVERSAL_DATA_SYSTEM_OK;
 }
 
 int APS5_VABI sceNpUniversalDataSystemEventEstimateSize(const NpUniversalDataSystemEvent* event, size_t* size) {
+    Aps5TraceCall_nid_no_patch(__func__);
     if (event == nullptr || size == nullptr) {
         APS5_INVALID_ARG_EX;
     }

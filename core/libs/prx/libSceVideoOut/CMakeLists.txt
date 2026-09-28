@@ -5,6 +5,7 @@ add_library(libSceVideoOut SHARED EXCLUDE_FROM_ALL
         ${CMAKE_CURRENT_SOURCE_DIR}/src/VideoOutDriver.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/DisplayWindow.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/PadInput.cpp
+        $<IF:$<PLATFORM_ID:Darwin>,${CMAKE_CURRENT_SOURCE_DIR}/src/MainThread.mm,${CMAKE_CURRENT_SOURCE_DIR}/src/MainThread.cpp>
 )
 
 target_include_directories(libSceVideoOut PRIVATE
@@ -12,7 +13,10 @@ target_include_directories(libSceVideoOut PRIVATE
         ${CMAKE_SOURCE_DIR}/3rdparty/SDL2/include
         ${CMAKE_SOURCE_DIR}/3rdparty/Vulkan-Headers/include
 )
-target_link_libraries(libSceVideoOut PRIVATE libSceAgcDriver libScePad libc libkernel SDL2-static)
+target_link_libraries(libSceVideoOut PRIVATE libSceAgcDriver libScePad libc libkernel ${ANYPS5_SDL_TARGET})
+if(APPLE)
+    target_link_libraries(libSceVideoOut PRIVATE "-framework Foundation")
+endif()
 if(WIN32)
     target_link_libraries(libSceVideoOut PRIVATE comctl32)
 endif()

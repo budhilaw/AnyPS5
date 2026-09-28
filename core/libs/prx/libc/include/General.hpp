@@ -9,6 +9,8 @@
 #include "general/ExportMacros.hpp"
 
 extern "C" void NotImplemented_nid_no_patch(const char* funcName);
+// ANYPS5_TRACE_SYSTEM=1 logs each call into the system-service libraries (PSN, save data, dialogs, user service).
+extern "C" void Aps5TraceCall_nid_no_patch(const char* funcName);
 
 extern "C" std::filesystem::path ResolvePath_nid_no_patch(const char* path);
 

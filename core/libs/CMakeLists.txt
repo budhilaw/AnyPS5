@@ -27,12 +27,28 @@ function(configure_windows_unwind target)
     endif()
 endfunction()
 
+if(APPLE AND ANYPS5_HOST_X86_64)
+    # The guest unwinder (libc exceptions/Unwind.cpp) reads DWARF frame descriptions; ld64 would
+    # otherwise drop them for every function that compact unwind can describe. Only the x86-64
+    # build runs guest code; arm64 libunwind needs the compact tables.
+    add_link_options(-Wl,-no_compact_unwind)
+endif()
+
+if(APPLE)
+    # Mach-O libraries get their NID exports at link time through an alias list (see nid/darwin).
+    set(CMAKE_CXX_CREATE_SHARED_LIBRARY "${CMAKE_CURRENT_SOURCE_DIR}/nid/darwin/link-with-nid-aliases.sh ${CMAKE_CURRENT_BINARY_DIR}/nid_patcher ${CMAKE_CXX_CREATE_SHARED_LIBRARY}")
+    set(CMAKE_C_CREATE_SHARED_LIBRARY "${CMAKE_CURRENT_SOURCE_DIR}/nid/darwin/link-with-nid-aliases.sh ${CMAKE_CURRENT_BINARY_DIR}/nid_patcher ${CMAKE_C_CREATE_SHARED_LIBRARY}")
+endif()
+
 set(LIBC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/prx/libc)
 add_library(libc SHARED EXCLUDE_FROM_ALL)
 set(LIBS_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR})
 add_subdirectory(${LIBC_DIR} ${CMAKE_CURRENT_BINARY_DIR}/prx/libc)
 target_include_directories(libc PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 configure_windows_unwind(libc)
+if(APPLE)
+    add_dependencies(libc nid_patcher)
+endif()
 
 set(UNPATCHED_DIR ${CMAKE_CURRENT_BINARY_DIR}/libs/unpatched)
 set(PATCHED_DIR ${CMAKE_CURRENT_BINARY_DIR}/libs)
@@ -47,12 +63,23 @@ set_target_properties(libc PROPERTIES
 set(LIBC_UNPATCHED ${UNPATCHED_DIR}/libc.prx)
 set(LIBC_PATCHED ${PATCHED_DIR}/libc.prx)
 
+# nid_patcher rewrites ELF and PE export tables. Mach-O export tries are not supported yet, so on
+# macOS the libraries keep their source symbol names (see docs/TechnicalDebt.md); only a relinked
+# guest would notice, and no Mach-O relinker output exists either.
+if(APPLE)
+    set(NID_PATCH_LIBC_COMMAND ${CMAKE_COMMAND} -E echo "NID patching skipped for libc: Mach-O export patching is not implemented")
+    set(NID_PATCH_COMMENT_PREFIX "Copying (unpatched) ")
+else()
+    set(NID_PATCH_LIBC_COMMAND ${CMAKE_CURRENT_BINARY_DIR}/nid_patcher libc ${LIBC_PATCHED})
+    set(NID_PATCH_COMMENT_PREFIX "Patching NIDs for ")
+endif()
+
 add_custom_command(
         OUTPUT ${LIBC_PATCHED}
         COMMAND ${CMAKE_COMMAND} -E copy ${LIBC_UNPATCHED} ${LIBC_PATCHED}
-        COMMAND $<TARGET_FILE:nid_patcher> libc ${LIBC_PATCHED}
+        COMMAND ${NID_PATCH_LIBC_COMMAND}
         DEPENDS nid_patcher libc ${LIBC_UNPATCHED}
-        COMMENT "Patching NIDs for libc"
+        COMMENT "${NID_PATCH_COMMENT_PREFIX}libc"
 )
 
 file(GLOB LIBS_DIRS LIST_DIRECTORIES true ${CMAKE_CURRENT_SOURCE_DIR}/prx/*)
@@ -68,11 +95,15 @@ foreach(LIB_DIR ${LIBS_DIRS})
             set(LIBS_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR})
             add_subdirectory(${LIB_DIR} ${CMAKE_CURRENT_BINARY_DIR}/prx/${LIB_NAME})
         else()
-            add_library(${LIB_NAME} SHARED EXCLUDE_FROM_ALL ${LIB_DIR}/Export.cpp)
+            file(GLOB LIB_SOURCES CONFIGURE_DEPENDS ${LIB_DIR}/*.cpp)
+            add_library(${LIB_NAME} SHARED EXCLUDE_FROM_ALL ${LIB_SOURCES})
             target_include_directories(${LIB_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
             configure_windows_unwind(${LIB_NAME})
         endif()
 
+        if(APPLE)
+            add_dependencies(${LIB_NAME} nid_patcher)
+        endif()
         if(LIB_NAME STREQUAL "libkernel")
             target_link_libraries(${LIB_NAME} PRIVATE libc)
         else()
@@ -89,12 +120,18 @@ foreach(LIB_DIR ${LIBS_DIRS})
         set(UNPATCHED_FILE ${UNPATCHED_DIR}/${LIB_NAME}.prx)
         set(PATCHED_FILE ${PATCHED_DIR}/${LIB_NAME}.prx)
 
+        if(APPLE)
+            set(NID_PATCH_COMMAND ${CMAKE_COMMAND} -E echo "NID patching skipped for ${LIB_NAME}: Mach-O export patching is not implemented")
+        else()
+            set(NID_PATCH_COMMAND ${CMAKE_CURRENT_BINARY_DIR}/nid_patcher ${LIB_NAME} --preserve-exports "${LIBC_UNPATCHED}" "${PATCHED_FILE}")
+        endif()
+
         add_custom_command(
                 OUTPUT ${PATCHED_FILE}
                 COMMAND ${CMAKE_COMMAND} -E copy ${UNPATCHED_FILE} ${PATCHED_FILE}
-                COMMAND $<TARGET_FILE:nid_patcher> ${LIB_NAME} --preserve-exports "${LIBC_UNPATCHED}" "${PATCHED_FILE}"
+                COMMAND ${NID_PATCH_COMMAND}
                 DEPENDS nid_patcher ${LIB_NAME} ${UNPATCHED_FILE} ${LIBC_UNPATCHED}
-                COMMENT "Patching NIDs for ${LIB_NAME}"
+                COMMENT "${NID_PATCH_COMMENT_PREFIX}${LIB_NAME}"
         )
 
         list(APPEND PATCHED_OUTPUTS ${PATCHED_FILE})
@@ -173,10 +210,14 @@ if(BUILD_TESTING)
     endif()
     add_library(guest_module_fixture SHARED tests/GuestModuleFixture.cpp)
     target_include_directories(guest_module_fixture PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-    add_custom_command(TARGET guest_module_fixture POST_BUILD
-        COMMAND $<TARGET_FILE:nid_patcher> guest_module_fixture $<TARGET_FILE:guest_module_fixture>
-        VERBATIM)
-    add_dependencies(guest_module_fixture nid_patcher)
+    if(APPLE)
+        add_dependencies(guest_module_fixture nid_patcher)
+    else()
+        add_custom_command(TARGET guest_module_fixture POST_BUILD
+            COMMAND ${CMAKE_CURRENT_BINARY_DIR}/nid_patcher guest_module_fixture $<TARGET_FILE:guest_module_fixture>
+            VERBATIM)
+        add_dependencies(guest_module_fixture nid_patcher)
+    endif()
     add_executable(guest_dynamic_loader_tests tests/GuestDynamicLoader.cpp)
     target_include_directories(guest_dynamic_loader_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(guest_dynamic_loader_tests PRIVATE libkernel libc)
@@ -216,14 +257,17 @@ if(BUILD_TESTING)
         set_tests_properties(guest_environment PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
-    add_executable(guest_standard_stream_tests tests/GuestStandardStreams.cpp)
-    target_include_directories(guest_standard_stream_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-    target_link_libraries(guest_standard_stream_tests PRIVATE libc)
-    configure_windows_unwind(guest_standard_stream_tests)
-    add_test(NAME guest_standard_streams COMMAND guest_standard_stream_tests)
-    if(WIN32)
-        set_tests_properties(guest_standard_streams PROPERTIES ENVIRONMENT_MODIFICATION
-            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    if(ANYPS5_GUEST_ABI)
+        # Exercises the guest printf family, which marshals the SysV x86-64 va_list.
+        add_executable(guest_standard_stream_tests tests/GuestStandardStreams.cpp)
+        target_include_directories(guest_standard_stream_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+        target_link_libraries(guest_standard_stream_tests PRIVATE libc)
+        configure_windows_unwind(guest_standard_stream_tests)
+        add_test(NAME guest_standard_streams COMMAND guest_standard_stream_tests)
+        if(WIN32)
+            set_tests_properties(guest_standard_streams PROPERTIES ENVIRONMENT_MODIFICATION
+                "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+        endif()
     endif()
     add_executable(guest_once_tests tests/GuestOnce.cpp)
     target_include_directories(guest_once_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
