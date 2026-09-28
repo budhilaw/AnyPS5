@@ -314,7 +314,10 @@ void ShaderResources::addImageBinding(const ShaderRecompiler::DescriptorBinding&
             // Stores stay on the device: the cache keeps serving this image while the guest copy is
             // untouched, so later reads see the shader's writes (see docs/TechnicalDebt.md).
             Require(!storageImage || textures.back()->StorageView() != VK_NULL_HANDLE, "storage image format or source does not support shader stores");
-            if (storageImage) textures.back()->MarkStored();
+            if (storageImage) {
+                textures.back()->MarkStored();
+                storesImages = true;
+            }
             item.imageAllocations.push_back(textures.size() - 1);
         }
         Require(textures.size() <= context.limits.maxDescriptorSetSampledImages, "pipeline image descriptors exceed device limits");
@@ -366,9 +369,9 @@ std::string ShaderResources::DescribeTextures() const {
     return text;
 }
 
-void ShaderResources::WriteBack() {
+void ShaderResources::WriteBack(std::uint64_t sequence) {
     if (bda) bda->CheckFault();
-    guestMemory.WriteBack();
+    guestMemory.WriteBack(sequence);
     for (auto& texture : textures) texture->FlushStores();
 }
 

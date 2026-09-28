@@ -265,16 +265,21 @@ GuestBufferCache::HostView GuestBufferCache::HostRange(std::uint64_t address, st
     static const bool disabled = std::getenv("ANYPS5_NO_HOST_VERTEX") != nullptr; // diagnostics
     if (disabled || !context.hostPointerImport || bytes == 0) return {};
     GuestMemoryBacking::GuestMemoryBackingExtentInfo extent{};
-    if (!GuestMemoryBacking::GuestMemoryBackingExtent_nid_postfix(address, static_cast<std::size_t>(bytes), &extent)) return {};
+    const bool found = GuestMemoryBacking::GuestMemoryBackingExtent_nid_postfix(address, static_cast<std::size_t>(bytes), &extent);
     const auto alignment = static_cast<std::uint64_t>(context.hostPointerAlignment);
     // The import covers whole host pages of the mapping; a range in a partial tail page is copied.
     const auto importBytes = extent.bytes / alignment * alignment;
-    if (reinterpret_cast<std::uintptr_t>(extent.alias) % alignment != 0 || address + bytes > extent.address + importBytes) return {};
+    if (!found || reinterpret_cast<std::uintptr_t>(extent.alias) % alignment != 0 || address + bytes > extent.address + importBytes) {
+        static const bool trace = std::getenv("ANYPS5_TRACE_WAITS") != nullptr; // diagnostics
+        static int reported = 0;
+        if (trace && bytes >= (1u << 20) && reported++ < 20) APS5_LOG_OUT("host range 0x%llx+0x%llx unavailable: extent %d 0x%llx+0x%llx alias %p", static_cast<unsigned long long>(address), static_cast<unsigned long long>(bytes), found ? 1 : 0, static_cast<unsigned long long>(extent.address), static_cast<unsigned long long>(extent.bytes), extent.alias);
+        return {};
+    }
     std::lock_guard lock(mutex);
     auto& mapping = hostMappings[extent.address];
     if (!mapping.buffer || mapping.serial != extent.serial || mapping.bytes != importBytes) {
         try {
-            constexpr VkBufferUsageFlags usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+            const VkBufferUsageFlags usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | (context.bufferDeviceAddress ? VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT : 0u);
             mapping.buffer = std::make_shared<Buffer>(context, Buffer::HostImport{}, extent.alias, static_cast<std::size_t>(importBytes), 0, static_cast<std::size_t>(importBytes), usage);
             mapping.serial = extent.serial;
             mapping.bytes = importBytes;

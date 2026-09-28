@@ -12,7 +12,11 @@ public:
     ~GpuColorTransfer();
     GpuColorTransfer(const GpuColorTransfer&) = delete;
     GpuColorTransfer& operator=(const GpuColorTransfer&) = delete;
-    void Upload(std::uint64_t address, std::uint32_t width, std::uint32_t height, ColorTileMode mode);
+    // Stages the guest surface for Detile. True when Detile reads it from the imported guest
+    // mapping on the GPU (in queue order, after earlier GPU writes), false for a CPU copy now.
+    bool Upload(std::uint64_t address, std::uint32_t width, std::uint32_t height, ColorTileMode mode);
+    // Upload, only from the imported guest mapping (false, staging nothing, when unavailable).
+    bool UploadView(std::uint64_t address, std::uint32_t width, std::uint32_t height, ColorTileMode mode);
     // Sizes the transfer buffers for a surface without uploading it (adopted GPU contents).
     void Prepare(std::uint32_t width, std::uint32_t height, ColorTileMode mode) { prepare(width, height, mode); }
     void Detile(VkCommandBuffer commands, bool swapRedBlue = false);
@@ -38,6 +42,8 @@ private:
     std::unique_ptr<Buffer> linear;
     std::unique_ptr<Buffer> readback;
     std::unique_ptr<Buffer> upload;
+    std::shared_ptr<Buffer> uploadSource; // imported guest mapping Detile copies from, when set
+    VkDeviceSize uploadSourceOffset = 0;
     std::uint32_t width = 0;
     std::uint32_t height = 0;
     ColorTileMode mode = ColorTileMode::Linear;

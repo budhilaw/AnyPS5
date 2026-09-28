@@ -81,9 +81,19 @@ struct Context {
 
     template<typename TFunction>
     TFunction Function(const char* name) const {
+        // Callers pass string literals and a command costs a name lookup in the loader and
+        // MoltenVK otherwise: every function type remembers its last device, name and entry.
+        struct Cached {
+            VkDevice device;
+            const char* name;
+            TFunction function;
+        };
+        thread_local Cached cached{};
+        if (cached.function != nullptr && cached.device == device && cached.name == name) return cached.function;
         Require(deviceProc != nullptr, "missing Vulkan device function resolver");
         const auto function = reinterpret_cast<TFunction>(deviceProc(device, name));
         if (function == nullptr) throw std::runtime_error(std::string("AGC graphics: missing Vulkan function: ") + name);
+        cached = {device, name, function};
         return function;
     }
 

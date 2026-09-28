@@ -1,5 +1,6 @@
 #include <execinfo.h>
 #include <dlfcn.h>
+#include <chrono>
 #include <cstdlib>
 #include <cstdio>
 #include <string>
@@ -53,7 +54,9 @@ void ResidentColor::Begin(VkCommandBuffer commands) {
     if (!valid) {
         memoryWatch->Protect(GuestMemoryTracking::Protection::Read);
         const GuestMemory::MemoryAccessScope suspended(nullptr, nullptr);
-        transfer.Upload(color.address, color.extent.width, color.extent.height, color.tileMode);
+        // A GPU-side upload follows every queued draw and dispatch: what they write in place
+        // reaches the target without waiting for them.
+        if (transfer.Upload(color.address, color.extent.width, color.extent.height, color.tileMode)) adoptedThrough = context.drawQueue != nullptr ? context.drawQueue->NextSequence() : 0;
         transfer.Detile(commands);
         Transition(commands, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
         VkBufferImageCopy copy{};
@@ -68,6 +71,30 @@ void ResidentColor::Begin(VkCommandBuffer commands) {
     valid = true;
     dirty = true;
     memoryWatch->Protect(GuestMemoryTracking::Protection::None);
+}
+
+bool ResidentColor::Refresh(VkCommandBuffer commands) {
+    if (color.gpuOnly || valid || memoryWatch == nullptr) return false;
+    PerformanceTimer timing("Graphics.ResidentColor.Refresh");
+    {
+        const GuestMemory::MemoryAccessScope suspended(nullptr, nullptr);
+        if (!transfer.UploadView(color.address, color.extent.width, color.extent.height, color.tileMode)) return false;
+    }
+    Require(generation != std::numeric_limits<std::uint64_t>::max(), "resident color generation overflow");
+    ++generation;
+    adoptedThrough = context.drawQueue != nullptr ? context.drawQueue->NextSequence() : 0;
+    transfer.Detile(commands);
+    Transition(commands, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    VkBufferImageCopy copy{};
+    copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    copy.imageExtent = {color.extent.width, color.extent.height, 1};
+    context.Function<PFN_vkCmdCopyBufferToImage>("vkCmdCopyBufferToImage")(commands, transfer.LinearBuffer(), Target().Image(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+    // The image matches guest memory once the queued writes land: reads need no download.
+    valid = true;
+    dirty = false;
+    memoryWatch->Protect(GuestMemoryTracking::Protection::Read);
+    timing.Mark("record", color.bytes);
+    return true;
 }
 
 void ResidentColor::Adopt(VkCommandBuffer commands, VkImage image) {
@@ -121,9 +148,38 @@ void ResidentColor::Commit() {
     memoryWatch->Protect(GuestMemoryTracking::Protection::Read);
 }
 
+std::vector<std::pair<std::uint64_t, std::uint64_t>> RenderCache::UnadoptedRanges(std::uint64_t begin, std::uint64_t end, std::uint64_t sequence) const {
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> result{{begin, end}};
+    const auto pageSize = GuestMemoryTracking::GuestMemoryTrackingPageSize_nid_postfix();
+    for (const auto& [address, entry] : entries) {
+        if (!entry->Adopted(sequence)) continue;
+        // The target's watch covers whole pages; none of them belong to another watcher.
+        const auto& color = entry->Description();
+        const auto first = color.address - color.address % pageSize;
+        const auto last = (color.address + color.bytes + pageSize - 1) / pageSize * pageSize;
+        std::vector<std::pair<std::uint64_t, std::uint64_t>> remaining;
+        for (const auto& [from, to] : result) {
+            if (to <= first || last <= from) {
+                remaining.emplace_back(from, to);
+                continue;
+            }
+            if (from < first) remaining.emplace_back(from, first);
+            if (last < to) remaining.emplace_back(last, to);
+        }
+        result = std::move(remaining);
+        if (result.empty()) break;
+    }
+    return result;
+}
+
 std::shared_ptr<ResidentColor> RenderCache::Get(const ColorTarget& color, bool blending) {
     Require(color.address != 0 && color.bytes != 0 && color.bytes <= std::numeric_limits<std::uint64_t>::max() - color.address, "invalid resident color range");
-    if (context.drawQueue) context.drawQueue->Resolve(color.address, color.bytes);
+    // A target that uploads its memory on the GPU reads what queued work wrote in place in queue
+    // order; only writes the host copies back after completion need the wait.
+    if (context.drawQueue && context.drawQueue->WritesPending(color.address, color.bytes)) {
+        const bool ordered = !color.gpuOnly && context.guestBufferCache != nullptr && context.guestBufferCache->HostRange(color.address, color.bytes).buffer != nullptr;
+        context.drawQueue->Resolve(color.address, color.bytes, ordered);
+    }
     if (blending) {
         VkFormatProperties properties{};
         context.formatProperties(context.physical, color.format, &properties);
@@ -355,8 +411,22 @@ std::string RenderCache::DescribeDepthTargets() const {
 
 std::shared_ptr<ResidentColor> RenderCache::Find(std::uint64_t address) const {
     const auto it = entries.find(address);
-    if (it != entries.end() && context.drawQueue) context.drawQueue->Resolve(address, it->second->Description().bytes);
-    return it != entries.end() && it->second->Valid() ? it->second : nullptr;
+    if (it == entries.end()) return nullptr;
+    // A valid target serves the texture in queue order: only queued writes it did not take in
+    // on the GPU need to land first. An invalid one the queued work overwrites in place reloads
+    // on the GPU after that work instead of waiting for it (and a CPU read of guest memory).
+    const auto& entry = it->second;
+    const auto bytes = entry->Description().bytes;
+    if (context.drawQueue && context.drawQueue->WritesPending(address, bytes, entry->AdoptedThrough())) {
+        const bool reloaded = !entry->Valid() && !context.drawQueue->WritesPending(address, bytes, context.drawQueue->NextSequence()) && entry->Refresh(context.drawQueue->BeginBarrier(context));
+        if (!reloaded) {
+            static const bool trace = std::getenv("ANYPS5_TRACE_WAITS") != nullptr; // diagnostics
+            static int reported = 0;
+            if (trace && reported++ < 20) std::fprintf(stderr, "[find-wait] 0x%llx valid %d dirty %d gpuOnly %d tile %u adopted %llu next %llu\n", static_cast<unsigned long long>(address), entry->Valid() ? 1 : 0, entry->Dirty() ? 1 : 0, entry->Description().gpuOnly ? 1 : 0, static_cast<unsigned>(entry->Description().tileMode), static_cast<unsigned long long>(entry->AdoptedThrough()), static_cast<unsigned long long>(context.drawQueue->NextSequence()));
+            context.drawQueue->Resolve(address, bytes);
+        }
+    }
+    return entry->Valid() ? entry : nullptr;
 }
 
 void RenderCache::Resolve(std::uint64_t address, std::size_t bytes, bool writable) {
@@ -369,9 +439,12 @@ void RenderCache::Resolve(std::uint64_t address, std::size_t bytes, bool writabl
     }
     if (affected.empty()) return;
     {
-        static const bool trace = std::getenv("ANYPS5_TRACE_RESOLVE") != nullptr; // diagnostics
+        // ANYPS5_TRACE_RESOLVE=<seconds>: from that time on (diagnostics).
+        static const char* traceValue = std::getenv("ANYPS5_TRACE_RESOLVE");
+        static const auto traceStart = std::chrono::steady_clock::now();
         static int reported = 0;
-        if (trace && reported++ < 60) {
+        if (traceValue != nullptr && reported < 60 && std::chrono::duration<double>(std::chrono::steady_clock::now() - traceStart).count() >= std::atof(traceValue)) {
+            ++reported;
             void* frames[8];
             const int count = ::backtrace(frames, 8);
             std::string chain;

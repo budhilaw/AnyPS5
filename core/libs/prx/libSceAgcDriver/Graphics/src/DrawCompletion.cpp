@@ -1,6 +1,12 @@
 #include "prx/libSceAgcDriver/Graphics/include/DrawQueue.hpp"
 #include "prx/libSceAgcDriver/Execution/include/MemoryAccessScope.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <dlfcn.h>
+#include <execinfo.h>
+#include <string>
 
 namespace AgcDriver::Graphics {
 
@@ -9,7 +15,7 @@ void DrawQueue::retire(Batch batch) {
     const GuestMemory::MemoryAccessScope suspended(nullptr, nullptr);
     Require(drawCount >= batch.entries.size(), "draw queue completion count underflow");
     drawCount -= batch.entries.size();
-    for (auto& entry : batch.entries) entry.resources->WriteBack();
+    for (auto& entry : batch.entries) entry.resources->WriteBack(entry.sequence);
     timing.Mark("resources_writeback");
     batch.entries.clear();
     for (auto& completion : batch.completions) completion();
@@ -35,6 +41,25 @@ void DrawQueue::WaitGpu() {
 void DrawQueue::Wait() {
     if (pending.empty() && !recording.commands) return;
     PerformanceTimer timing("Graphics.DrawQueue.Wait");
+    // ANYPS5_TRACE_WAITS=<seconds>: from that time on, the callers of the first waits (diagnostics).
+    if (static const char* traceWaits = std::getenv("ANYPS5_TRACE_WAITS"); traceWaits != nullptr) {
+        static const auto traceStart = std::chrono::steady_clock::now();
+        static int reported = 0;
+        if (reported < 80 && std::chrono::duration<double>(std::chrono::steady_clock::now() - traceStart).count() >= std::atof(traceWaits)) {
+            ++reported;
+            void* frames[9];
+            const int count = ::backtrace(frames, 9);
+            std::string chain;
+            for (int i = 1; i < count; ++i) {
+                Dl_info info{};
+                dladdr(frames[i], &info);
+                char item[160];
+                std::snprintf(item, sizeof(item), " <- %s+0x%lx", info.dli_sname ? info.dli_sname : "?", info.dli_saddr ? static_cast<unsigned long>(static_cast<const char*>(frames[i]) - static_cast<const char*>(info.dli_saddr)) : 0ul);
+                chain += item;
+            }
+            std::fprintf(stderr, "[wait]%s\n", chain.c_str());
+        }
+    }
     Flush();
     timing.Mark("submit");
     while (!pending.empty()) {

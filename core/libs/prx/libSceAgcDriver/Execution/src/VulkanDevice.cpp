@@ -760,6 +760,18 @@ void VulkanDevice::present(std::uint32_t width, std::uint32_t height, bool opaqu
             ResolveMemory(display->address, bytes, false);
             state->colorTransfer->Upload(display->address, width, height, Graphics::ColorTileMode::RenderTarget);
         }
+        // ANYPS5_DUMP_TARGETS_AT=<seconds>:<prefix>: the resident color targets once, at the first
+        // present after that time (diagnostics that leave the frame rate alone until then).
+        if (static const char* dumpAt = std::getenv("ANYPS5_DUMP_TARGETS_AT"); dumpAt != nullptr) {
+            static const auto dumpStart = std::chrono::steady_clock::now();
+            static bool dumped = false;
+            const char* colon = std::strchr(dumpAt, ':');
+            if (!dumped && colon != nullptr && std::chrono::duration<double>(std::chrono::steady_clock::now() - dumpStart).count() >= std::atof(dumpAt)) {
+                dumped = true;
+                state->renderCache->DumpTargets(colon + 1);
+                APS5_LOG_OUT("dumped the resident color targets to %s", colon + 1);
+            }
+        }
         // ANYPS5_DUMP_FRAME=<prefix>: every 30th presented display buffer as a BMP, with the
         // resident targets known at that time.
         static const char* dumpPrefix = std::getenv("ANYPS5_DUMP_FRAME");
@@ -1098,6 +1110,26 @@ void VulkanDevice::Dispatch(const ShaderRecompiler::RecompileResult& shader, std
         }
         const auto layout = found->second.layout;
         const auto pipeline = found->second.pipeline;
+        if (static const bool traceWrites = std::getenv("ANYPS5_TRACE_WAITS") != nullptr; traceWrites && resources->Writes()) {
+            static int reported = 0;
+            if (reported++ < 400) {
+                std::string ranges;
+                for (const auto& [begin, end] : resources->WriteRanges()) {
+                    char item[64];
+                    std::snprintf(item, sizeof(item), " 0x%llx+0x%llx", static_cast<unsigned long long>(begin), static_cast<unsigned long long>(end - begin));
+                    ranges += item;
+                }
+                std::string textures;
+                for (const auto& texture : resources->Textures()) {
+                    char item[80];
+                    std::snprintf(item, sizeof(item), " 0x%llx(%ux%u vk%u%s)", static_cast<unsigned long long>(texture->GuestAddress()), texture->Extent().width, texture->Extent().height, static_cast<unsigned>(texture->GuestFormat()), texture->IsDirectView() ? " direct" : "");
+                    textures += item;
+                }
+                std::uint64_t hash = 1469598103934665603ull;
+                for (const auto word : shader.spirv) hash = (hash ^ word) * 1099511628211ull;
+                std::fprintf(stderr, "[dispatch-writes] %ux%ux%u shader %016llx, writes%s textures%s\n", x, y, z, static_cast<unsigned long long>(hash), ranges.c_str(), textures.c_str());
+            }
+        }
         const auto commands = state->drawQueue->Begin(context);
         VkMemoryBarrier upload{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
         upload.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT | VK_ACCESS_MEMORY_WRITE_BIT;

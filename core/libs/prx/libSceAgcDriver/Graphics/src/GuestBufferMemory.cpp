@@ -1,5 +1,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/GuestBufferMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
+#include "prx/libSceAgcDriver/Execution/include/MemoryAccessScope.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/RenderCache.hpp"
 #include <cstdlib>
 #include "prx/libc/include/General.hpp"
 #include <algorithm>
@@ -14,22 +16,43 @@ bool GuestBufferMemory::WritesOverlap(std::uint64_t address, std::size_t bytes) 
     return std::any_of(writes.begin(), writes.end(), [&](const auto& range) { return address < range.second && range.first < address + bytes; });
 }
 
+bool GuestBufferMemory::WritesOverlapCopied(std::uint64_t address, std::size_t bytes) const {
+    return std::any_of(writes.begin(), writes.end(), [&](const auto& range) {
+        if (!(address < range.second && range.first < address + bytes)) return false;
+        if (!uploaded) return true;
+        const auto found = std::upper_bound(regions.begin(), regions.end(), range.first, [](auto value, const auto& region) { return value < region.begin; });
+        if (found == regions.begin()) return true;
+        const auto& region = *std::prev(found);
+        return !region.inPlace;
+    });
+}
+
 void GuestBufferMemory::validate(std::uint64_t address, std::size_t bytes) const {
     Require(!uploaded, "guest memory ownership is frozen for GPU execution");
     Require(address != 0 && bytes != 0, "empty guest memory range");
     Require(bytes <= std::numeric_limits<std::uint64_t>::max() - address, "guest memory range overflow");
 }
 
+// The device's access resolution (waiting for queued GPU writes, saving render targets) runs at
+// upload, once it is known whether the GPU reads guest memory in place or the host copies it.
 void GuestBufferMemory::AddWritable(std::uint64_t address, std::size_t bytes) {
     validate(address, bytes);
-    GuestMemory::CheckRange(reinterpret_cast<const void*>(address), bytes, 1, true);
+    {
+        const GuestMemory::MemoryAccessScope deferred(nullptr, nullptr);
+        GuestMemory::CheckRange(reinterpret_cast<const void*>(address), bytes, 1, true);
+    }
+    accesses.push_back({address, bytes, true});
     regions.push_back({address, address + bytes, true, false, {}, nullptr});
     writes.emplace_back(address, address + bytes);
 }
 
 void GuestBufferMemory::AddReadOnly(std::uint64_t address, std::size_t bytes) {
     validate(address, bytes);
-    GuestMemory::CheckRange(reinterpret_cast<const void*>(address), bytes, 1, false);
+    {
+        const GuestMemory::MemoryAccessScope deferred(nullptr, nullptr);
+        GuestMemory::CheckRange(reinterpret_cast<const void*>(address), bytes, 1, false);
+    }
+    accesses.push_back({address, bytes, false});
     regions.push_back({address, address + bytes, false, true, {}, nullptr});
 }
 
@@ -82,11 +105,36 @@ void GuestBufferMemory::Upload(bool addressable) {
         const auto bytes = region.end - region.begin + region.padding;
         Require(bytes <= std::numeric_limits<std::size_t>::max(), "guest GPU allocation size overflow");
         const auto usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | (addressable ? VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT : 0u);
+        // Each added range resolves as it was added (a merged region can join a small written
+        // range with a large read one).
+        const auto resolveAccesses = [&](bool inPlace) {
+            for (const auto& access : accesses) {
+                if (access.address < region.begin || access.address >= region.end) continue;
+                if (!inPlace) GuestMemory::MemoryAccessScope::Resolve(access.address, access.bytes, access.writable);
+                else if (context.renderCache != nullptr) context.renderCache->Resolve(access.address, access.bytes, access.writable);
+            }
+        };
         if ((region.writable || region.fromGuest) && context.guestBufferCache != nullptr) {
+            // Guest ranges bind the imported guest mapping itself, as on the console: the GPU reads
+            // and writes guest memory in queue order, with nothing to copy either way and nothing
+            // to wait for. Only render targets holding newer contents than memory are saved first.
+            static const bool inPlaceEnabled = std::getenv("ANYPS5_NO_BUFFERS_IN_PLACE") == nullptr; // diagnostics
+            if (inPlaceEnabled && (!addressable || context.bufferDeviceAddress)) {
+                if (auto view = context.guestBufferCache->HostRange(region.begin - region.padding, region.end - region.begin + region.padding); view.buffer && (view.buffer->Usage() & usage) == usage) {
+                    resolveAccesses(true);
+                    region.buffer = std::move(view.buffer);
+                    region.bufferOffset = view.offset;
+                    region.inPlace = true;
+                    continue;
+                }
+            }
+            resolveAccesses(false);
             region.mirror = context.guestBufferCache->Acquire(region.begin - region.padding, region.end, usage);
             region.buffer = region.mirror->buffer;
+            region.inPlace = region.mirror->imported;
             continue;
         }
+        if (region.writable || region.fromGuest) resolveAccesses(false);
         region.buffer = std::make_shared<Buffer>(context, static_cast<std::size_t>(bytes), usage);
         auto target = region.buffer->Bytes();
         if (region.writable || region.fromGuest) GuestMemory::Read(region.begin - region.padding, target);
@@ -108,7 +156,7 @@ VkDescriptorBufferInfo GuestBufferMemory::Descriptor(std::uint64_t address, std:
     // The view starts at the aligned address below `address`; the shader adds the residue (the
     // memory offset byte the recompiler bakes into the shader data) to every access.
     const auto residue = address % ViewAlignment;
-    const auto offset = address - residue - (region.begin - region.padding);
+    const auto offset = region.bufferOffset + (address - residue - (region.begin - region.padding));
     Require(context.limits.minStorageBufferOffsetAlignment != 0 && ViewAlignment % context.limits.minStorageBufferOffsetAlignment == 0 && offset % context.limits.minStorageBufferOffsetAlignment == 0, "guest buffer view violates storage buffer offset alignment");
     Require(bytes + residue <= context.limits.maxStorageBufferRange, "guest buffer view exceeds descriptor range limit");
     return {region.buffer->Handle(), offset, bytes + residue};
@@ -119,7 +167,7 @@ std::vector<ShaderRecompiler::BdaAbi::Range> GuestBufferMemory::AddressRanges() 
     std::vector<ShaderRecompiler::BdaAbi::Range> result;
     for (const auto& region : regions) {
         Require(region.buffer != nullptr, "incomplete guest GPU upload");
-        const auto address = region.buffer->DeviceAddress() + region.padding;
+        const auto address = region.buffer->DeviceAddress() + region.bufferOffset + region.padding;
         Require(region.end - region.begin <= std::numeric_limits<std::uint64_t>::max() - address, "GPU address range overflow");
         result.push_back({region.begin, region.end, address, ShaderRecompiler::BdaAbi::Read, 0});
     }
@@ -138,7 +186,7 @@ static bool NoWriteBack() {
     return enabled;
 }
 
-void GuestBufferMemory::WriteBack() {
+void GuestBufferMemory::WriteBack(std::uint64_t sequence) {
     Require(uploaded && !committed, "guest memory cannot be committed twice or before upload");
     if (NoWriteBack()) {
         committed = true;
@@ -154,15 +202,20 @@ void GuestBufferMemory::WriteBack() {
     std::vector<std::span<const std::byte>> sources;
     std::vector<bool> inPlace;
     for (const auto& [begin, end] : merged) {
-        // The writable check notifies every watcher of the range (textures, render targets) that
-        // it was written, which is all an in-place (imported) region needs.
-        GuestMemory::CheckRange(reinterpret_cast<const void*>(begin), static_cast<std::size_t>(end - begin), 1, true);
         const auto found = std::upper_bound(regions.begin(), regions.end(), begin, [](auto address, const auto& region) { return address < region.begin; });
         Require(found != regions.begin(), "write-back range has no GPU owner");
         const auto& region = *std::prev(found);
         Require(region.buffer != nullptr && region.writable && end <= region.end, "write-back range exceeds its GPU owner");
-        sources.push_back(region.buffer->Bytes().subspan(static_cast<std::size_t>(begin - region.begin + region.padding), static_cast<std::size_t>(end - begin)));
-        inPlace.push_back(region.mirror != nullptr && region.mirror->imported);
+        sources.push_back(region.buffer->Bytes().subspan(static_cast<std::size_t>(region.bufferOffset + begin - region.begin + region.padding), static_cast<std::size_t>(end - begin)));
+        inPlace.push_back(region.inPlace);
+        // The writable check notifies every watcher of the range (textures, render targets) that
+        // it was written, which is all an in-place (imported) region needs. Render targets the
+        // GPU refreshed from the written memory after this work are current already.
+        if (inPlace.back() && context.renderCache != nullptr) {
+            for (const auto& [first, last] : context.renderCache->UnadoptedRanges(begin, end, sequence)) GuestMemory::CheckRange(reinterpret_cast<const void*>(first), static_cast<std::size_t>(last - first), 1, true);
+        } else {
+            GuestMemory::CheckRange(reinterpret_cast<const void*>(begin), static_cast<std::size_t>(end - begin), 1, true);
+        }
     }
     for (std::size_t i = 0; i < merged.size(); ++i) {
         if (inPlace[i] && !TraceWriteBack()) continue; // the GPU wrote guest memory itself

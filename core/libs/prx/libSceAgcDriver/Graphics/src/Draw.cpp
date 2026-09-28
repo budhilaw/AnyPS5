@@ -12,6 +12,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/GraphicsPipelineCache.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/GuestBufferCache.hpp"
 #include <span>
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstring>
@@ -465,15 +466,56 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
     storage->pipeline = context.graphicsPipelines->Get(state, storage->color, storage->extraColors, storage->depth, *resources, shaders);
     auto& pipeline = *storage->pipeline;
     timing.Mark("pipeline_cache");
-    const auto commands = context.drawQueue->Begin(context);
-    VkMemoryBarrier upload{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-    upload.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
-    upload.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_INDEX_READ_BIT | VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_UNIFORM_READ_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-    context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(commands, VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_VERTEX_INPUT_BIT | shaderStages, 0, 1, &upload, 0, nullptr, 0, nullptr);
-    if (storage->color) storage->color->Begin(commands);
-    for (const auto& extra : storage->extraColors) extra->Begin(commands);
-    if (storage->depth) storage->depth->Prepare(commands);
-    pipeline.Begin(commands, state.renderExtent);
+    // Consecutive draws into the same attachments share one render pass instance: on a tiling
+    // GPU every pass loads and stores its attachments, and MoltenVK encodes each as a Metal pass.
+    // A draw starts a new pass when anything was recorded since the last one, when its targets
+    // need an upload or layout change, when it clears depth or stencil at the pass start, and
+    // when it may store to memory (it then ends the pass too, so later work sees the stores
+    // after the pass's barrier).
+    RenderPassKey passKey;
+    if (storage->color) passKey.views[passKey.viewCount++] = storage->color->Target().View();
+    for (const auto& extra : storage->extraColors) passKey.views[passKey.viewCount++] = extra->Target().View();
+    if (storage->depth) passKey.views[passKey.viewCount++] = storage->depth->View();
+    passKey.extent = state.renderExtent;
+    const bool clears = state.hasDepthTarget && (state.depthState.clearDepth || (state.depth.stencil && state.depthState.clearStencil));
+    const bool writes = resources->Writes();
+    if (static const bool traceWrites = std::getenv("ANYPS5_TRACE_WAITS") != nullptr; traceWrites && writes) {
+        static int reported = 0;
+        if (reported++ < 400) {
+            std::string ranges;
+            for (const auto& [begin, end] : resources->WriteRanges()) {
+                char item[64];
+                std::snprintf(item, sizeof(item), " 0x%llx+0x%llx", static_cast<unsigned long long>(begin), static_cast<unsigned long long>(end - begin));
+                ranges += item;
+            }
+            std::uint64_t hash = 1469598103934665603ull;
+            for (const auto& shader : shaders) for (const auto word : shader.program->spirv) hash = (hash ^ word) * 1099511628211ull;
+            std::fprintf(stderr, "[draw-writes] %u %s indices, target 0x%llx %ux%u vk%u, shaders %016llx, writes%s\n", draw.indexCount, draw.indexed ? "indexed" : "auto", state.hasColorTarget ? static_cast<unsigned long long>(state.color.address) : 0ull, state.renderExtent.width, state.renderExtent.height, state.hasColorTarget ? static_cast<unsigned>(state.color.format) : 0u, static_cast<unsigned long long>(hash), ranges.c_str());
+        }
+    }
+    static const bool mergePasses = std::getenv("ANYPS5_NO_PASS_MERGE") == nullptr; // diagnostics
+    const bool attached = (!storage->color || storage->color->Attached()) && std::all_of(storage->extraColors.begin(), storage->extraColors.end(), [](const auto& extra) { return extra->Attached(); }) && (!storage->depth || storage->depth->Attached());
+    VkCommandBuffer commands = mergePasses && !clears && !writes && attached ? context.drawQueue->ContinuePass(passKey) : VK_NULL_HANDLE;
+    if (commands != VK_NULL_HANDLE) {
+        if (storage->color) storage->color->Continue();
+        for (const auto& extra : storage->extraColors) extra->Continue();
+        if (storage->depth) storage->depth->Continue();
+    } else {
+        commands = context.drawQueue->Begin(context);
+        VkMemoryBarrier upload{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        upload.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
+        upload.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_INDEX_READ_BIT | VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_UNIFORM_READ_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(commands, VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_VERTEX_INPUT_BIT | shaderStages, 0, 1, &upload, 0, nullptr, 0, nullptr);
+        if (storage->color) storage->color->Begin(commands);
+        for (const auto& extra : storage->extraColors) extra->Begin(commands);
+        if (storage->depth) storage->depth->Prepare(commands);
+        pipeline.BeginPass(commands, state.renderExtent);
+        context.drawQueue->OpenPass(context, passKey);
+    }
+    if (context.drawQueue->BoundPipeline() != pipeline.Handle()) {
+        pipeline.Bind(commands);
+        context.drawQueue->SetBoundPipeline(pipeline.Handle());
+    }
     resources->Bind(commands, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline.Layout());
     pipeline.PushConstants(commands, shaders);
     if (state.stages.mesh) {
@@ -487,11 +529,7 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
             context.Function<PFN_vkCmdDraw>("vkCmdDraw")(commands, draw.indexCount, draw.instanceCount, draw.firstVertex, draw.firstInstance);
         }
     }
-    context.Function<PFN_vkCmdEndRenderPass>("vkCmdEndRenderPass")(commands);
-    VkMemoryBarrier download{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-    download.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-    download.dstAccessMask = VK_ACCESS_HOST_READ_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT;
-    context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(commands, VK_PIPELINE_STAGE_TRANSFER_BIT | shaderStages, VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &download, 0, nullptr, 0, nullptr);
+    if (writes || !mergePasses) context.drawQueue->EndPass();
     timing.Mark("command_record");
     context.drawQueue->Enqueue(std::move(resources), std::move(storage));
     timing.Mark("enqueue");

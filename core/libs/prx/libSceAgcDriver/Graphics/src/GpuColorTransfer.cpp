@@ -1,6 +1,8 @@
 #include "prx/libSceAgcDriver/Graphics/include/GpuColorTransfer.hpp"
 #include "prx/libSceAgcDriver/Graphics/shaders/ColorTransfer_spv.h"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/GuestBufferCache.hpp"
+#include <cstdlib>
 #include <array>
 #include <cstring>
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
@@ -96,13 +98,32 @@ void GpuColorTransfer::prepare(std::uint32_t newWidth, std::uint32_t newHeight, 
     mode = newMode;
 }
 
-void GpuColorTransfer::Upload(std::uint64_t address, std::uint32_t newWidth, std::uint32_t newHeight, ColorTileMode newMode) {
+bool GpuColorTransfer::UploadView(std::uint64_t address, std::uint32_t newWidth, std::uint32_t newHeight, ColorTileMode newMode) {
+    static const bool viewsEnabled = std::getenv("ANYPS5_NO_TARGET_GUEST_VIEW") == nullptr; // diagnostics
+    if (!viewsEnabled || context.guestBufferCache == nullptr) return false;
+    PerformanceTimer timing("ColorTransfer.UploadView");
+    const ColorTargetLayout layout(newWidth, newHeight, newMode);
+    auto view = context.guestBufferCache->HostRange(address, layout.Bytes());
+    if (!view.buffer) return false;
+    GuestMemory::CheckRange(reinterpret_cast<const void*>(address), static_cast<std::size_t>(layout.Bytes()), layout.Alignment());
+    prepare(newWidth, newHeight, newMode);
+    Require(upload->Bytes().size() <= layout.Bytes(), "color upload exceeds its guest surface");
+    uploadSource = std::move(view.buffer);
+    uploadSourceOffset = view.offset;
+    timing.Mark("guest_view", layout.Bytes());
+    return true;
+}
+
+bool GpuColorTransfer::Upload(std::uint64_t address, std::uint32_t newWidth, std::uint32_t newHeight, ColorTileMode newMode) {
+    if (UploadView(address, newWidth, newHeight, newMode)) return true;
     PerformanceTimer timing("ColorTransfer.Upload");
     prepare(newWidth, newHeight, newMode);
     timing.Mark("prepare");
     const ColorTargetLayout layout(width, height, mode);
+    uploadSource.reset();
     GuestMemory::Read(address, upload->Bytes(), layout.Alignment());
     timing.Mark("guest_read", layout.Bytes());
+    return false;
 }
 
 void GpuColorTransfer::convert(VkCommandBuffer commands, bool toTiled, bool swapRedBlue) {
@@ -129,8 +150,8 @@ void GpuColorTransfer::Detile(VkCommandBuffer commands, bool swapRedBlue) {
     before.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
     before.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
     context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(commands, VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &before, 0, nullptr, 0, nullptr);
-    const VkBufferCopy copy{0, 0, upload->Bytes().size()};
-    context.Function<PFN_vkCmdCopyBuffer>("vkCmdCopyBuffer")(commands, upload->Handle(), tiled->Handle(), 1, &copy);
+    const VkBufferCopy copy{uploadSource ? uploadSourceOffset : 0, 0, upload->Bytes().size()};
+    context.Function<PFN_vkCmdCopyBuffer>("vkCmdCopyBuffer")(commands, uploadSource ? uploadSource->Handle() : upload->Handle(), tiled->Handle(), 1, &copy);
     convert(commands, false, swapRedBlue);
 }
 

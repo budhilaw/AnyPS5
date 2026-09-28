@@ -6,6 +6,7 @@
 #include "prx/libc/include/GuestAllocations.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/GuestBufferCache.hpp"
 #include <memory>
+#include <limits>
 #include <vector>
 
 namespace AgcDriver::Graphics {
@@ -29,8 +30,14 @@ public:
     void Upload(bool addressable);
     VkDescriptorBufferInfo Descriptor(std::uint64_t address, std::size_t bytes) const;
     std::vector<ShaderRecompiler::BdaAbi::Range> AddressRanges() const;
-    void WriteBack();
+    // `sequence` orders the work in the draw queue: resident render targets the GPU refreshed
+    // from guest memory after it already hold what it wrote in place (their watch is skipped).
+    void WriteBack(std::uint64_t sequence = std::numeric_limits<std::uint64_t>::max());
+    // Whether writes the host copies back after completion (not in place) overlap the range.
+    bool WritesOverlapCopied(std::uint64_t address, std::size_t bytes) const;
     bool WritesOverlap(std::uint64_t address, std::size_t bytes) const;
+    bool HasWrites() const { return !writes.empty(); }
+    const std::vector<std::pair<std::uint64_t, std::uint64_t>>& WriteRanges() const { return writes; }
 
 private:
     struct Region {
@@ -44,6 +51,9 @@ private:
         // The buffer starts `padding` bytes before `begin` so that views taken from 256-byte
         // aligned guest addresses satisfy any storage buffer offset alignment.
         std::uint64_t padding = 0;
+        // Where `begin - padding` lies in `buffer` (a whole imported guest mapping is shared).
+        std::uint64_t bufferOffset = 0;
+        bool inPlace = false;  // the buffer is guest memory itself (no copy in either direction)
     };
 
     void validate(std::uint64_t address, std::size_t bytes) const;
@@ -51,6 +61,12 @@ private:
     GuestAllocations::Lease lease;
     std::vector<Region> regions;
     std::vector<std::pair<std::uint64_t, std::uint64_t>> writes;
+    struct Access {
+        std::uint64_t address;
+        std::size_t bytes;
+        bool writable;
+    };
+    std::vector<Access> accesses;  // guest ranges added, resolved for the device at upload
     bool uploaded = false;
     bool committed = false;
 };

@@ -12,7 +12,11 @@ public:
     Pipeline(const Pipeline&) = delete;
     Pipeline& operator=(const Pipeline&) = delete;
     VkPipelineLayout Layout() const;
-    void Begin(VkCommandBuffer commands, VkExtent2D extent) const;
+    // Begins a render pass instance on the pipeline's attachments; pipelines with the same
+    // attachment formats are compatible with it and may draw in it.
+    void BeginPass(VkCommandBuffer commands, VkExtent2D extent) const;
+    void Bind(VkCommandBuffer commands) const;
+    VkPipeline Handle() const { return pipeline; }
 private:
     VkClearValue clearValues[9]{};
     std::uint32_t clearValueCount = 0;

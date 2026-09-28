@@ -206,7 +206,7 @@ VkPipelineLayout Pipeline::Layout() const {
     return layout;
 }
 
-void Pipeline::Begin(VkCommandBuffer commands, VkExtent2D extent) const {
+void Pipeline::BeginPass(VkCommandBuffer commands, VkExtent2D extent) const {
     VkRenderPassBeginInfo begin{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
     begin.renderPass = renderPass;
     begin.framebuffer = framebuffer;
@@ -214,6 +214,9 @@ void Pipeline::Begin(VkCommandBuffer commands, VkExtent2D extent) const {
     begin.clearValueCount = clearValueCount;
     begin.pClearValues = clearValues;
     context.Function<PFN_vkCmdBeginRenderPass>("vkCmdBeginRenderPass")(commands, &begin, VK_SUBPASS_CONTENTS_INLINE);
+}
+
+void Pipeline::Bind(VkCommandBuffer commands) const {
     context.Function<PFN_vkCmdBindPipeline>("vkCmdBindPipeline")(commands, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
 }
 

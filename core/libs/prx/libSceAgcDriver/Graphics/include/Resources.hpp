@@ -77,6 +77,10 @@ public:
     // Moves the image into the attachment layout (first use starts undefined); every draw
     // prepares it, so this also counts the generations that sampled copies compare against.
     void Prepare(VkCommandBuffer commands);
+    // Whether a draw in the open render pass can use it as is (Prepare would record nothing but
+    // the barrier the pass makes redundant); Continue then counts the draw's generation.
+    bool Attached() const { return layout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL; }
+    void Continue() { ++generation; }
     // Moves the image into another layout (copies for sampling).
     void Transition(VkCommandBuffer commands, VkImageLayout newLayout);
     std::uint64_t Generation() const { return generation; }
