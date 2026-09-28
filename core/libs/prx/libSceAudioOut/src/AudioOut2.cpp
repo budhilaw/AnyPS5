@@ -30,6 +30,7 @@ constexpr std::uint32_t OutputChannels = 2;
 constexpr std::uint32_t TargetLatencyGrains = 8;
 constexpr std::uint32_t PORT_TYPE_VIBRATION = 10;
 constexpr std::uint32_t PORT_TYPE_PADSPK = 4;
+constexpr std::uint32_t PORT_TYPE_HAPTICS = 6;  // DualSense haptics as two-channel audio: not for speakers
 
 // Port attribute ids of the console's API: the data attribute's value is the address of a
 // pointer variable holding the grain buffer.
@@ -113,7 +114,7 @@ float sample(const Port& port, std::uint32_t frame, std::uint32_t channel) {
 
 // Mixes a port's grain into a stereo buffer: 7.1 layouts fold their surround channels down.
 void mixPort(Port& port, std::vector<float>& mix) {
-    if (port.data == nullptr || port.type == PORT_TYPE_VIBRATION) return;
+    if (port.data == nullptr || port.type == PORT_TYPE_VIBRATION || port.type == PORT_TYPE_HAPTICS) return;
     if (!port.typeSettled) {
         // Float samples of a mix stay within a few units; the same bytes read as floats from 16-bit
         // data are mostly denormals, huge values or NaNs. A fade-in has some tiny floats too: count.
