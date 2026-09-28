@@ -624,6 +624,18 @@ private:
         timing.Mark("request_memory");
         auto compiled = ShaderRecompiler::Recompile(request);
         timing.Mark(compiled.cacheHit ? "shader_cache_hit" : "shader_compile");
+        // ANYPS5_DUMP_COMPUTE_SPIRV=<directory>: every compute program's SPIR-V, once per address.
+        if (static const char* spirvDirectory = std::getenv("ANYPS5_DUMP_COMPUTE_SPIRV"); spirvDirectory != nullptr) {
+            static std::set<std::uint64_t> dumpedPrograms;
+            if (dumpedPrograms.insert(address).second) {
+                char name[64];
+                std::snprintf(name, sizeof(name), "/cs_%llx.spv", static_cast<unsigned long long>(address));
+                if (FILE* file = std::fopen((std::string(spirvDirectory) + name).c_str(), "wb")) {
+                    std::fwrite(compiled.spirv.data(), sizeof(std::uint32_t), compiled.spirv.size(), file);
+                    std::fclose(file);
+                }
+            }
+        }
         if (traceDispatch) {
             bool gds = false;
             for (const auto& binding : compiled.bindings) gds = gds || binding.role == ShaderRecompiler::DescriptorRole::Gds;

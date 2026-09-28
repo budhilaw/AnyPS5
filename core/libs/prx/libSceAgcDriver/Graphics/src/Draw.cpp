@@ -198,7 +198,11 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
         // ANYPS5_DUMP_FRAME diagnostics: the textures a small indexed draw (a UI quad) samples.
         static const bool journalTextures = std::getenv("ANYPS5_DUMP_FRAME") != nullptr;
         static const bool journalAllTextures = std::getenv("ANYPS5_JOURNAL_TEXTURES") != nullptr;
-        if (journalAllTextures || (journalTextures && draw.indexed && draw.indexCount <= 12)) GpuJournal::Record("  draw textures:" + resources->DescribeTextures());
+        if (journalAllTextures || (journalTextures && draw.indexed && draw.indexCount <= 12)) {
+            char head[200];
+            std::snprintf(head, sizeof(head), "draw %u%s -> 0x%llx %ux%u vk%u+%zu blend %u(%u,%u) depth %s mask 0x%x; textures:", draw.indexCount, draw.indexed ? "i" : "a", state.hasColorTarget ? static_cast<unsigned long long>(state.color.address) : 0ull, state.renderExtent.width, state.renderExtent.height, state.hasColorTarget ? static_cast<unsigned>(state.color.format) : 0u, state.extraColors.size(), state.blend.blendEnable, static_cast<unsigned>(state.blend.srcColorBlendFactor), static_cast<unsigned>(state.blend.dstColorBlendFactor), state.hasDepthTarget ? (state.depthState.write ? "rw" : "r") : "-", state.blend.colorWriteMask);
+            GpuJournal::Record(head + resources->DescribeTextures());
+        }
         // ANYPS5_DEBUG_GDS_INPUTS: the small textures (exposure, parameters) a large draw reads.
         static const char* debugInputsValue = std::getenv("ANYPS5_DEBUG_GDS_INPUTS");
         static const auto debugStart = std::chrono::steady_clock::now();

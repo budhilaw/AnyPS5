@@ -82,6 +82,9 @@ struct VulkanDevice::State {
     VkFence acquireFence = VK_NULL_HANDLE;
     VkFence renderFence = VK_NULL_HANDLE;
     bool renderPending = false;  // the last presentation's commands may still execute
+    // The render target the last presentation copies from, kept until those commands completed
+    // (the render cache may drop the target meanwhile: the title reuses its memory).
+    std::shared_ptr<Graphics::ResidentColor> presentedTarget;
     // Ranges host accesses have to resolve (see NeedsResolve), republished under the memory
     // tracking lock by the entry points that change them.
     mutable std::mutex hostRangesMutex;
@@ -820,6 +823,14 @@ void VulkanDevice::present(std::uint32_t width, std::uint32_t height, bool opaqu
     }
     state->PublishHostRanges();
     timing.Mark("draw_wait");
+    // The previous presentation's commands must be done before its command buffer, staging
+    // buffers and scaler image are reused.
+    if (state->renderPending) {
+        check(state->DeviceFunction<PFN_vkWaitForFences>("vkWaitForFences")(state->device, 1, &state->renderFence, VK_TRUE, std::numeric_limits<std::uint64_t>::max()), "vkWaitForFences previous presentation");
+        state->renderPending = false;
+    }
+    state->presentedTarget.reset();
+    timing.Mark("previous_present_wait");
     require(state->swapchain != VK_NULL_HANDLE, "device has no swapchain");
     require(state->extent.width != 0 && state->extent.height != 0, "output window is minimized");
     std::shared_ptr<Graphics::ResidentColor> resident;
@@ -843,6 +854,8 @@ void VulkanDevice::present(std::uint32_t width, std::uint32_t height, bool opaqu
             if (!dumped && colon != nullptr && std::chrono::duration<double>(std::chrono::steady_clock::now() - dumpStart).count() >= std::atof(dumpAt)) {
                 dumped = true;
                 state->renderCache->DumpTargets(colon + 1);
+                state->textureCache->DumpTextures(colon + 1);
+                GpuJournal::Dump("targets dumped: last GPU work, oldest first");
                 APS5_LOG_OUT("dumped the resident color targets to %s", colon + 1);
             }
         }
@@ -898,13 +911,6 @@ void VulkanDevice::present(std::uint32_t width, std::uint32_t height, bool opaqu
     timing.Mark("pixel_upload");
     auto wait = state->DeviceFunction<PFN_vkWaitForFences>("vkWaitForFences");
     auto reset = state->DeviceFunction<PFN_vkResetFences>("vkResetFences");
-    // The previous presentation's commands must be done before its command buffer and staging
-    // are reused.
-    if (state->renderPending) {
-        check(wait(state->device, 1, &state->renderFence, VK_TRUE, std::numeric_limits<std::uint64_t>::max()), "vkWaitForFences previous presentation");
-        state->renderPending = false;
-    }
-    timing.Mark("previous_present_wait");
     const std::array<VkFence, 2> fences{state->acquireFence, state->renderFence};
     check(reset(state->device, static_cast<std::uint32_t>(fences.size()), fences.data()), "vkResetFences");
     std::uint32_t index = 0;
@@ -983,6 +989,7 @@ void VulkanDevice::present(std::uint32_t width, std::uint32_t height, bool opaqu
     timing.Mark("queue_submit");
     if (AsyncFlips()) {
         state->renderPending = true;  // the present waits on `rendered`; the host does not
+        state->presentedTarget = resident;
     } else {
         check(wait(state->device, 1, &state->renderFence, VK_TRUE, std::numeric_limits<std::uint64_t>::max()), "vkWaitForFences clear");
         timing.Mark("render_fence_wait");

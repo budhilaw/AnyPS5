@@ -44,6 +44,11 @@ void TranslationContext::sSaveexec(const RdnaInstruction& inst, IrOpcode operati
     ir.SetExec(nonZero.Value());
 }
 
+IrU1 TranslationContext::carryInMask(const RdnaInstruction& inst) {
+    if (inst.sourceCount >= 3u) return readMask(sourceAt(inst, 2u));
+    return IrU1(ir.GetVcc());
+}
+
 void TranslationContext::addU32(const RdnaInstruction& inst, bool vector, bool useCarryIn) {
     const IrU32 lhs = readU32(sourceAt(inst, 0u));
     const IrU32 rhs = readU32(sourceAt(inst, 1u));
@@ -60,7 +65,9 @@ void TranslationContext::addU32(const RdnaInstruction& inst, bool vector, bool u
         ir.SetScc(carryOut.Value());
         return;
     }
-    const IrU1 carryIn = vector ? IrU1(ir.GetVcc()) : IrU1(ir.GetScc());
+    // The VOP3B form names its carry-in lane mask in src2 (the VOP2 form reads VCC, which the
+    // decoder records there too): it is not the carry-out of the previous instruction.
+    const IrU1 carryIn = vector ? carryInMask(inst) : IrU1(ir.GetScc());
     const IrU32 carryInU32(ir.Select(carryIn.Value(), ir.Constant(1u), ir.Constant(0u)));
     IrValue& secondAdd = ir.Emit(IrOpcode::IAddCarry32, IrType::U32x2, {&sum.Value(), &carryInU32.Value()});
     const IrU32 result(ir.Emit(IrOpcode::CompositeExtractU32x2, IrType::U32, {&secondAdd, &ir.Constant(0u)}));
@@ -94,7 +101,7 @@ void TranslationContext::subbU32(const RdnaInstruction& inst, bool vector, bool 
     const IrU32 second = readU32(sourceAt(inst, 1u));
     const IrU32& lhs = reverse ? second : first;
     const IrU32& rhs = reverse ? first : second;
-    const IrU1 borrowIn = vector ? IrU1(ir.GetVcc()) : IrU1(ir.GetScc());
+    const IrU1 borrowIn = vector ? carryInMask(inst) : IrU1(ir.GetScc());
     const IrU32 borrowInU32(ir.Select(borrowIn.Value(), ir.Constant(1u), ir.Constant(0u)));
     const IrU32 partial(ir.ISub(lhs.Value(), rhs.Value()));
     const IrU1 firstBorrow(ir.ULessThan(lhs.Value(), rhs.Value()));

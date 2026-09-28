@@ -193,6 +193,8 @@ private:
     void sSubvectorLoop(const RdnaInstruction& inst, bool begin);
     void sSaveexec(const RdnaInstruction& inst, IrOpcode operation, bool negateExec, bool negateSource, bool write64);
     void addU32(const RdnaInstruction& inst, bool vector, bool useCarryIn);
+    // The per-lane carry (or borrow) input of a vector add/subtract with carry.
+    IrU1 carryInMask(const RdnaInstruction& inst);
     void subU32(const RdnaInstruction& inst, bool vector, bool reverse);
     void subbU32(const RdnaInstruction& inst, bool vector, bool reverse);
     void sAbsdiffI32(const RdnaInstruction& inst);
