@@ -53,6 +53,8 @@ struct InstanceState {
     std::uint32_t skip = 0;  // gapless: samples per channel still to drop at the stream start
     std::uint32_t gaplessTotal = 0;
     std::uint16_t gaplessSkip = 0;
+    int frameIndex = 0;  // position in the current superframe, which may span jobs
+    std::size_t superframeUsed = 0;
 };
 std::map<std::uint32_t, InstanceState> instanceStates;
 std::uint32_t nextContext = 1, nextInstance = 1, nextBatch = 1;
@@ -71,14 +73,22 @@ int append(AjmBatchInfo* info, Job job) {
 }
 
 // Restarts the stream with the configuration the decoder was initialized with.
+void resetDecoder(InstanceState& state) {
+    state.frameIndex = 0;
+    state.superframeUsed = 0;
+    if (state.decoder != nullptr) Atrac9InitDecoder(state.decoder, state.info.configData);
+}
+
 void restart(InstanceState& state) {
     state.decoded = 0;
-    if (state.decoder != nullptr) Atrac9InitDecoder(state.decoder, state.info.configData);
+    resetDecoder(state);
 }
 
 void initialize(InstanceState& state, const std::uint8_t* config, std::size_t bytes) {
     state.decoded = 0;
     state.skip = 0;
+    state.frameIndex = 0;
+    state.superframeUsed = 0;
     if (config == nullptr || bytes < ATRAC9_CONFIG_DATA_SIZE || config[0] != 0xFE) return;
     if (state.decoder == nullptr) state.decoder = Atrac9GetHandle();
     unsigned char data[ATRAC9_CONFIG_DATA_SIZE];
@@ -91,31 +101,41 @@ void initialize(InstanceState& state, const std::uint8_t* config, std::size_t by
     state.channels = static_cast<std::uint32_t>(state.info.channels);
 }
 
-// Decodes the whole superframes of `input` in order into `output` after the gapless skip, zero
+// Decodes frames of `input` in order into `output` after the gapless skip while they fit, zero
 // filling the rest; returns the input bytes consumed and the PCM bytes written.
 std::pair<std::size_t, std::size_t> decode(InstanceState& state, const std::vector<std::uint8_t>& input, std::size_t bytes, const std::vector<std::pair<std::uint8_t*, std::size_t>>& output) {
     const std::size_t sampleBytes = state.format == 0 ? 2 : 4;
     const auto& info = state.info;
+    std::size_t room = 0;
+    for (const auto& [pointer, size] : output) room += pointer != nullptr ? size : 0;
     std::vector<std::uint8_t> pcm;
     std::size_t consumed = 0;
     if (state.decoder != nullptr && info.superframeSize > 0 && info.framesInSuperframe > 0) {
         const auto frameBytes = static_cast<std::size_t>(info.frameSamples) * info.channels * sampleBytes;
         std::vector<std::uint8_t> frame(frameBytes);
-        for (std::size_t superframe = 0; superframe + info.superframeSize <= bytes; superframe += info.superframeSize) {
-            std::size_t position = superframe;
-            for (int index = 0; index < info.framesInSuperframe && position < superframe + info.superframeSize; ++index) {
-                int used = 0;
-                const auto* bits = input.data() + position;
-                const int status = state.format == 0 ? Atrac9Decode(state.decoder, bits, reinterpret_cast<short*>(frame.data()), &used, 0)
-                    : state.format == 1 ? Atrac9DecodeS32(state.decoder, bits, reinterpret_cast<int*>(frame.data()), &used, 0)
-                    : Atrac9DecodeF32(state.decoder, bits, reinterpret_cast<float*>(frame.data()), &used, 0);
-                if (status != 0 || used <= 0) break;
-                position += static_cast<std::size_t>(used);
-                const auto dropped = std::min<std::uint32_t>(state.skip, static_cast<std::uint32_t>(info.frameSamples));
-                state.skip -= dropped;
-                pcm.insert(pcm.end(), frame.begin() + dropped * info.channels * sampleBytes, frame.end());
+        while (consumed < bytes) {
+            const auto dropped = std::min<std::uint32_t>(state.skip, static_cast<std::uint32_t>(info.frameSamples));
+            if (pcm.size() + frameBytes - dropped * info.channels * sampleBytes > room) break;
+            int used = 0;
+            const auto* bits = input.data() + consumed;
+            const int status = state.format == 0 ? Atrac9Decode(state.decoder, bits, reinterpret_cast<short*>(frame.data()), &used, 0)
+                : state.format == 1 ? Atrac9DecodeS32(state.decoder, bits, reinterpret_cast<int*>(frame.data()), &used, 0)
+                : Atrac9DecodeF32(state.decoder, bits, reinterpret_cast<float*>(frame.data()), &used, 0);
+            if (status != 0 || used <= 0 || consumed + static_cast<std::size_t>(used) > bytes) {
+                // A damaged or cut frame: go on at the next superframe with a clean decoder.
+                consumed += info.superframeSize - std::min<std::size_t>(state.superframeUsed, info.superframeSize);
+                resetDecoder(state);
+                continue;
             }
-            consumed = superframe + info.superframeSize;
+            consumed += static_cast<std::size_t>(used);
+            state.superframeUsed += static_cast<std::size_t>(used);
+            if (++state.frameIndex == info.framesInSuperframe) {
+                consumed += info.superframeSize - std::min<std::size_t>(state.superframeUsed, info.superframeSize);
+                state.frameIndex = 0;
+                state.superframeUsed = 0;
+            }
+            state.skip -= dropped;
+            pcm.insert(pcm.end(), frame.begin() + dropped * info.channels * sampleBytes, frame.end());
         }
     }
     std::size_t cursor = 0;
@@ -126,7 +146,7 @@ std::pair<std::size_t, std::size_t> decode(InstanceState& state, const std::vect
         std::memset(pointer + copied, 0, size - copied);
         cursor += copied;
     }
-    return {consumed, cursor};
+    return {std::min(consumed, bytes), cursor};
 }
 
 void complete(const Job& job) {
