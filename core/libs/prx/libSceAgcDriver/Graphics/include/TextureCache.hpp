@@ -4,6 +4,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/Texture.hpp"
 #include <array>
 #include <list>
+#include <unordered_map>
 #include <map>
 #include <memory>
 #include <vector>
@@ -43,9 +44,16 @@ private:
     };
     void trim();
     std::list<Entry>::iterator eraseEntry(std::list<Entry>::iterator it);
+    // The entry for a descriptor and view shape (entries of stale surfaces met on the way go),
+    // or entries.end(). Draws look up hundreds of textures a frame among thousands of entries.
+    std::list<Entry>::iterator findEntry(const std::array<std::uint32_t, 8>& descriptor, TextureDimension viewDimension);
+    void addEntry(Entry entry);
+    static std::uint64_t descriptorHash(const std::array<std::uint32_t, 8>& descriptor);
     static bool SameSurface(const GuestTextureResource& a, const GuestTextureResource& b);
     Context context;
     std::list<Entry> entries;
+    std::unordered_multimap<std::uint64_t, std::list<Entry>::iterator> index;  // by descriptorHash
+    std::uint32_t lookupsSinceSweep = 0;
     std::map<TextureDimension, std::shared_ptr<Texture>> nulls;
     std::uint64_t retainedBytes = 0;
     std::uint64_t budget;

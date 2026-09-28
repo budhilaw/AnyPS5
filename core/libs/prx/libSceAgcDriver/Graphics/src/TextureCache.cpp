@@ -37,7 +37,45 @@ void TextureCache::trim() {
 
 std::list<TextureCache::Entry>::iterator TextureCache::eraseEntry(std::list<Entry>::iterator it) {
     retainedBytes -= it->retained;
+    auto [first, last] = index.equal_range(descriptorHash(it->descriptor));
+    for (; first != last; ++first) {
+        if (first->second == it) {
+            index.erase(first);
+            break;
+        }
+    }
     return entries.erase(it);
+}
+
+std::uint64_t TextureCache::descriptorHash(const std::array<std::uint32_t, 8>& descriptor) {
+    std::uint64_t hash = 1469598103934665603ull;
+    for (const auto word : descriptor) hash = (hash ^ word) * 1099511628211ull;
+    return hash;
+}
+
+void TextureCache::addEntry(Entry entry) {
+    const auto hash = descriptorHash(entry.descriptor);
+    entries.push_back(std::move(entry));
+    index.emplace(hash, std::prev(entries.end()));
+}
+
+std::list<TextureCache::Entry>::iterator TextureCache::findEntry(const std::array<std::uint32_t, 8>& descriptor, TextureDimension viewDimension) {
+    // Entries of surfaces the guest rewrote go when met; a periodic sweep collects the others.
+    if (++lookupsSinceSweep >= 1024) {
+        lookupsSinceSweep = 0;
+        for (auto it = entries.begin(); it != entries.end();) it = it->surface && it->surface->stale ? eraseEntry(it) : std::next(it);
+    }
+    auto [first, last] = index.equal_range(descriptorHash(descriptor));
+    while (first != last) {
+        const auto it = first->second;
+        ++first;
+        if (it->surface && it->surface->stale) {
+            eraseEntry(it);
+            continue;
+        }
+        if (it->descriptor == descriptor && it->viewDimension == viewDimension) return it;
+    }
+    return entries.end();
 }
 
 bool TextureCache::SameSurface(const GuestTextureResource& a, const GuestTextureResource& b) {
@@ -61,8 +99,7 @@ std::shared_ptr<Texture> TextureCache::Get(std::span<const std::uint32_t> words,
             std::snprintf(text, sizeof(text), "AGC graphics: depth swizzled texture at 0x%llx (%ux%u format 0x%x, %u mips) does not name a resident depth target; targets:", static_cast<unsigned long long>(resource.baseAddress), resource.width, resource.height, resource.format, resource.mipCount);
             throw std::runtime_error(text + (context.renderCache ? context.renderCache->DescribeDepthTargets() : std::string(" (no render cache)")));
         }
-        for (auto it = entries.begin(); it != entries.end(); ++it) {
-            if (it->descriptor != key || it->viewDimension != resource.viewDimension) continue;
+        if (const auto it = findEntry(key, resource.viewDimension); it != entries.end()) {
             if (it->depthSource.lock() == depthSource && it->generation == depthSource->Generation()) {
                 auto result = it->texture;
                 entries.splice(entries.end(), entries, it);
@@ -70,16 +107,17 @@ std::shared_ptr<Texture> TextureCache::Get(std::span<const std::uint32_t> words,
                 return result;
             }
             eraseEntry(it);
-            break;
         }
         auto texture = std::make_shared<Texture>(context, depthSource, stencil, resource, components);
-        entries.push_back({key, resource.viewDimension, texture, nullptr, {}, depthSource, depthSource->Generation(), texture->AllocationBytes()});
+        addEntry({key, resource.viewDimension, texture, nullptr, {}, depthSource, depthSource->Generation(), texture->AllocationBytes()});
         retainedBytes += texture->AllocationBytes();
         trim();
         timing.Mark("depth_copy");
         return texture;
     }
     auto source = context.renderCache ? context.renderCache->Find(resource.baseAddress) : nullptr;
+    // A 1D descriptor of a one-row target samples a copy of the row (no 1D view of a 2D image).
+    bool rowCopy = false;
     if (source) {
         const auto& color = source->Description();
         // Shader access happens in the general layout; the transition joins the pending batch so
@@ -87,22 +125,15 @@ std::shared_ptr<Texture> TextureCache::Get(std::span<const std::uint32_t> words,
         if (source->Layout() != VK_IMAGE_LAYOUT_GENERAL && context.drawQueue != nullptr) source->Transition(context.drawQueue->BeginBarrier(context), VK_IMAGE_LAYOUT_GENERAL);
         const auto compatibleTiling = (color.tileMode == ColorTileMode::RenderTarget && resource.tileMode == TextureTileMode::RenderTarget64KB) || (color.tileMode == ColorTileMode::Linear && resource.tileMode == TextureTileMode::kLinear) || (color.tileMode == ColorTileMode::ZOrder64KB && resource.tileMode == TextureTileMode::Depth64KB);
         const bool singleSlice = resource.dimension == TextureDimension::k2D || (resource.dimension == TextureDimension::k2DArray && resource.depthOrLastArray == 0);
-        if (!compatibleTiling || resource.width != color.extent.width || resource.height != color.extent.height || !singleSlice || resource.mipCount != 1 || resource.baseLevel != 0 || resource.baseArray != 0 || IsBlockCompressed(resource.format) || BytesPerElement(resource.format) != color.bytesPerPixel) {
+        rowCopy = resource.dimension == TextureDimension::k1D && color.extent.height == 1 && resource.height <= 1 && resource.width == color.extent.width && compatibleTiling && resource.mipCount == 1 && resource.baseLevel == 0 && resource.baseArray == 0 && !IsBlockCompressed(resource.format) && BytesPerElement(resource.format) == color.bytesPerPixel;
+        if (!rowCopy && (!compatibleTiling || resource.width != color.extent.width || resource.height != color.extent.height || !singleSlice || resource.mipCount != 1 || resource.baseLevel != 0 || resource.baseArray != 0 || IsBlockCompressed(resource.format) || BytesPerElement(resource.format) != color.bytesPerPixel)) {
             static int reported = 0;
             if (reported++ < 400) APS5_LOG_OUT("texture 0x%llx %ux%u format 0x%x tile %u mips %u dim %u (base level %u, base array %u, %u bpp) does not match the resident render target there (%ux%u tile %u bpp %u%s): sampled from guest memory", static_cast<unsigned long long>(resource.baseAddress), resource.width, resource.height, resource.format, static_cast<unsigned>(resource.tileMode), resource.mipCount, static_cast<unsigned>(resource.dimension), resource.baseLevel, resource.baseArray, BytesPerElement(resource.format), color.extent.width, color.extent.height, static_cast<unsigned>(color.tileMode), color.bytesPerPixel, color.gpuOnly ? ", GPU-only" : "");
             source.reset();
         }
     }
     static const bool traceTextures = std::getenv("ANYPS5_TRACE_TEXTURES") != nullptr;
-    for (auto it = entries.begin(); it != entries.end();) {
-        if (it->surface && it->surface->stale) {
-            it = eraseEntry(it);
-            continue;
-        }
-        if (it->descriptor != key || it->viewDimension != resource.viewDimension) {
-            ++it;
-            continue;
-        }
+    if (auto it = findEntry(key, resource.viewDimension); it != entries.end()) do {
         if (source || it->generation != 0) {
             // A direct view stays valid while the target keeps its image (draws in between do not
             // matter: the view reads the image itself).
@@ -110,6 +141,13 @@ std::shared_ptr<Texture> TextureCache::Get(std::span<const std::uint32_t> words,
                 auto result = it->texture;
                 entries.splice(entries.end(), entries, it);
                 timing.Mark("resident_hit");
+                return result;
+            }
+            // A copy is current until the target is drawn to again.
+            if (source && rowCopy && it->source.lock() == source && !it->texture->IsDirectView() && it->generation == source->Generation()) {
+                auto result = it->texture;
+                entries.splice(entries.end(), entries, it);
+                timing.Mark("row_copy_hit");
                 return result;
             }
             eraseEntry(it);
@@ -142,10 +180,18 @@ std::shared_ptr<Texture> TextureCache::Get(std::span<const std::uint32_t> words,
         surface.stale = true;
         eraseEntry(it);
         break;
+    } while (false);
+    if (source && rowCopy) {
+        auto texture = std::make_shared<Texture>(context, source, resource, components);
+        addEntry({key, resource.viewDimension, texture, nullptr, source, {}, source->Generation(), texture->AllocationBytes()});
+        retainedBytes += texture->AllocationBytes();
+        trim();
+        timing.Mark("row_copy");
+        return texture;
     }
     if (source) {
         auto texture = std::make_shared<Texture>(context, source, resource, components, Texture::DirectView{});
-        entries.push_back({key, resource.viewDimension, texture, nullptr, source, {}, source->Generation(), 0});
+        addEntry({key, resource.viewDimension, texture, nullptr, source, {}, source->Generation(), 0});
         trim();
         timing.Mark("resident_view");
         return texture;
@@ -170,7 +216,7 @@ std::shared_ptr<Texture> TextureCache::Get(std::span<const std::uint32_t> words,
         }
         auto surface = it->surface;
         auto texture = std::make_shared<Texture>(context, owner, resource, components);
-        entries.push_back({key, resource.viewDimension, texture, surface, {}, {}, 0, 0});
+        addEntry({key, resource.viewDimension, texture, surface, {}, {}, 0, 0});
         if (traceTextures) {
             static int reported = 0;
             if (reported++ < 2000) APS5_LOG_OUT("texture 0x%llx (format 0x%x %ux%u mips %u-%u of %u, dim %u) views the surface another descriptor detiled", static_cast<unsigned long long>(resource.baseAddress), resource.format, resource.width, resource.height, resource.baseLevel, resource.lastLevel, resource.mipCount, static_cast<unsigned>(resource.viewDimension));
@@ -201,7 +247,7 @@ std::shared_ptr<Texture> TextureCache::Get(std::span<const std::uint32_t> words,
     surface->snapshot = std::move(snapshot);
     surface->stamp = stamp;
     surface->texture = texture;
-    entries.push_back({key, resource.viewDimension, texture, surface, {}, {}, 0, retained});
+    addEntry({key, resource.viewDimension, texture, surface, {}, {}, 0, retained});
     retainedBytes += retained;
     trim();
     timing.Mark("miss_detile");

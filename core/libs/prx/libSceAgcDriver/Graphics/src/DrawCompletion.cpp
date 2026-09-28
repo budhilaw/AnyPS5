@@ -12,6 +12,13 @@
 namespace AgcDriver::Graphics {
 
 void DrawQueue::retire(Batch batch) {
+    // GPU time estimate: a batch runs from its submission (or the previous batch's completion)
+    // until the host saw its fence signalled; polling makes this an upper bound.
+    if (auto* frame = PerformanceContext::Current(); frame != nullptr && batch.commands) {
+        const auto begin = std::max(batch.commands->submittedAt, lastCompletion);
+        if (batch.commands->completedAt > begin) frame->Add(frame->Get("Graphics.GpuEstimate", "busy"), std::chrono::duration_cast<FrameTiming::Clock::duration>(batch.commands->completedAt - begin));
+        lastCompletion = std::max(lastCompletion, batch.commands->completedAt);
+    }
     PerformanceTimer timing("Graphics.DrawQueue.Retire");
     const GuestMemory::MemoryAccessScope suspended(nullptr, nullptr);
     Require(drawCount >= batch.entries.size(), "draw queue completion count underflow");

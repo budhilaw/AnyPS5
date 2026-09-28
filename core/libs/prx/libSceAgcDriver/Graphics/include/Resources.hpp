@@ -117,6 +117,11 @@ private:
     VkFence fence = VK_NULL_HANDLE;
     bool pending = false;
     bool submitted = false;
+public:
+    // When the batch was submitted and when the host saw it complete (a GPU time estimate).
+    std::chrono::nanoseconds submittedAt{};
+    std::chrono::nanoseconds completedAt{};
+private:
 };
 
 }

@@ -325,6 +325,7 @@ void CommandBatch::Submit() {
     Check(context.Function<PFN_vkQueueSubmit>("vkQueueSubmit")(context.queue, 1, &submission, fence), "vkQueueSubmit graphics");
     QueueSubmissionCounter().fetch_add(1, std::memory_order_relaxed);
     timing.Mark("queue_submit");
+    submittedAt = FrameTiming::Clock::now().time_since_epoch();
     pending = true;
     submitted = true;
 }
@@ -335,7 +336,10 @@ void CommandBatch::Wait() {
     PerformanceTimer timing("Graphics.Wait");
     const auto result = context.Function<PFN_vkWaitForFences>("vkWaitForFences")(context.device, 1, &fence, VK_TRUE, 5'000'000'000ULL);
     timing.Mark("fence_wait");
-    if (result == VK_SUCCESS || result == VK_ERROR_DEVICE_LOST) pending = false;
+    if (result == VK_SUCCESS || result == VK_ERROR_DEVICE_LOST) {
+        pending = false;
+        completedAt = FrameTiming::Clock::now().time_since_epoch();
+    }
     Check(result, "vkWaitForFences graphics");
 }
 

@@ -16,16 +16,19 @@ Texture::Texture(const Context& context, const std::shared_ptr<ResidentColor>& s
         // A single-slice 2D array descriptor (titles bind render targets that way for stereo-capable
         // shaders) views the same one-layer image as an array.
         const bool singleSliceArray = descriptor.dimension == TextureDimension::k2DArray && descriptor.depthOrLastArray == 0;
-        Require(source != nullptr && (descriptor.dimension == TextureDimension::k2D || singleSliceArray) && descriptor.mipCount == 1 && descriptor.baseLevel == 0 && descriptor.baseArray == 0, "invalid resident texture view");
+        // A 1D descriptor of a one-row target (a lookup table rendered each frame) reads the row
+        // the target holds: the swizzle maps the single row alike for both shapes.
+        const bool oneRow = descriptor.dimension == TextureDimension::k1D && source != nullptr && source->Description().extent.height == 1 && descriptor.height <= 1;
+        Require(source != nullptr && (descriptor.dimension == TextureDimension::k2D || singleSliceArray || oneRow) && descriptor.mipCount == 1 && descriptor.baseLevel == 0 && descriptor.baseArray == 0, "invalid resident texture view");
         const auto format = ResolveTextureFormat(descriptor.format);
         Require(!IsBlockCompressed(descriptor.format) && BytesPerElement(descriptor.format) == source->Description().bytesPerPixel, "resident texture copy requires a texel size matching the render target");
         VkFormatProperties properties{};
         context.formatProperties(context.physical, format, &properties);
         Require((properties.optimalTilingFeatures & (VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT)) == (VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT), "resident texture format does not support sampling and copies");
         VkImageCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
-        info.imageType = VK_IMAGE_TYPE_2D;
+        info.imageType = oneRow ? VK_IMAGE_TYPE_1D : VK_IMAGE_TYPE_2D;
         info.format = format;
-        info.extent = {descriptor.width, descriptor.height, 1};
+        info.extent = {descriptor.width, oneRow ? 1u : descriptor.height, 1};
         info.mipLevels = 1;
         info.arrayLayers = 1;
         info.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -51,7 +54,7 @@ Texture::Texture(const Context& context, const std::shared_ptr<ResidentColor>& s
         Check(context.Function<PFN_vkBindImageMemory>("vkBindImageMemory")(context.device, image, memory, 0), "vkBindImageMemory resident texture");
         VkImageViewCreateInfo viewInfo{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
         viewInfo.image = image;
-        viewInfo.viewType = descriptor.viewDimension == TextureDimension::k2DArray ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
+        viewInfo.viewType = oneRow ? VK_IMAGE_VIEW_TYPE_1D : descriptor.viewDimension == TextureDimension::k2DArray ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
         viewInfo.format = format;
         viewInfo.components = components;
         viewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
@@ -70,11 +73,26 @@ Texture::Texture(const Context& context, const std::shared_ptr<ResidentColor>& s
         barrier.subresourceRange = viewInfo.subresourceRange;
         const auto pipelineBarrier = context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier");
         pipelineBarrier(commands, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
-        VkImageCopy copy{};
-        copy.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-        copy.dstSubresource = copy.srcSubresource;
-        copy.extent = info.extent;
-        context.Function<PFN_vkCmdCopyImage>("vkCmdCopyImage")(commands, source->Target().Image(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+        if (oneRow) {
+            // Images of different types do not copy into each other: the row goes through a buffer.
+            const VkDeviceSize rowBytes = static_cast<VkDeviceSize>(descriptor.width) * source->Description().bytesPerPixel;
+            staging = std::make_unique<Buffer>(context, static_cast<std::size_t>(rowBytes), VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+            VkBufferImageCopy row{};
+            row.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            row.imageExtent = {descriptor.width, 1, 1};
+            context.Function<PFN_vkCmdCopyImageToBuffer>("vkCmdCopyImageToBuffer")(commands, source->Target().Image(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, staging->Handle(), 1, &row);
+            VkMemoryBarrier written{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+            written.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            written.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            pipelineBarrier(commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &written, 0, nullptr, 0, nullptr);
+            context.Function<PFN_vkCmdCopyBufferToImage>("vkCmdCopyBufferToImage")(commands, staging->Handle(), image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &row);
+        } else {
+            VkImageCopy copy{};
+            copy.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            copy.dstSubresource = copy.srcSubresource;
+            copy.extent = info.extent;
+            context.Function<PFN_vkCmdCopyImage>("vkCmdCopyImage")(commands, source->Target().Image(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+        }
         barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
         barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
         barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
@@ -83,7 +101,7 @@ Texture::Texture(const Context& context, const std::shared_ptr<ResidentColor>& s
         layout = barrier.newLayout;
         if (storageCapable) {
             storageFormat = format;
-            storageViewType = VK_IMAGE_VIEW_TYPE_2D;
+            storageViewType = oneRow ? VK_IMAGE_VIEW_TYPE_1D : VK_IMAGE_VIEW_TYPE_2D;
             storageRange = viewInfo.subresourceRange;
         }
         upload->Submit();

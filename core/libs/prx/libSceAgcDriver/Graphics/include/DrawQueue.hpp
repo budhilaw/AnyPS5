@@ -4,6 +4,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/ShaderResources.hpp"
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <functional>
 #include <vector>
 
@@ -81,6 +82,7 @@ private:
         const ShaderResources* resources;
     };
     std::vector<Writer> writers;
+    std::chrono::nanoseconds lastCompletion{};
     bool passOpen = false;
     RenderPassKey pass;
     VkPipeline boundPipeline = VK_NULL_HANDLE;
