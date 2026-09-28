@@ -12,7 +12,12 @@ public:
     static void Build(const RecompileRequest& request, std::vector<std::uint64_t>& key) {
         key.clear();
         append(key, request.shader.stage);
-        append(key, request.shader.code);
+        if (request.shader.codeHash != 0) {
+            append(key, request.shader.codeHash);
+            append(key, request.shader.code.size());
+        } else {
+            append(key, request.shader.code);
+        }
         append(key, request.context.waveSize);
         append(key, request.context.userDataBaseRegister);
         append(key, request.context.userData.size());

@@ -35,6 +35,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <unordered_map>
 
 namespace AgcDriver {
 namespace {
@@ -51,6 +52,27 @@ struct ShaderSnapshot {
     std::uint8_t type;
     std::vector<std::uint32_t> code;
     std::vector<std::byte> header;
+
+    struct CodeHashes {
+        std::mutex mutex;
+        std::unordered_map<std::size_t, std::uint64_t> byOffset;
+    };
+    std::shared_ptr<CodeHashes> hashes = std::make_shared<CodeHashes>();
+
+    // The hash of the code from `offset` (a program's start) to the end, computed once per
+    // program: shader cache keys use it rather than the code (never zero).
+    std::uint64_t CodeHash(std::size_t offset) const {
+        std::lock_guard lock(hashes->mutex);
+        if (const auto found = hashes->byOffset.find(offset); found != hashes->byOffset.end()) return found->second;
+        std::uint64_t hash = 0x9e3779b97f4a7c15ull ^ (code.size() - offset);
+        for (std::size_t i = offset; i < code.size(); ++i) {
+            hash = (hash ^ code[i]) * 0xff51afd7ed558ccdull;
+            hash ^= hash >> 32u;
+        }
+        if (hash == 0) hash = 1;
+        hashes->byOffset.emplace(offset, hash);
+        return hash;
+    }
 };
 
 struct Submission {
@@ -446,7 +468,7 @@ private:
         });
         const auto codeOffset = static_cast<std::size_t>((address - snapshot.codeAddress) / sizeof(std::uint32_t));
         ShaderRecompiler::RecompileRequest request{
-            {ShaderRecompiler::ShaderStage::Compute, address, std::span(snapshot.code).subspan(codeOffset), snapshot.headerAddress, snapshot.header},
+            {ShaderRecompiler::ShaderStage::Compute, address, std::span(snapshot.code).subspan(codeOffset), snapshot.headerAddress, snapshot.header, snapshot.CodeHash(codeOffset)},
             {(packet[4] & 0x8000u) != 0 ? 32u : 64u, 0, userData, compute, std::nullopt, std::nullopt, memory},
             device->Target(),
             {0, 0, 0, 128}
@@ -457,6 +479,8 @@ private:
         timing.Mark("shader_memory_capture");
         const auto captured = shaderMemory.Regions();
         request.context.memory = captured;
+        request.materializedSnapshot = &shaderMemory.Snapshot();
+        request.materializedSpecialization = &shaderMemory.Specialization();
         timing.Mark("request_memory");
         const auto compiled = ShaderRecompiler::Recompile(request);
         timing.Mark(compiled.cacheHit ? "shader_cache_hit" : "shader_compile");
@@ -547,7 +571,7 @@ private:
             require(userCount <= 32, "graphics user SGPR count exceeds the register bank");
             const auto codeOffset = static_cast<std::size_t>((address - snapshot.codeAddress) / sizeof(std::uint32_t));
             Program result{
-                {stage, address, std::span(snapshot.code).subspan(codeOffset), snapshot.headerAddress, snapshot.header},
+                {stage, address, std::span(snapshot.code).subspan(codeOffset), snapshot.headerAddress, snapshot.header, snapshot.CodeHash(codeOffset)},
                 userDataBase,
                 8,
                 {},
@@ -672,6 +696,8 @@ private:
             shaderTiming.Mark("memory_capture");
             memory = shaderMemory.Regions();
             request.context.memory = memory;
+            request.materializedSnapshot = &shaderMemory.Snapshot();
+            request.materializedSpecialization = &shaderMemory.Specialization();
             shaderTiming.Mark("request_memory");
             results.push_back(ShaderRecompiler::Recompile(request));
             shaderTiming.Mark(results.back().cacheHit ? "cache_hit" : "compile");

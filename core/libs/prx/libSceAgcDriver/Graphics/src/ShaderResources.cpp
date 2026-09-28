@@ -1,4 +1,5 @@
 #include "prx/libSceAgcDriver/Graphics/include/ShaderResources.hpp"
+#include "prx/libSceAgcDriver/Execution/include/MemoryAccessScope.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/RenderCache.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Resources.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureCache.hpp"
@@ -232,6 +233,9 @@ std::size_t ShaderResources::addGuestBuffer(std::span<const std::uint32_t> words
     static const bool keepDownloads = std::getenv("ANYPS5_NO_WRITE_ONLY_DISCARD") != nullptr; // diagnostics
     if (written && !read && !keepDownloads && context.renderCache != nullptr) context.renderCache->DiscardCovered(address, size);
     try {
+        // Only whether the range is mapped matters here: the device resolves the access when the
+        // guest memory uploads, knowing whether the GPU reads it in place.
+        const GuestMemory::MemoryAccessScope deferred(nullptr, nullptr);
         GuestMemory::CheckRange(reinterpret_cast<const void*>(address), size, 1, true);
     } catch (const std::exception& error) {
         // A descriptor over unmapped memory (a null descriptor with a baked-in offset): the

@@ -34,6 +34,7 @@ public:
     bool WritesOverlap(std::uint64_t address, std::size_t bytes) const { return guestMemory.WritesOverlap(address, bytes); }
     // Whether the shaders may store to memory or images (later work then needs a barrier).
     const std::vector<std::pair<std::uint64_t, std::uint64_t>>& WriteRanges() const { return guestMemory.WriteRanges(); }
+    bool HasGuestWrites() const { return guestMemory.HasWrites(); }
     bool Writes() const { return guestMemory.HasWrites() || storesImages || usesFaultBuffer; }
     const std::vector<std::uint32_t>& LayoutKey() const { return layoutKey; }
 

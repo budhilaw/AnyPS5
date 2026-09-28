@@ -5,8 +5,10 @@
 #include "prx/libSceAgcDriver/Execution/include/MemoryAccessScope.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <map>
+#include <optional>
 #include <mutex>
 #include <vector>
 #include <cstdlib>
@@ -61,12 +63,16 @@ void CheckRange(const void* pointer, std::size_t bytes, std::size_t alignment, b
         cursor = std::min(end, base + memory.RegionSize);
     }
 #elif defined(__APPLE__)
-    // The last readable and writable region this thread verified stays valid until a guest
-    // mapping changes (the epoch): shader memory is read a dword at a time, thousands per frame.
-    struct VerifiedRegion { std::uint64_t epoch = 0; std::uintptr_t first = 0; std::uintptr_t end = 0; };
-    thread_local VerifiedRegion verified;
+    // The last regions this thread verified stay valid until a guest mapping changes (the
+    // epoch): shader memory is read a dword at a time, thousands per frame, from a few mappings
+    // (the executable's data, the heaps, command memory) in turn.
+    struct VerifiedRegion { std::uint64_t epoch = 0; std::uintptr_t first = 0; std::uintptr_t end = 0; bool writable = false; };
+    thread_local std::array<VerifiedRegion, 8> verified{};
+    thread_local std::size_t nextVerified = 0;
     const auto epoch = GuestAllocations::GuestAllocationsMapEpoch_nid_postfix();
-    if (verified.epoch == epoch && address >= verified.first && end <= verified.end) return;
+    for (const auto& region : verified) {
+        if (region.epoch == epoch && address >= region.first && end <= region.end && (region.writable || !writable)) return;
+    }
     while (cursor < end) {
         mach_vm_address_t first = cursor;
         mach_vm_size_t size = 0;
@@ -86,8 +92,8 @@ void CheckRange(const void* pointer, std::size_t bytes, std::size_t alignment, b
             throw std::runtime_error(std::string("AGC driver: ") + message);
         }
         require(size <= std::numeric_limits<std::uintptr_t>::max() - first && first + size > cursor, "invalid guest memory mapping");
-        if ((info.protection & (VM_PROT_READ | VM_PROT_WRITE)) == (VM_PROT_READ | VM_PROT_WRITE) && first <= address && first + size >= end) {
-            verified = {epoch, static_cast<std::uintptr_t>(first), static_cast<std::uintptr_t>(first + size)};
+        if (first <= address && first + size >= end) {
+            verified[nextVerified++ % verified.size()] = {epoch, static_cast<std::uintptr_t>(first), static_cast<std::uintptr_t>(first + size), (info.protection & VM_PROT_WRITE) != 0};
         }
         cursor = std::min(end, static_cast<std::uintptr_t>(first + size));
     }
@@ -116,8 +122,11 @@ void CheckRange(const void* pointer, std::size_t bytes, std::size_t alignment, b
 }
 
 void Read(std::uint64_t address, std::span<std::byte> destination, std::size_t alignment) {
-    PerformanceTimer timing("GuestMemory.Read");
     if (destination.empty()) return;
+    // Shader setup reads descriptors a dword at a time, tens of thousands per frame: timing
+    // those would cost more than the reads.
+    std::optional<PerformanceTimer> timing;
+    if (destination.size() >= 4096) timing.emplace("GuestMemory.Read");
     // ANYPS5_TRACE_READ_CALLERS: bytes read per call site, the largest printed every 3 seconds.
     static const bool traceCallers = std::getenv("ANYPS5_TRACE_READ_CALLERS") != nullptr;
     if (traceCallers) {
@@ -143,9 +152,9 @@ void Read(std::uint64_t address, std::span<std::byte> destination, std::size_t a
     }
     const auto* source = reinterpret_cast<const void*>(address);
     CheckRange(source, destination.size(), alignment);
-    timing.Mark("range_check");
+    if (timing) timing->Mark("range_check");
     std::memcpy(destination.data(), source, destination.size());
-    timing.Mark("copy", destination.size());
+    if (timing) timing->Mark("copy", destination.size());
 }
 
 void Write(std::uint64_t address, std::span<const std::byte> source, std::size_t alignment) {

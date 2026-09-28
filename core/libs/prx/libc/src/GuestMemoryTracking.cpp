@@ -155,6 +155,20 @@ void GuestMemoryTrackingProtect_nid_postfix(void* handle, Protection protection)
 void GuestMemoryTrackingResolve_nid_postfix(std::uint64_t address, std::size_t bytes, bool writable) {
     if (bytes == 0) return;
     std::lock_guard lock(registry().mutex);
+    {
+        // Most checks touch no protected watch: find that out without building a list (the GPU
+        // driver checks every descriptor dword it reads).
+        const auto end = checkedEnd(address, bytes);
+        const auto& entries = registry().entries;
+        auto it = entries.upper_bound(address);
+        if (it != entries.begin()) --it;
+        bool needed = false;
+        for (; it != entries.end() && it->first < end && !needed; ++it) {
+            const auto& entry = *it->second;
+            needed = it->first + entry.bytes > address && (entry.protection == Protection::None || (writable && entry.protection == Protection::Read));
+        }
+        if (!needed) return;
+    }
     for (const auto& entry : overlapping(address, bytes)) {
         if (entry->protection == Protection::None || (writable && entry->protection == Protection::Read)) resolve(entry, writable ? Access::Write : Access::Read);
     }

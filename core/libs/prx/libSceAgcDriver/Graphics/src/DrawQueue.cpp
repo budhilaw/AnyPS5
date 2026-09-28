@@ -82,6 +82,7 @@ void DrawQueue::EndPass() {
 
 void DrawQueue::Enqueue(std::shared_ptr<ShaderResources> resources, std::shared_ptr<void> storage) {
     Require(recording.commands != nullptr && resources != nullptr && storage != nullptr, "draw batch is incomplete");
+    if (resources->HasGuestWrites()) writers.push_back({nextSequence, resources.get()});
     recording.entries.push_back({std::move(storage), std::move(resources), nextSequence++});
     ++drawCount;
     if (recording.entries.size() >= BatchDraws) Flush();
@@ -110,13 +111,13 @@ void DrawQueue::Flush() {
 }
 
 bool DrawQueue::WritesPending(std::uint64_t address, std::size_t bytes, std::uint64_t adoptedBefore) const {
-    const auto overlaps = [&](const auto& entry) { return entry.sequence < adoptedBefore ? entry.resources->WritesOverlapCopied(address, bytes) : entry.resources->WritesOverlap(address, bytes); };
-    return std::any_of(recording.entries.begin(), recording.entries.end(), overlaps) || std::any_of(pending.begin(), pending.end(), [&](const auto& batch) { return std::any_of(batch.entries.begin(), batch.entries.end(), overlaps); });
+    return std::any_of(writers.begin(), writers.end(), [&](const Writer& writer) { return writer.sequence < adoptedBefore ? writer.resources->WritesOverlapCopied(address, bytes) : writer.resources->WritesOverlap(address, bytes); });
 }
 
 void DrawQueue::Resolve(std::uint64_t address, std::size_t bytes, bool ordered) {
-    const auto overlaps = [&](const auto& entry) {
-        if (ordered ? !entry.resources->WritesOverlapCopied(address, bytes) : !entry.resources->WritesOverlap(address, bytes)) return false;
+    const auto overlaps = [&](const Writer& writer) {
+        const auto& resources = *writer.resources;
+        if (ordered ? !resources.WritesOverlapCopied(address, bytes) : !resources.WritesOverlap(address, bytes)) return false;
         // ANYPS5_TRACE_WAITS: the in-flight write ranges that make a target lookup wait (diagnostics).
         static const char* traceValue = std::getenv("ANYPS5_TRACE_WAITS");
         static const auto traceStart = std::chrono::steady_clock::now();
@@ -124,16 +125,16 @@ void DrawQueue::Resolve(std::uint64_t address, std::size_t bytes, bool ordered) 
         if (traceValue != nullptr && reported < 200 && std::chrono::duration<double>(std::chrono::steady_clock::now() - traceStart).count() >= std::atof(traceValue)) {
             ++reported;
             std::string ranges;
-            for (const auto& [begin, end] : entry.resources->WriteRanges()) {
+            for (const auto& [begin, end] : resources.WriteRanges()) {
                 char item[64];
                 std::snprintf(item, sizeof(item), " 0x%llx+0x%llx", static_cast<unsigned long long>(begin), static_cast<unsigned long long>(end - begin));
                 ranges += item;
             }
-            std::fprintf(stderr, "[resolve-wait] 0x%llx+0x%zx overlaps writes%s (ordered %d, copied %d)\n", static_cast<unsigned long long>(address), bytes, ranges.c_str(), ordered ? 1 : 0, entry.resources->WritesOverlapCopied(address, bytes) ? 1 : 0);
+            std::fprintf(stderr, "[resolve-wait] 0x%llx+0x%zx overlaps writes%s (ordered %d, copied %d)\n", static_cast<unsigned long long>(address), bytes, ranges.c_str(), ordered ? 1 : 0, resources.WritesOverlapCopied(address, bytes) ? 1 : 0);
         }
         return true;
     };
-    if (std::any_of(recording.entries.begin(), recording.entries.end(), overlaps) || std::any_of(pending.begin(), pending.end(), [&](const auto& batch) { return std::any_of(batch.entries.begin(), batch.entries.end(), overlaps); })) Wait();
+    if (std::any_of(writers.begin(), writers.end(), overlaps)) Wait();
 }
 
 

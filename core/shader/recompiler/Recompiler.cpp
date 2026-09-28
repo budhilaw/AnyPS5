@@ -285,7 +285,12 @@ RecompileResult RecompileImpl(const RecompileRequest& request) {
         return materializeResult(variant, request, snapshot);
     }
     const auto source = getSource(request);
-    materializer.Materialize(*source->plan, runtime, snapshot, specialization);
+    if (request.materializedSnapshot != nullptr && request.materializedSpecialization != nullptr) {
+        snapshot = *request.materializedSnapshot;
+        specialization = *request.materializedSpecialization;
+    } else {
+        materializer.Materialize(*source->plan, runtime, snapshot, specialization);
+    }
     std::shared_ptr<const CompiledVariant> variant;
     bool cacheHit = false;
     {

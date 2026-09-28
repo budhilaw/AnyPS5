@@ -11,6 +11,9 @@
 
 namespace ShaderRecompiler {
 
+struct ResourceSnapshot;
+struct ResourceSpecialization;
+
 enum class ShaderStage {
     Compute,
     Vertex,
@@ -33,6 +36,9 @@ struct ShaderBinary {
     std::span<const std::uint32_t> code;
     std::uint64_t headerAddress;
     std::span<const std::byte> header;
+    // Nonzero: a hash of `code` the caller computed once, which cache keys use in place of the
+    // code itself (it runs to the end of the registered binary: kilobytes per lookup otherwise).
+    std::uint64_t codeHash = 0;
 };
 
 struct ShaderComputeStageInfo {
@@ -203,6 +209,10 @@ struct RecompileRequest {
     BindingLayout layout;
     std::optional<GraphicsCompileContext> graphics;
     bool useCache = true;
+    // The request's resources as the caller materialized them from the same memory (reading
+    // them is how it captured that memory): a cached compile skips evaluating its plan again.
+    const ResourceSnapshot* materializedSnapshot = nullptr;
+    const ResourceSpecialization* materializedSpecialization = nullptr;
 };
 
 enum class DescriptorKind {

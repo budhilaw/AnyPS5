@@ -54,8 +54,8 @@ void ShaderMemory::Capture(const ShaderRecompiler::RecompileRequest& request) {
     runtime.userContext = this;
     runtime.readMemory = &read;
     runtime.readSpecializationMemory = &read;
-    ShaderRecompiler::ResourceSnapshot snapshot;
-    ShaderRecompiler::ResourceSpecialization specialization;
+    snapshot = {};
+    specialization = {};
     materializer.Materialize(*plan, runtime, snapshot, specialization);
 }
 

@@ -1,6 +1,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/DrawQueue.hpp"
 #include "prx/libSceAgcDriver/Execution/include/MemoryAccessScope.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -15,6 +16,10 @@ void DrawQueue::retire(Batch batch) {
     const GuestMemory::MemoryAccessScope suspended(nullptr, nullptr);
     Require(drawCount >= batch.entries.size(), "draw queue completion count underflow");
     drawCount -= batch.entries.size();
+    if (!batch.entries.empty()) {
+        const auto last = batch.entries.back().sequence;
+        writers.erase(writers.begin(), std::find_if(writers.begin(), writers.end(), [&](const Writer& writer) { return writer.sequence > last; }));
+    }
     for (auto& entry : batch.entries) entry.resources->WriteBack(entry.sequence);
     timing.Mark("resources_writeback");
     batch.entries.clear();

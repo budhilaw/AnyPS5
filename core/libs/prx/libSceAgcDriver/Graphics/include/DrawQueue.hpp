@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <functional>
+#include <vector>
 
 namespace AgcDriver::Graphics {
 
@@ -73,6 +74,13 @@ private:
     std::vector<std::unique_ptr<CommandBatch>> available;
     std::size_t drawCount = 0;
     std::uint64_t nextSequence = 1;
+    // Queued work that writes guest memory, oldest first (most draws write none): the range
+    // checks every guest read makes scan only these.
+    struct Writer {
+        std::uint64_t sequence;
+        const ShaderResources* resources;
+    };
+    std::vector<Writer> writers;
     bool passOpen = false;
     RenderPassKey pass;
     VkPipeline boundPipeline = VK_NULL_HANDLE;
