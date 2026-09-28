@@ -241,6 +241,7 @@ std::shared_ptr<Texture> TextureCache::Get(std::span<const std::uint32_t> words,
     const auto stamp = context.guestBufferCache != nullptr ? context.guestBufferCache->Track(resource.baseAddress, resource.baseAddress + bytes) : 0;
     GuestMemory::Read(resource.baseAddress, snapshot, 1);
     auto texture = std::make_shared<Texture>(context, *context.detiler, resource, components, snapshot);
+    if (context.drawQueue != nullptr) context.drawQueue->EnqueueUpload([texture] { texture->ReleaseUpload(); }, snapshot.size());
     const auto retained = snapshot.size() + texture->AllocationBytes();
     auto surface = std::make_shared<Surface>();
     surface->identity = resource;

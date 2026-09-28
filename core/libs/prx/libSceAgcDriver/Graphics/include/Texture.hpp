@@ -37,6 +37,8 @@ public:
     Texture& operator=(const Texture&) = delete;
 
     VkImageView View() const;
+    // Frees the detiling buffers once the GPU work that uploads the texture has completed.
+    void ReleaseUpload();
     // The image layout the texture rests in between uses (descriptors quote it).
     VkImageLayout Layout() const { return layout; }
     // A view for shader image loads and stores (identity swizzle, linear color space), or null when
@@ -95,6 +97,7 @@ private:
     bool ownsImage = true;
     bool directView = false;
     std::unique_ptr<Buffer> staging;
+    std::unique_ptr<Buffer> linear;
     std::unique_ptr<CommandBatch> upload;
 };
 

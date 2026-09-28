@@ -141,21 +141,26 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
         Check(context.Function<PFN_vkBindImageMemory>("vkBindImageMemory")(context.device, image, memory, 0), "vkBindImageMemory");
 
         {
-            Buffer staging(context, static_cast<std::size_t>(guestBytes), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-            std::memcpy(staging.Bytes().data(), snapshot.data(), snapshot.size());
-            Buffer linear(context, static_cast<std::size_t>(linearBytes), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+            // In the draw queue the buffers stay until the batch completes (ReleaseUpload).
+            staging = std::make_unique<Buffer>(context, static_cast<std::size_t>(guestBytes), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+            std::memcpy(staging->Bytes().data(), snapshot.data(), snapshot.size());
+            linear = std::make_unique<Buffer>(context, static_cast<std::size_t>(linearBytes), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
 
-            detiler.BeginBatch();
-            if (context.drawQueue) context.drawQueue->Flush();
-            CommandBatch batch(context);
-            const auto commands = batch.Handle();
+            std::unique_ptr<CommandBatch> batch;
+            VkCommandBuffer commands = VK_NULL_HANDLE;
+            if (context.drawQueue != nullptr) commands = context.drawQueue->Begin(context);
+            else {
+                detiler.BeginBatch();
+                batch = std::make_unique<CommandBatch>(context);
+                commands = batch->Handle();
+            }
 
             VkBufferMemoryBarrier stagingReadBarrier{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
             stagingReadBarrier.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
             stagingReadBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
             stagingReadBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
             stagingReadBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            stagingReadBarrier.buffer = staging.Handle();
+            stagingReadBarrier.buffer = staging->Handle();
             stagingReadBarrier.offset = 0;
             stagingReadBarrier.size = VK_WHOLE_SIZE;
 
@@ -164,7 +169,7 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
             linearWriteBarrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
             linearWriteBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
             linearWriteBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            linearWriteBarrier.buffer = linear.Handle();
+            linearWriteBarrier.buffer = linear->Handle();
             linearWriteBarrier.offset = 0;
             linearWriteBarrier.size = VK_WHOLE_SIZE;
 
@@ -175,7 +180,7 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
                 const auto guestLayerOffset = static_cast<std::uint64_t>(layer) * guestSliceBytes;
                 const auto linearLayerOffset = static_cast<std::uint64_t>(layer) * sliceLinearBytes;
                 for (const auto& mip : mips) {
-                    detiler.Dispatch(commands, descriptor.tileMode, elementBytes, staging.Handle(), guestLayerOffset + mip.tiledOffset, linear.Handle(), linearLayerOffset + mip.linearOffset, mip, layer);
+                    detiler.Dispatch(commands, descriptor.tileMode, elementBytes, staging->Handle(), guestLayerOffset + mip.tiledOffset, linear->Handle(), linearLayerOffset + mip.linearOffset, mip, layer);
                 }
             }
 
@@ -184,7 +189,7 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
             linearReadBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
             linearReadBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
             linearReadBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            linearReadBarrier.buffer = linear.Handle();
+            linearReadBarrier.buffer = linear->Handle();
             linearReadBarrier.offset = 0;
             linearReadBarrier.size = VK_WHOLE_SIZE;
 
@@ -216,7 +221,7 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
                     regions.push_back(region);
                 }
             }
-            context.Function<PFN_vkCmdCopyBufferToImage>("vkCmdCopyBufferToImage")(commands, linear.Handle(), image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, static_cast<std::uint32_t>(regions.size()), regions.data());
+            context.Function<PFN_vkCmdCopyBufferToImage>("vkCmdCopyBufferToImage")(commands, linear->Handle(), image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, static_cast<std::uint32_t>(regions.size()), regions.data());
 
             VkImageMemoryBarrier toShaderRead{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
             toShaderRead.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -229,7 +234,12 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
             toShaderRead.subresourceRange = toTransferDst.subresourceRange;
             context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1, &toShaderRead);
 
-            batch.SubmitAndWait();
+            if (batch != nullptr) {
+                batch->SubmitAndWait();
+                ReleaseUpload();
+            } else {
+                detiler.Retire(*context.drawQueue);
+            }
         }
 
         createGuestViews(descriptor, components, vkFormat, storageCapable);
@@ -306,9 +316,15 @@ VkImageView Texture::StorageView() {
     return storageView;
 }
 
+void Texture::ReleaseUpload() {
+    staging.reset();
+    linear.reset();
+}
+
 void Texture::release() noexcept {
     upload.reset();
     staging.reset();
+    linear.reset();
     if (storageView) context.Function<PFN_vkDestroyImageView>("vkDestroyImageView")(context.device, storageView, nullptr);
     if (view) context.Function<PFN_vkDestroyImageView>("vkDestroyImageView")(context.device, view, nullptr);
     if (ownsImage && image) context.Function<PFN_vkDestroyImage>("vkDestroyImage")(context.device, image, nullptr);

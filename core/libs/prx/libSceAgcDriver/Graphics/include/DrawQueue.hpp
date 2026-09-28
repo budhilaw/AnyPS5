@@ -40,6 +40,9 @@ public:
     // Runs `action` once the GPU work recorded so far has completed (the console's end-of-pipe
     // label writes). With nothing recorded or pending it runs at once.
     void EnqueueCompletion(std::function<void()> action);
+    // A completion for an upload recorded in the current batch; a batch carrying many upload
+    // bytes is submitted early to bound the staging memory in flight.
+    void EnqueueUpload(std::function<void()> release, std::size_t bytes);
     bool HasPending() const { return recording.commands != nullptr || !pending.empty(); }
     void Flush();
     // Waits for queued work that writes the range. With `ordered`, work that writes guest memory
@@ -70,6 +73,7 @@ private:
         std::vector<Entry> entries;
         std::unique_ptr<CommandBatch> commands;
         bool hasBarrier = false;
+        std::size_t uploadBytes = 0;
         std::vector<std::function<void()>> completions;
     };
     void retire(Batch batch);

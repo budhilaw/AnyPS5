@@ -100,6 +100,14 @@ void DrawQueue::EnqueueCompletion(std::function<void()> action) {
     action();
 }
 
+void DrawQueue::EnqueueUpload(std::function<void()> release, std::size_t bytes) {
+    constexpr std::size_t BatchUploadBytes = 64u << 20;
+    Require(recording.commands != nullptr, "upload recorded outside a batch");
+    recording.completions.push_back(std::move(release));
+    recording.uploadBytes += bytes;
+    if (recording.uploadBytes >= BatchUploadBytes) Flush();
+}
+
 void DrawQueue::Flush() {
     if (!recording.commands) return;
     EndPass();

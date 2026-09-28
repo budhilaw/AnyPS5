@@ -10,6 +10,8 @@
 
 namespace AgcDriver::Graphics {
 
+    class DrawQueue;
+
     class TextureDetiler {
     public:
         explicit TextureDetiler(const Context& context);
@@ -18,7 +20,10 @@ namespace AgcDriver::Graphics {
         TextureDetiler& operator=(const TextureDetiler&) = delete;
 
         void Dispatch(VkCommandBuffer commands, TextureTileMode tileMode, std::uint32_t elementBytes, VkBuffer source, std::uint64_t sourceOffset, VkBuffer destination, std::uint64_t destinationOffset, const TileMipLayout& layout, std::uint32_t arrayLayer);
+        // Resets every pool: the caller waited for all detiling it recorded.
         void BeginBatch();
+        // Full pools return for reuse once the work `queue` has recorded so far completes.
+        void Retire(DrawQueue& queue);
 
     private:
         VkPipeline pipeline(TextureTileMode tileMode, std::uint32_t elementBytes);
@@ -31,7 +36,10 @@ namespace AgcDriver::Graphics {
         VkShaderModule module = VK_NULL_HANDLE;
         std::vector<std::pair<std::uint32_t, VkPipeline>> pipelines;
         std::vector<VkDescriptorPool> descriptorPools;
-        std::size_t allocatedSets = 0;
+        std::vector<VkDescriptorPool> freePools;
+        std::vector<VkDescriptorPool> fullPools;
+        VkDescriptorPool currentPool = VK_NULL_HANDLE;
+        std::uint32_t currentSets = 0;
     };
 
 }
