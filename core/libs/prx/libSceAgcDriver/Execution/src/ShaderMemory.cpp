@@ -4,6 +4,7 @@
 #include "Optimization/RequestMemoryView.hpp"
 #include "Optimization/ResourceMaterializer.hpp"
 #include "Optimization/ResourceProgram.hpp"
+#include <algorithm>
 #include <cstring>
 #include <iterator>
 #include <limits>
@@ -12,11 +13,13 @@
 
 namespace AgcDriver {
 
-ShaderMemory::ShaderMemory(std::span<const ShaderRecompiler::MemoryRegion> initial) {
-    const ShaderRecompiler::RequestMemoryView validated(initial);
-    for (const auto& region : initial) {
-        regions.emplace(region.guestAddress, std::vector<std::byte>(region.bytes.begin(), region.bytes.end()));
+ShaderMemory::ShaderMemory(std::span<const ShaderRecompiler::MemoryRegion> regions, std::vector<std::shared_ptr<const void>> keep) : owners(std::move(keep)) {
+    const ShaderRecompiler::RequestMemoryView validated(regions);
+    for (const auto& region : regions) {
+        const auto same = std::find_if(initial.begin(), initial.end(), [&](const auto& other) { return other.guestAddress == region.guestAddress; });
+        if (same == initial.end()) initial.push_back(region);
     }
+    std::sort(initial.begin(), initial.end(), [](const auto& left, const auto& right) { return left.guestAddress < right.guestAddress; });
 }
 
 bool ShaderMemory::read(void* context, std::uint64_t address, std::uint32_t* value) {
@@ -24,20 +27,24 @@ bool ShaderMemory::read(void* context, std::uint64_t address, std::uint32_t* val
     if (address % sizeof(*value) != 0 || address > std::numeric_limits<std::uint64_t>::max() - sizeof(*value)) {
         throw std::runtime_error("AGC driver: invalid shader memory read address");
     }
-    const auto next = self.regions.upper_bound(address);
-    if (next != self.regions.begin()) {
-        const auto previous = std::prev(next);
-        const auto offset = address - previous->first;
-        if (offset < previous->second.size()) {
-            if (previous->second.size() - offset < sizeof(*value)) {
+    const auto next = std::upper_bound(self.initial.begin(), self.initial.end(), address, [](std::uint64_t value, const auto& region) { return value < region.guestAddress; });
+    if (next != self.initial.begin()) {
+        const auto& previous = *std::prev(next);
+        const auto offset = address - previous.guestAddress;
+        if (offset < previous.bytes.size()) {
+            if (previous.bytes.size() - offset < sizeof(*value)) {
                 throw std::runtime_error("AGC driver: shader memory read crosses a snapshot boundary");
             }
-            std::memcpy(value, previous->second.data() + offset, sizeof(*value));
+            std::memcpy(value, previous.bytes.data() + offset, sizeof(*value));
             return true;
         }
     }
-    if (next != self.regions.end() && next->first - address < sizeof(*value)) {
+    if (next != self.initial.end() && next->guestAddress - address < sizeof(*value)) {
         throw std::runtime_error("AGC driver: shader memory read overlaps a snapshot boundary");
+    }
+    if (const auto found = self.dwords.find(address); found != self.dwords.end()) {
+        *value = found->second;
+        return true;
     }
     // A page checked earlier in this capture needs no range check: tracking that protects it
     // since faults and resolves. Queued GPU writes are still resolved per read.
@@ -49,8 +56,7 @@ bool ShaderMemory::read(void* context, std::uint64_t address, std::uint32_t* val
         GuestMemory::Read(address, std::as_writable_bytes(std::span(value, 1)), alignof(std::uint32_t));
         self.checkedPage = address / pageBytes;
     }
-    const auto* bytes = reinterpret_cast<const std::byte*>(value);
-    self.regions.emplace(address, std::vector<std::byte>(bytes, bytes + sizeof(*value)));
+    self.dwords.emplace(address, *value);
     return true;
 }
 
@@ -71,10 +77,13 @@ void ShaderMemory::Capture(const ShaderRecompiler::RecompileRequest& request) {
 
 std::vector<ShaderRecompiler::MemoryRegion> ShaderMemory::Regions() const {
     std::vector<ShaderRecompiler::MemoryRegion> result;
-    result.reserve(regions.size());
-    for (const auto& [address, bytes] : regions) {
-        result.push_back({address, bytes});
+    result.reserve(initial.size() + dwords.size());
+    auto region = initial.begin();
+    for (const auto& [address, value] : dwords) {
+        for (; region != initial.end() && region->guestAddress < address; ++region) result.push_back(*region);
+        result.push_back({address, std::as_bytes(std::span(&value, 1))});
     }
+    result.insert(result.end(), region, initial.end());
     return result;
 }
 

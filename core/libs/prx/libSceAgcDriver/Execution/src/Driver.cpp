@@ -612,7 +612,7 @@ private:
             current->Target(),
             {0, 0, 0, 128}
         };
-        auto shaderMemoryOwner = std::make_unique<ShaderMemory>(memory);
+        auto shaderMemoryOwner = std::make_unique<ShaderMemory>(memory, std::vector<std::shared_ptr<const void>>{it->second});
         auto& shaderMemory = *shaderMemoryOwner;
         timing.Mark("prepare");
         shaderMemory.Capture(request);
@@ -733,6 +733,7 @@ private:
             std::uint32_t firstUserSgpr = 8;
             std::vector<std::uint32_t> userData;
             std::array<ShaderRecompiler::MemoryRegion, 2> memory;
+            std::shared_ptr<const ShaderSnapshot> owner;
         };
         const auto programAddress = [&](std::uint32_t base) {
             const auto high = readRegister(queue.shader, base + 1);
@@ -755,7 +756,8 @@ private:
                 userDataBase,
                 8,
                 {},
-                {{{snapshot.codeAddress, std::as_bytes(std::span(snapshot.code))}, {snapshot.headerAddress, snapshot.header}}}
+                {{{snapshot.codeAddress, std::as_bytes(std::span(snapshot.code))}, {snapshot.headerAddress, snapshot.header}}},
+                it->second
             };
             for (std::uint32_t i = 0; i < userCount; ++i) result.userData.push_back(readUserData(queue.shader, userDataBase + i));
             return result;
@@ -825,10 +827,12 @@ private:
         }
         const auto pixel = Graphics::DecodePixelStageInfo(queue.context, graphics.hasColorTarget, graphics.color.componentMapping);
         std::vector<ShaderRecompiler::MemoryRegion> memory;
+        std::vector<std::shared_ptr<const void>> memoryOwners;
         std::vector<ShaderRecompiler::LinkedProgram> linked;
         for (std::size_t i = 0; i < programs.size(); ++i) {
             const auto& program = programs[i];
             memory.insert(memory.end(), program.memory.begin(), program.memory.end());
+            memoryOwners.push_back(program.owner);
             linked.push_back({roles[i], program.binary, program.userDataBase, program.firstUserSgpr, program.userData});
         }
         // ANYPS5_GPU_JOURNAL_DRAWS=1: every draw joins the GPU journal hang reports print (formatting
@@ -854,7 +858,7 @@ private:
         timing.Mark("device_setup");
         graphicsDevice = current;
         const GuestMemory::MemoryAccessScope memoryScope(this, &Driver::resolveForHost);
-        auto shaderMemoryOwner = std::make_unique<ShaderMemory>(memory);
+        auto shaderMemoryOwner = std::make_unique<ShaderMemory>(memory, std::move(memoryOwners));
         auto& shaderMemory = *shaderMemoryOwner;
         std::vector<ShaderRecompiler::RecompileResult> results;
         std::vector<Graphics::CompiledShader> stages;

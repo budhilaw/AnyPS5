@@ -4,12 +4,15 @@
 #include "Recompiler.hpp"
 #include "Optimization/ResourceMaterializer.hpp"
 #include <map>
+#include <memory>
+#include <vector>
 
 namespace AgcDriver {
 
 class ShaderMemory {
 public:
-    explicit ShaderMemory(std::span<const ShaderRecompiler::MemoryRegion> initial);
+    // The initial regions are read in place: `owners` keep their bytes alive.
+    explicit ShaderMemory(std::span<const ShaderRecompiler::MemoryRegion> initial, std::vector<std::shared_ptr<const void>> owners = {});
     // Reads the memory the request's resources come from; the resources it materialized stay
     // available (Snapshot, Specialization) until the next capture.
     void Capture(const ShaderRecompiler::RecompileRequest& request);
@@ -19,7 +22,9 @@ public:
 
 private:
     static bool read(void* context, std::uint64_t address, std::uint32_t* value);
-    std::map<std::uint64_t, std::vector<std::byte>> regions;
+    std::vector<ShaderRecompiler::MemoryRegion> initial;  // by address
+    std::vector<std::shared_ptr<const void>> owners;
+    std::map<std::uint64_t, std::uint32_t> dwords;  // guest memory the captures read
     std::uint64_t checkedPage = ~0ull;
     ShaderRecompiler::ResourceSnapshot snapshot;
     ShaderRecompiler::ResourceSpecialization specialization;
