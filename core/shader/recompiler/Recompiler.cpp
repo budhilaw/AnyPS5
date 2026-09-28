@@ -1,4 +1,6 @@
 #include "Recompiler.hpp"
+#include <array>
+#include <future>
 #include "CacheKey.hpp"
 #include <mutex>
 #include <shared_mutex>
@@ -148,6 +150,7 @@ std::shared_ptr<const IrResourcePlan> makeResourcePlan(const RecompileRequest& r
 struct SourceEntry {
     std::mutex mutex;
     std::shared_ptr<const IrResourcePlan> plan;
+    std::unique_ptr<IrProgram> spare;  // prepared with the plan for the first variant compile
     std::vector<std::shared_ptr<const CompiledVariant>> variants;
 };
 
@@ -167,6 +170,16 @@ std::shared_ptr<SourceEntry> getSource(const RecompileRequest& request) {
     static std::unordered_map<std::vector<std::uint64_t>, std::shared_ptr<SourceEntry>, SourceKeyHash> sources;
     thread_local std::vector<std::uint64_t> key;
     RecompileCacheKey::Build(request, key);
+    // A draw asks for each stage's plan and then its compile: recent sources skip the shared map.
+    struct Recent {
+        std::vector<std::uint64_t> key;
+        std::shared_ptr<SourceEntry> source;
+    };
+    thread_local std::array<Recent, 4> recent;
+    thread_local std::size_t nextRecent = 0;
+    for (const auto& entry : recent) {
+        if (entry.source != nullptr && entry.key == key) return entry.source;
+    }
     std::shared_ptr<SourceEntry> source;
     {
         std::shared_lock lock(mutex);
@@ -174,6 +187,8 @@ std::shared_ptr<SourceEntry> getSource(const RecompileRequest& request) {
         if (found != sources.end()) source = found->second;
     }
     if (source == nullptr) {
+        // The key covers every input the stage input info reads: one check per source.
+        static_cast<void>(BuildShaderStageInputInfo(toShaderStageKind(request.shader.stage), request.context, request.target.subgroupSize));
         std::unique_lock lock(mutex);
         const auto found = sources.find(key);
         if (found != sources.end()) source = found->second;
@@ -185,9 +200,13 @@ std::shared_ptr<SourceEntry> getSource(const RecompileRequest& request) {
     {
         std::lock_guard lock(source->mutex);
         if (source->plan == nullptr) {
+            // Preparing is the costly part of a new shader: the compile's copy comes alongside.
+            auto spare = std::async(std::launch::async, [&request] { return PrepareResourceProgram(request); });
             source->plan = makeResourcePlan(request);
+            source->spare = std::make_unique<IrProgram>(spare.get());
         }
     }
+    recent[nextRecent++ % recent.size()] = {key, source};
     return source;
 }
 
@@ -279,13 +298,13 @@ bool sameLayout(const BindingLayout& left, const BindingLayout& right) {
 }
 
 RecompileResult RecompileImpl(const RecompileRequest& request) {
-    static_cast<void>(BuildShaderStageInputInfo(toShaderStageKind(request.shader.stage), request.context, request.target.subgroupSize));
-    RequestMemoryView memory(request.context.memory);
-    const auto runtime = memory.MakeRuntime(request.context.userData, request.shader.codeAddress);
     ResourceSnapshot snapshot;
     ResourceSpecialization specialization;
     constexpr ResourceMaterializer materializer;
     if (!request.useCache) {
+        static_cast<void>(BuildShaderStageInputInfo(toShaderStageKind(request.shader.stage), request.context, request.target.subgroupSize));
+        RequestMemoryView memory(request.context.memory);
+        const auto runtime = memory.MakeRuntime(request.context.userData, request.shader.codeAddress);
         auto program = PrepareResourceProgram(request);
         const auto plan = materializer.ExtractPlan(program);
         materializer.Materialize(plan, runtime, snapshot, specialization);
@@ -293,30 +312,34 @@ RecompileResult RecompileImpl(const RecompileRequest& request) {
         return materializeResult(variant, request, snapshot);
     }
     const auto source = getSource(request);
-    if (request.materializedSnapshot != nullptr && request.materializedSpecialization != nullptr) {
-        snapshot = *request.materializedSnapshot;
-        specialization = *request.materializedSpecialization;
-    } else {
+    const auto* snapshotUsed = request.materializedSnapshot;
+    const auto* specializationUsed = request.materializedSpecialization;
+    if (snapshotUsed == nullptr || specializationUsed == nullptr) {
+        RequestMemoryView memory(request.context.memory);
+        const auto runtime = memory.MakeRuntime(request.context.userData, request.shader.codeAddress);
         materializer.Materialize(*source->plan, runtime, snapshot, specialization);
+        snapshotUsed = &snapshot;
+        specializationUsed = &specialization;
     }
     std::shared_ptr<const CompiledVariant> variant;
     bool cacheHit = false;
     {
         std::lock_guard lock(source->mutex);
         for (const auto& candidate : source->variants) {
-            if (sameLayout(candidate->layout, request.layout) && candidate->specialization == specialization) {
+            if (sameLayout(candidate->layout, request.layout) && candidate->specialization == *specializationUsed) {
                 variant = candidate;
                 cacheHit = true;
                 break;
             }
         }
         if (variant == nullptr) {
-            auto program = PrepareResourceProgram(request);
-            variant = std::make_shared<CompiledVariant>(compileVariant(request, std::move(program), snapshot, specialization));
+            auto program = source->spare != nullptr ? std::move(*source->spare) : PrepareResourceProgram(request);
+            source->spare.reset();
+            variant = std::make_shared<CompiledVariant>(compileVariant(request, std::move(program), *snapshotUsed, *specializationUsed));
             source->variants.push_back(variant);
         }
     }
-    auto result = materializeResult(*variant, request, snapshot);
+    auto result = materializeResult(*variant, request, *snapshotUsed);
     result.cacheHit = cacheHit;
     return result;
 }
@@ -324,8 +347,8 @@ RecompileResult RecompileImpl(const RecompileRequest& request) {
 }
 
 std::shared_ptr<const IrResourcePlan> GetResourcePlan(const RecompileRequest& request) {
-    static_cast<void>(BuildShaderStageInputInfo(toShaderStageKind(request.shader.stage), request.context, request.target.subgroupSize));
     if (request.useCache) return getSource(request)->plan;
+    static_cast<void>(BuildShaderStageInputInfo(toShaderStageKind(request.shader.stage), request.context, request.target.subgroupSize));
     return makeResourcePlan(request);
 }
 
