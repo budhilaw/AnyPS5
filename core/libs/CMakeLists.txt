@@ -109,6 +109,9 @@ foreach(LIB_DIR ${LIBS_DIRS})
         else()
             target_link_libraries(${LIB_NAME} PRIVATE libkernel libc)
         endif()
+        if(LIB_NAME MATCHES "^libSceAjm")
+            target_link_libraries(${LIB_NAME} PRIVATE atrac9)
+        endif()
 
         set_target_properties(${LIB_NAME} PROPERTIES
                 PREFIX ""

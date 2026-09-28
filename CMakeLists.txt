@@ -67,6 +67,12 @@ set(SDL_SENSOR OFF CACHE BOOL "" FORCE)
 set(SDL_STATIC_PIC ON CACHE BOOL "" FORCE)
 add_subdirectory(3rdparty/SDL2)
 
+enable_language(C)
+file(GLOB ATRAC9_SOURCES ${CMAKE_SOURCE_DIR}/3rdparty/LibAtrac9/C/src/*.c)
+add_library(atrac9 STATIC ${ATRAC9_SOURCES})
+target_include_directories(atrac9 PUBLIC ${CMAKE_SOURCE_DIR}/3rdparty/LibAtrac9/C/src)
+set_target_properties(atrac9 PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
 add_subdirectory(core/shader/recompiler)
 add_subdirectory(core/libs)
 add_subdirectory(core/relinker)
