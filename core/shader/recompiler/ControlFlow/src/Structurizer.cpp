@@ -148,18 +148,20 @@ std::uint32_t moveBlockBefore(ControlFlowGraph& graph, std::uint32_t blockId, st
 std::vector<std::uint32_t> dominatedBlocks(const ControlFlowGraph& graph, std::uint32_t headerBlock, std::uint32_t stopBlock = InvalidControlFlowId) {
     std::vector<std::uint32_t> blocks;
     std::vector<std::uint32_t> stack = {headerBlock};
+    std::vector<bool> visited(graph.blocks.size(), false);
     blocks.reserve(graph.blocks.size());
     stack.reserve(graph.blocks.size());
 
     while (!stack.empty()) {
         const auto blockId = stack.back();
         stack.pop_back();
-        if (blockId == stopBlock || contains(blocks, blockId) || !graph.Dominates(headerBlock, blockId)) {
+        if (blockId == stopBlock || (blockId < visited.size() && visited[blockId]) || !graph.Dominates(headerBlock, blockId)) {
             continue;
         }
 
         const auto& block = graph.FindBlock(blockId);
-        addUnique(blocks, blockId);
+        visited[blockId] = true;
+        blocks.push_back(blockId);
         for (const auto successor : block.successors) {
             if (successor != stopBlock && graph.Dominates(headerBlock, successor)) {
                 stack.push_back(successor);
@@ -697,35 +699,72 @@ void Structurizer::detectNaturalLoops(ControlFlowGraph& graph) const {
     }
 }
 
+// Cooper-Harvey-Kennedy on the reversed graph with a virtual exit; a block's set is its chain to
+// that exit. Blocks that reach no exit keep every block, as the set-intersection fixpoint does.
 void Structurizer::computePostDominators(ControlFlowGraph& graph) const {
     const auto count = static_cast<std::uint32_t>(graph.blocks.size());
-    const auto all = allBlockIds(count);
-
-    for (auto& block : graph.blocks) {
-        block.postDominators = block.successors.empty() ? std::vector<std::uint32_t>{block.id} : all;
+    const auto exit = count;
+    std::vector<std::vector<std::uint32_t>> reversed(count + 1u);
+    for (const auto& block : graph.blocks) {
+        if (block.successors.empty()) reversed[exit].push_back(block.id);
+        for (const auto successor : block.successors) reversed[successor].push_back(block.id);
     }
 
-    bool changed = true;
-    while (changed) {
-        changed = false;
-        for (auto& block : graph.blocks) {
-            std::vector<std::uint32_t> next;
-            if (block.successors.empty()) {
-                next = {block.id};
-            } else {
-                next = graph.blocks[block.successors.front()].postDominators;
-                for (std::size_t i = 1; i < block.successors.size(); ++i) {
-                    next = intersectSorted(next, graph.blocks[block.successors[i]].postDominators);
-                }
-                addUnique(next, block.id);
-                sortUnique(next);
+    std::vector<std::uint32_t> postorder;
+    std::vector<std::uint32_t> number(count + 1u, InvalidControlFlowId);
+    std::vector<bool> seen(count + 1u, false);
+    std::vector<std::pair<std::uint32_t, std::size_t>> stack = {{exit, 0}};
+    seen[exit] = true;
+    while (!stack.empty()) {
+        auto& [node, next] = stack.back();
+        if (next < reversed[node].size()) {
+            const auto child = reversed[node][next++];
+            if (!seen[child]) {
+                seen[child] = true;
+                stack.emplace_back(child, 0);
             }
+            continue;
+        }
+        number[node] = static_cast<std::uint32_t>(postorder.size());
+        postorder.push_back(node);
+        stack.pop_back();
+    }
 
-            if (next != block.postDominators) {
-                block.postDominators = std::move(next);
+    std::vector<std::uint32_t> idom(count + 1u, InvalidControlFlowId);
+    idom[exit] = exit;
+    const auto intersect = [&](std::uint32_t left, std::uint32_t right) {
+        while (left != right) {
+            while (number[left] < number[right]) left = idom[left];
+            while (number[right] < number[left]) right = idom[right];
+        }
+        return left;
+    };
+    for (bool changed = true; changed;) {
+        changed = false;
+        for (auto index = postorder.size() - 1u; index-- > 0u;) {
+            const auto node = postorder[index];
+            const auto& successors = graph.blocks[node].successors;
+            auto candidate = successors.empty() ? exit : InvalidControlFlowId;
+            for (const auto successor : successors) {
+                if (idom[successor] == InvalidControlFlowId) continue;
+                candidate = candidate == InvalidControlFlowId ? successor : intersect(successor, candidate);
+            }
+            if (idom[node] != candidate) {
+                idom[node] = candidate;
                 changed = true;
             }
         }
+    }
+
+    const auto all = allBlockIds(count);
+    for (auto& block : graph.blocks) {
+        if (number[block.id] == InvalidControlFlowId) {
+            block.postDominators = all;
+            continue;
+        }
+        block.postDominators.clear();
+        for (auto node = block.id; node != exit; node = idom[node]) block.postDominators.push_back(node);
+        std::sort(block.postDominators.begin(), block.postDominators.end());
     }
 }
 
