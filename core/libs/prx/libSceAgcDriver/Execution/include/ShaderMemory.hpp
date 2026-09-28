@@ -20,6 +20,7 @@ public:
 private:
     static bool read(void* context, std::uint64_t address, std::uint32_t* value);
     std::map<std::uint64_t, std::vector<std::byte>> regions;
+    std::uint64_t checkedPage = ~0ull;
     ShaderRecompiler::ResourceSnapshot snapshot;
     ShaderRecompiler::ResourceSpecialization specialization;
 };

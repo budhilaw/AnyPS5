@@ -1,5 +1,6 @@
 #include "prx/libSceAgcDriver/Execution/include/ShaderMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
+#include "prx/libSceAgcDriver/Execution/include/MemoryAccessScope.hpp"
 #include "Optimization/RequestMemoryView.hpp"
 #include "Optimization/ResourceMaterializer.hpp"
 #include "Optimization/ResourceProgram.hpp"
@@ -38,10 +39,18 @@ bool ShaderMemory::read(void* context, std::uint64_t address, std::uint32_t* val
     if (next != self.regions.end() && next->first - address < sizeof(*value)) {
         throw std::runtime_error("AGC driver: shader memory read overlaps a snapshot boundary");
     }
-    std::vector<std::byte> bytes(sizeof(*value));
-    GuestMemory::Read(address, bytes, alignof(std::uint32_t));
-    std::memcpy(value, bytes.data(), sizeof(*value));
-    self.regions.emplace(address, std::move(bytes));
+    // A page checked earlier in this capture needs no range check: tracking that protects it
+    // since faults and resolves. Queued GPU writes are still resolved per read.
+    constexpr std::uint64_t pageBytes = 4096;
+    if (address / pageBytes == self.checkedPage) {
+        GuestMemory::MemoryAccessScope::Resolve(address, sizeof(*value), false);
+        std::memcpy(value, reinterpret_cast<const void*>(address), sizeof(*value));
+    } else {
+        GuestMemory::Read(address, std::as_writable_bytes(std::span(value, 1)), alignof(std::uint32_t));
+        self.checkedPage = address / pageBytes;
+    }
+    const auto* bytes = reinterpret_cast<const std::byte*>(value);
+    self.regions.emplace(address, std::vector<std::byte>(bytes, bytes + sizeof(*value)));
     return true;
 }
 
@@ -56,6 +65,7 @@ void ShaderMemory::Capture(const ShaderRecompiler::RecompileRequest& request) {
     runtime.readSpecializationMemory = &read;
     snapshot = {};
     specialization = {};
+    checkedPage = ~0ull;
     materializer.Materialize(*plan, runtime, snapshot, specialization);
 }
 
