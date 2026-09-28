@@ -15,32 +15,31 @@
 
 namespace AgcDriver::Graphics {
 
-namespace {
-
-std::string DefaultCachePath() {
+std::string CacheFilePath(const char* name) {
+    if (const char* configured = std::getenv("ANYPS5_PIPELINE_CACHE")) {
+        return *configured == '\0' ? std::string() : (std::filesystem::path(configured).parent_path() / name).string();
+    }
     try {
 #if defined(_WIN32)
         wchar_t buffer[32768];
         const auto length = GetModuleFileNameW(nullptr, buffer, static_cast<DWORD>(std::size(buffer)));
         if (length == 0 || length >= std::size(buffer)) return {};
-        return (std::filesystem::path(buffer).parent_path() / "pipeline.cache").string();
+        return (std::filesystem::path(buffer).parent_path() / name).string();
 #elif defined(__APPLE__)
         const char* executable = _dyld_get_image_name(0);
         if (executable == nullptr) return {};
-        return (std::filesystem::absolute(executable).parent_path() / "pipeline.cache").string();
+        return (std::filesystem::absolute(executable).parent_path() / name).string();
 #else
-        return (std::filesystem::read_symlink("/proc/self/exe").parent_path() / "pipeline.cache").string();
+        return (std::filesystem::read_symlink("/proc/self/exe").parent_path() / name).string();
 #endif
     } catch (...) {
         return {};
     }
 }
 
-}
-
 PipelineCache::PipelineCache(const Context& context) : context(context) {
     if (const char* configured = std::getenv("ANYPS5_PIPELINE_CACHE")) path = *configured == '\0' ? std::string() : configured;
-    else path = DefaultCachePath();
+    else path = CacheFilePath("pipeline.cache");
     std::vector<char> initial;
     if (!path.empty()) {
         std::ifstream file(path, std::ios::binary);

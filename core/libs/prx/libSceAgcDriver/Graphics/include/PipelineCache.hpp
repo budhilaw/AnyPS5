@@ -7,6 +7,9 @@
 
 namespace AgcDriver::Graphics {
 
+// `name` in the directory of the persisted pipeline cache (empty when persistence is disabled).
+std::string CacheFilePath(const char* name);
+
 // The device pipeline cache, persisted next to the executable (or at ANYPS5_PIPELINE_CACHE) so
 // the host's shader compiles survive a restart. MoltenVK keeps its SPIR-V to MSL conversions in
 // it; the Metal compiler keeps its own cache of the resulting source.

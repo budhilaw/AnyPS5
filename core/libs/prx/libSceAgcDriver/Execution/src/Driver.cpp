@@ -6,6 +6,7 @@
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/ShaderMemory.hpp"
+#include "prx/libSceAgcDriver/Execution/include/ShaderWarmup.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Pm4.hpp"
 #include "prx/libSceAgcDriver/Execution/include/QueueState.hpp"
 #include "prx/libSceAgcDriver/Execution/include/VulkanDevice.hpp"
@@ -66,12 +67,7 @@ struct ShaderSnapshot {
     std::uint64_t CodeHash(std::size_t offset) const {
         std::lock_guard lock(hashes->mutex);
         if (const auto found = hashes->byOffset.find(offset); found != hashes->byOffset.end()) return found->second;
-        std::uint64_t hash = 0x9e3779b97f4a7c15ull ^ (code.size() - offset);
-        for (std::size_t i = offset; i < code.size(); ++i) {
-            hash = (hash ^ code[i]) * 0xff51afd7ed558ccdull;
-            hash ^= hash >> 32u;
-        }
-        if (hash == 0) hash = 1;
+        const auto hash = ShaderCodeHash(std::span(code).subspan(offset));
         hashes->byOffset.emplace(offset, hash);
         return hash;
     }
@@ -160,6 +156,7 @@ private:
         }
         graphicsChanged.notify_all();
         if (graphicsThread.joinable()) graphicsThread.join();
+        warmup.Stop();
     }
 
     void runGraphics() noexcept {
@@ -497,6 +494,7 @@ private:
     std::uint64_t graphicsPosted = 0;
     std::atomic<std::uint64_t> graphicsCompleted{0};
     bool graphicsStopping = false;
+    ShaderWarmup warmup;
     std::thread graphicsThread;
     std::thread worker;
 
@@ -623,6 +621,7 @@ private:
         request.materializedSpecialization = &shaderMemory.Specialization();
         timing.Mark("request_memory");
         auto compiled = ShaderRecompiler::Recompile(request);
+        if (!compiled.cacheHit) warmup.Record(request);
         timing.Mark(compiled.cacheHit ? "shader_cache_hit" : "shader_compile");
         // ANYPS5_DUMP_COMPUTE_SPIRV=<directory>: every compute program's SPIR-V, once per address.
         if (static const char* spirvDirectory = std::getenv("ANYPS5_DUMP_COMPUTE_SPIRV"); spirvDirectory != nullptr) {
@@ -885,6 +884,7 @@ private:
             request.materializedSpecialization = &shaderMemory.Specialization();
             shaderTiming.Mark("request_memory");
             results.push_back(ShaderRecompiler::Recompile(request));
+            if (!results.back().cacheHit) warmup.Record(request);
             shaderTiming.Mark(results.back().cacheHit ? "cache_hit" : "compile");
             const auto& result = results.back();
             // The base vertex and instance live in user SGPRs the fetch adds to the vertex and
