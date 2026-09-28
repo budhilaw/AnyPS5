@@ -2,6 +2,7 @@
 #define CORE_LIBS_PRX_LIBSCEAGCDRIVER_GRAPHICS_INCLUDE_GUESTBUFFERCACHE_HPP
 
 #include "prx/libSceAgcDriver/Graphics/include/Resources.hpp"
+#include "prx/libc/include/GuestAllocations.hpp"
 #include "prx/libc/include/GuestMemoryTracking.hpp"
 #include <cstdint>
 #include <list>
@@ -50,6 +51,8 @@ public:
         VkDeviceSize offset = 0;
     };
     HostView HostRange(std::uint64_t address, std::uint64_t bytes);
+    // A GPU copy of read-only image data (code, constants), made once while `range` stays registered.
+    std::shared_ptr<Buffer> ImageCopy(const std::shared_ptr<const GuestAllocations::Range>& range, std::uint64_t padding, VkBufferUsageFlags usage);
     // Stops watching pages in [address, address + bytes): another owner (a render target) takes
     // them over. Mirrors there copy on every use afterwards.
     void ReleaseTracking(std::uint64_t address, std::size_t bytes);
@@ -107,6 +110,7 @@ private:
         std::shared_ptr<Buffer> buffer;
     };
     std::map<std::uint64_t, HostMapping> hostMappings;  // keyed by guest mapping address
+    std::map<const GuestAllocations::Range*, std::pair<std::shared_ptr<const GuestAllocations::Range>, std::shared_ptr<Buffer>>> imageCopies;
     std::uint64_t copiedBytes = 0;
     std::uint64_t reusedBytes = 0;
 };

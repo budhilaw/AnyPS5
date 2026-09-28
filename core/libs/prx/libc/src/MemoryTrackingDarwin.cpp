@@ -211,6 +211,11 @@ void protect(std::uint64_t address, std::size_t bytes, int protection) {
     if (mprotect(reinterpret_cast<void*>(address), bytes, protection) != 0) throw std::system_error(errno, std::generic_category(), "guest memory tracking mprotect failed");
 }
 
+bool TraceProtect() {
+    static const bool enabled = std::getenv("ANYPS5_TRACE_PROTECT") != nullptr;
+    return enabled;
+}
+
 int hostProtection(vm_prot_t protection) {
     return ((protection & VM_PROT_READ) != 0 ? PROT_READ : 0) | ((protection & VM_PROT_WRITE) != 0 ? PROT_WRITE : 0) | ((protection & VM_PROT_EXECUTE) != 0 ? PROT_EXEC : 0);
 }
@@ -269,13 +274,13 @@ std::vector<Region> Query(std::uint64_t address, std::size_t bytes) {
 
 void Protect(std::uint64_t address, std::size_t bytes, Protection protection) {
     if (protection != Protection::None && protection != Protection::Read) throw std::invalid_argument("invalid tracked page protection");
-    if (std::getenv("ANYPS5_TRACE_PROTECT") != nullptr) std::fprintf(stderr, "[tracking] protect 0x%llx+0x%zx %s\n", static_cast<unsigned long long>(address), bytes, protection == Protection::None ? "none" : "read");
+    if (TraceProtect()) std::fprintf(stderr, "[tracking] protect 0x%llx+0x%zx %s\n", static_cast<unsigned long long>(address), bytes, protection == Protection::None ? "none" : "read");
     protect(address, bytes, protection == Protection::None ? PROT_NONE : PROT_READ);
 }
 
 void Restore(const std::vector<Region>& regions) {
     for (const auto& region : regions) {
-        if (std::getenv("ANYPS5_TRACE_PROTECT") != nullptr) std::fprintf(stderr, "[tracking] restore 0x%llx+0x%zx prot %d\n", static_cast<unsigned long long>(region.address), region.bytes, static_cast<int>(region.protection));
+        if (TraceProtect()) std::fprintf(stderr, "[tracking] restore 0x%llx+0x%zx prot %d\n", static_cast<unsigned long long>(region.address), region.bytes, static_cast<int>(region.protection));
         protect(region.address, region.bytes, static_cast<int>(region.protection));
     }
 }

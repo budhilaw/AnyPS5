@@ -9,6 +9,11 @@ void GuestBufferMemory::AcquireRegistered() {
     regions.reserve(lease.size());
     for (const auto& range : lease) {
         validate(range->address, range->bytes);
+        if (!range->writable && !range->releasable && context.guestBufferCache != nullptr) {
+            regions.push_back({range->address, range->address + range->bytes, false, false, {}, nullptr});
+            regions.back().image = range;
+            continue;
+        }
         std::vector<std::byte> snapshot;
         if (!range->writable) {
             snapshot.resize(range->bytes);

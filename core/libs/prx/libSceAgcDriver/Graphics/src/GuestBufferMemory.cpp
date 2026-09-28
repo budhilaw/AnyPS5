@@ -61,7 +61,7 @@ void GuestBufferMemory::AddSnapshot(const GuestMemorySnapshot& snapshot) {
     for (const auto& region : regions) {
         if (region.begin <= snapshot.address && snapshot.address + snapshot.bytes.size() <= region.end) {
             const auto offset = static_cast<std::size_t>(snapshot.address - region.begin);
-            const auto* source = region.writable || region.fromGuest ? reinterpret_cast<const std::byte*>(snapshot.address) : region.snapshot.data() + offset;
+            const auto* source = region.writable || region.fromGuest || region.image ? reinterpret_cast<const std::byte*>(snapshot.address) : region.snapshot.data() + offset;
             Require(std::memcmp(source, snapshot.bytes.data(), snapshot.bytes.size()) == 0, "guest snapshot differs from registered memory");
             return;
         }
@@ -77,6 +77,7 @@ void GuestBufferMemory::Upload(bool addressable) {
     for (auto& region : regions) {
         if (!merged.empty() && region.begin < merged.back().end) {
             auto& previous = merged.back();
+            Require(!previous.image && !region.image, "guest memory overlaps registered image data");
             const bool previousGuest = previous.writable || previous.fromGuest;
             const bool regionGuest = region.writable || region.fromGuest;
             Require(previousGuest == regionGuest, "guest memory overlaps an immutable snapshot");
@@ -105,6 +106,10 @@ void GuestBufferMemory::Upload(bool addressable) {
         const auto bytes = region.end - region.begin + region.padding;
         Require(bytes <= std::numeric_limits<std::size_t>::max(), "guest GPU allocation size overflow");
         const auto usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | (addressable ? VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT : 0u);
+        if (region.image) {
+            region.buffer = context.guestBufferCache->ImageCopy(region.image, region.padding, usage);
+            continue;
+        }
         // Each added range resolves as it was added (a merged region can join a small written
         // range with a large read one).
         const auto resolveAccesses = [&](bool inPlace) {

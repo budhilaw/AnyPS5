@@ -295,6 +295,21 @@ GuestBufferCache::HostView GuestBufferCache::HostRange(std::uint64_t address, st
     return {mapping.buffer, address - extent.address};
 }
 
+std::shared_ptr<Buffer> GuestBufferCache::ImageCopy(const std::shared_ptr<const GuestAllocations::Range>& range, std::uint64_t padding, VkBufferUsageFlags usage) {
+    {
+        std::lock_guard lock(mutex);
+        const auto found = imageCopies.find(range.get());
+        if (found != imageCopies.end() && (found->second.second->Usage() & usage) == usage) return found->second.second;
+    }
+    auto buffer = std::make_shared<Buffer>(context, static_cast<std::size_t>(range->bytes + padding), usage);
+    GuestMemory::Read(range->address - padding, buffer->Bytes());
+    std::lock_guard lock(mutex);
+    // A protection change registers new ranges: copies of the old ones are dropped.
+    if (imageCopies.size() >= 64) imageCopies.clear();
+    imageCopies[range.get()] = {range, buffer};
+    return buffer;
+}
+
 void GuestBufferCache::MarkSynced(const std::shared_ptr<Mirror>& mirror) {
     if (!mirror || mirror->imported) return;
     std::lock_guard registryLock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());

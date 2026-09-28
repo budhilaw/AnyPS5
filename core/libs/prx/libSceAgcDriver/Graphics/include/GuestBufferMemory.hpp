@@ -54,6 +54,7 @@ private:
         // Where `begin - padding` lies in `buffer` (a whole imported guest mapping is shared).
         std::uint64_t bufferOffset = 0;
         bool inPlace = false;  // the buffer is guest memory itself (no copy in either direction)
+        std::shared_ptr<const GuestAllocations::Range> image;  // read-only image data, copied once per registration
     };
 
     void validate(std::uint64_t address, std::size_t bytes) const;
