@@ -149,7 +149,7 @@ int main() {
         missingMemory.context.memory = {};
         expectFailure([&] { static_cast<void>(Recompile(missingMemory)); }, "SrtWalker::EvaluateRuntimeSources", "cache hit bypassed resource validation");
 #if ANYPS5_ENABLE_SPIRV_TOOLS
-        auto invalidSpirv = first.spirv;
+        auto invalidSpirv = first.spirv.Words();
         invalidSpirv[0] = 0;
         expectFailure([&] { static_cast<void>(ValidateAndOptimizeSpirv(invalidSpirv, request.target.vulkanVersion, request.target.spirvVersion)); }, "SPIR-V validation before optimization failed", "invalid SPIR-V passed validation");
         expectFailure([&] { static_cast<void>(ValidateAndOptimizeSpirv(first.spirv, 0x00400000u, 0x00010600u)); }, "unsupported Vulkan/SPIR-V target", "incompatible target accepted");

@@ -7,6 +7,7 @@
 #include <optional>
 #include <span>
 #include <string_view>
+#include <memory>
 #include <vector>
 
 namespace ShaderRecompiler {
@@ -274,8 +275,36 @@ struct FragmentParameter {
     bool perVertex;
 };
 
+// SPIR-V words shared by the copies of a compiled result: a cache hit copies one per draw.
+class SpirvCode {
+public:
+    SpirvCode() = default;
+    SpirvCode(std::vector<std::uint32_t> words) : words(std::make_shared<std::vector<std::uint32_t>>(std::move(words))) {}
+    const std::vector<std::uint32_t>& Words() const {
+        static const std::vector<std::uint32_t> none;
+        return words ? *words : none;
+    }
+    operator const std::vector<std::uint32_t>&() const { return Words(); }
+    // Words of this copy alone, to change.
+    std::vector<std::uint32_t>& Edit() {
+        if (!words) words = std::make_shared<std::vector<std::uint32_t>>();
+        else if (words.use_count() > 1) words = std::make_shared<std::vector<std::uint32_t>>(*words);
+        return *words;
+    }
+    std::size_t size() const { return Words().size(); }
+    bool empty() const { return Words().empty(); }
+    const std::uint32_t* data() const { return Words().data(); }
+    const std::uint32_t* begin() const { return data(); }
+    const std::uint32_t* end() const { return data() + size(); }
+    std::uint32_t operator[](std::size_t index) const { return Words()[index]; }
+    bool operator==(const SpirvCode& other) const { return Words() == other.Words(); }
+
+private:
+    std::shared_ptr<std::vector<std::uint32_t>> words;
+};
+
 struct RecompileResult {
-    std::vector<std::uint32_t> spirv;
+    SpirvCode spirv;
     // Nonzero: identifies `spirv` (with its size) for host caches, computed once per compiled
     // variant so draws need not hash the module again.
     std::uint64_t spirvHash = 0;

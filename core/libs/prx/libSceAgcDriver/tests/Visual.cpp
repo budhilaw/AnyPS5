@@ -40,9 +40,10 @@ ShaderRecompiler::RecompileResult LoadShader(const std::filesystem::path& path) 
     const auto size = file.tellg();
     Require(size >= 20 && size <= 1024 * 1024 && size % 4 == 0, "invalid test SPIR-V size");
     ShaderRecompiler::RecompileResult result;
-    result.spirv.resize(static_cast<std::size_t>(size) / 4);
+    auto& words = result.spirv.Edit();
+    words.resize(static_cast<std::size_t>(size) / 4);
     file.seekg(0);
-    Require(static_cast<bool>(file.read(reinterpret_cast<char*>(result.spirv.data()), size)), "cannot read test SPIR-V");
+    Require(static_cast<bool>(file.read(reinterpret_cast<char*>(words.data()), size)), "cannot read test SPIR-V");
     return result;
 }
 
