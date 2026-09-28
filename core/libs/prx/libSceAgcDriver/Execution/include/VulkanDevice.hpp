@@ -22,6 +22,12 @@ public:
     ShaderRecompiler::SpirvTarget Target() const;
     void WaitIdle();
     void WaitDraws();
+    // Submits the work queued so far without waiting for it (a flip: presentation waits for it).
+    void FlushDraws();
+    // Submits the work queued so far; WaitTicket waits for it to complete without holding the
+    // device's locks, so the driver keeps recording meanwhile.
+    std::uint64_t SubmitTicket();
+    void WaitTicket(std::uint64_t ticket);
     // Runs `action` when the GPU work queued so far completes (see DrawQueue::EnqueueCompletion).
     void Defer(std::function<void()> action);
     bool HasPendingWork();

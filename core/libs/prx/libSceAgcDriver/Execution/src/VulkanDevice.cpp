@@ -5,6 +5,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/GraphicsPipelineCache.hpp"
 #include "prx/libSceAgcDriver/Execution/include/MemoryAccessScope.hpp"
 #include "prx/libSceAgcDriver/Execution/include/VulkanDevice.hpp"
+#include "prx/libSceAgcDriver/Execution/include/VideoOutput.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
 #include "prx/libSceAgcDriver/Execution/include/BdaFeatures.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PresentationScaler.hpp"
@@ -23,6 +24,7 @@
 #include "prx/libSceAgcDriver/Execution/include/DisplayBuffer.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/SlowPipeline.hpp"
 #include <chrono>
+#include <condition_variable>
 #include "prx/libc/include/General.hpp"
 #include "prx/libSceAgcDriver/Execution/include/VulkanLibrary.hpp"
 #include <SDL_loadso.h>
@@ -79,6 +81,11 @@ struct VulkanDevice::State {
     std::vector<VkImage> images;
     VkFence acquireFence = VK_NULL_HANDLE;
     VkFence renderFence = VK_NULL_HANDLE;
+    bool renderPending = false;  // the last presentation's commands may still execute
+    std::mutex ticketMutex;
+    std::condition_variable ticketDone;
+    std::uint64_t ticketsIssued = 0;
+    std::uint64_t ticketsDone = 0;
     struct RetiredSwapchain {
         VkSwapchainKHR swapchain = VK_NULL_HANDLE;
         std::vector<VkSemaphore> rendered;
@@ -669,6 +676,46 @@ void VulkanDevice::WaitDraws() {
     state->drawQueue->Wait();
 }
 
+void VulkanDevice::FlushDraws() {
+    std::lock_guard memoryLock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
+    state->drawQueue->Flush();
+}
+
+std::uint64_t VulkanDevice::SubmitTicket() {
+    std::lock_guard memoryLock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
+    std::uint64_t ticket = 0;
+    {
+        std::lock_guard lock(state->ticketMutex);
+        ticket = ++state->ticketsIssued;
+    }
+    auto* shared = state.get();
+    state->drawQueue->EnqueueCompletion([shared, ticket] {
+        {
+            std::lock_guard lock(shared->ticketMutex);
+            shared->ticketsDone = std::max(shared->ticketsDone, ticket);
+        }
+        shared->ticketDone.notify_all();
+    });
+    state->drawQueue->Flush();
+    return ticket;
+}
+
+void VulkanDevice::WaitTicket(std::uint64_t ticket) {
+    PerformanceTimer timing("Vulkan.WaitTicket");
+    std::unique_lock lock(state->ticketMutex);
+    while (state->ticketsDone < ticket) {
+        if (state->ticketDone.wait_for(lock, std::chrono::milliseconds(1), [&] { return state->ticketsDone >= ticket; })) break;
+        // Completions run when someone collects: the driver does between packets, but it may be
+        // idle waiting for the title.
+        lock.unlock();
+        {
+            std::lock_guard memoryLock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
+            state->drawQueue->Collect();
+        }
+        lock.lock();
+    }
+}
+
 void* VulkanDevice::Window() const {
     return state->window;
 }
@@ -744,7 +791,15 @@ void VulkanDevice::PresentDisplayBuffer(const DisplayBuffer& buffer) {
 void VulkanDevice::present(std::uint32_t width, std::uint32_t height, bool opaque, std::span<const std::byte> pixels, const DisplayBuffer* display) {
     std::lock_guard memoryLock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
     PerformanceTimer timing("Vulkan.Present");
-    state->drawQueue->Wait();
+    // The flip's work already completed (the caller waited for its ticket). Work the driver
+    // recorded since goes to the queue first, so the presentation commands follow it there as
+    // they follow it in the layouts the resident targets track.
+    if (AsyncFlips()) {
+        state->drawQueue->Flush();
+        state->drawQueue->Collect();
+    } else {
+        state->drawQueue->Wait();
+    }
     timing.Mark("draw_wait");
     require(state->swapchain != VK_NULL_HANDLE, "device has no swapchain");
     require(state->extent.width != 0 && state->extent.height != 0, "output window is minimized");
@@ -824,6 +879,13 @@ void VulkanDevice::present(std::uint32_t width, std::uint32_t height, bool opaqu
     timing.Mark("pixel_upload");
     auto wait = state->DeviceFunction<PFN_vkWaitForFences>("vkWaitForFences");
     auto reset = state->DeviceFunction<PFN_vkResetFences>("vkResetFences");
+    // The previous presentation's commands must be done before its command buffer and staging
+    // are reused.
+    if (state->renderPending) {
+        check(wait(state->device, 1, &state->renderFence, VK_TRUE, std::numeric_limits<std::uint64_t>::max()), "vkWaitForFences previous presentation");
+        state->renderPending = false;
+    }
+    timing.Mark("previous_present_wait");
     const std::array<VkFence, 2> fences{state->acquireFence, state->renderFence};
     check(reset(state->device, static_cast<std::uint32_t>(fences.size()), fences.data()), "vkResetFences");
     std::uint32_t index = 0;
@@ -900,8 +962,12 @@ void VulkanDevice::present(std::uint32_t width, std::uint32_t height, bool opaqu
     check(state->DeviceFunction<PFN_vkQueueSubmit>("vkQueueSubmit")(state->queue, 1, &submit, state->renderFence), "vkQueueSubmit clear");
     Graphics::QueueSubmissionCounter().fetch_add(1, std::memory_order_relaxed);
     timing.Mark("queue_submit");
-    check(wait(state->device, 1, &state->renderFence, VK_TRUE, std::numeric_limits<std::uint64_t>::max()), "vkWaitForFences clear");
-    timing.Mark("render_fence_wait");
+    if (AsyncFlips()) {
+        state->renderPending = true;  // the present waits on `rendered`; the host does not
+    } else {
+        check(wait(state->device, 1, &state->renderFence, VK_TRUE, std::numeric_limits<std::uint64_t>::max()), "vkWaitForFences clear");
+        timing.Mark("render_fence_wait");
+    }
     VkPresentInfoKHR present{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
     present.waitSemaphoreCount = 1;
     present.pWaitSemaphores = &rendered;

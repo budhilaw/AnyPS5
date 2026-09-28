@@ -112,6 +112,10 @@ void DisplayWindow::UpdateTitle() {
         fpsStart = now;
         fpsFrames = 0;
     }
+    // Setting the title is a round trip to the main thread: twice a second is plenty.
+    static std::uint64_t lastUpdate = 0;
+    if (lastUpdate != 0 && now - lastUpdate < frequency / 2) return;
+    lastUpdate = now;
     char text[160];
     std::snprintf(text, sizeof(text), "%s | FPS: %.2f (%llu)", title.value, currentFps, static_cast<unsigned long long>(frameNum));
     MainThread::Run([&] { SDL_SetWindowTitle(window, text); });

@@ -2,6 +2,7 @@
 #define CORE_LIBS_PRX_LIBSCEAGCDRIVER_EXECUTION_INCLUDE_VIDEOOUTPUT_HPP
 
 #include <cstdint>
+#include <cstdlib>
 #include <exception>
 #include <memory>
 #include <stdexcept>
@@ -9,6 +10,14 @@
 namespace AgcDriver {
 
 class FrameTiming;
+
+// A GPU flip only submits the frame: the presentation waits for its GPU work, and the driver
+// goes on with the next frame meanwhile. ANYPS5_SYNC_FLIPS=1 drains the GPU at every flip and
+// holds the driver until the presentation finished (diagnostics).
+inline bool AsyncFlips() {
+    static const bool enabled = std::getenv("ANYPS5_SYNC_FLIPS") == nullptr;
+    return enabled;
+}
 
 inline constexpr std::uint32_t FlipPacketHeader = 0xc004105cu;
 inline constexpr std::uint32_t FlipPacketWords = 6;

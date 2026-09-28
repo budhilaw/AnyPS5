@@ -150,6 +150,8 @@ void FlipRequest::GpuReady(const std::shared_ptr<AgcDriver::FrameTiming>& frameT
         ready = true;
     }
     queue->changed.notify_all();
+    // The presentation thread waits for the frame's GPU work; the driver goes on meanwhile.
+    if (AgcDriver::AsyncFlips()) return;
     std::unique_lock lock(cfg->mutex);
     cfg->vblankCond.wait(lock, [&] { return gpuComplete || cfg->failure || cfg->closing; });
     checkConfig(*cfg);

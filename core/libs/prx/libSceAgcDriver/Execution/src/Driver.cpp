@@ -274,7 +274,7 @@ public:
         timing.Mark("validate");
         try {
             {
-                std::lock_guard lock(gpuMutex);
+                std::unique_lock lock(gpuMutex);
                 timing.Mark("gpu_mutex_wait");
                 if (device == nullptr || device->Window() == nullptr) {
                     if (device) device->WaitIdle();
@@ -291,7 +291,15 @@ public:
                 if (presenting->Presentable()) {
                     if (buffer != nullptr) {
                         require(buffer->width == window.width && buffer->height == window.height, "display buffer extent differs from output");
-                        presenting->WaitDraws();
+                        if (AsyncFlips()) {
+                            // The frame's work completes while the driver records the next one.
+                            const auto ticket = presenting->SubmitTicket();
+                            lock.unlock();
+                            presenting->WaitTicket(ticket);
+                            lock.lock();
+                        } else {
+                            presenting->WaitDraws();
+                        }
                         timing.Mark("draw_wait");
                         presenting->PresentDisplayBuffer(*buffer);
                         timing.Mark("present_display_buffer");
@@ -871,8 +879,13 @@ private:
                         } else {
                             const auto scope = header == FlipPacketHeader ? "Driver.FlipWait" : "Driver.ReleaseWait";
                             PerformanceTimer waitTiming(scope);
-                            device->WaitIdle();
-                            timing.Mark("device_idle_wait");
+                            if (header == FlipPacketHeader && AsyncFlips()) {
+                                device->FlushDraws();
+                                timing.Mark("flip_submit");
+                            } else {
+                                device->WaitIdle();
+                                timing.Mark("device_idle_wait");
+                            }
                         }
                     }
                 }

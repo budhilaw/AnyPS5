@@ -15,9 +15,21 @@
 #include <time.h>
 #include <sys/time.h>
 #endif
+#if defined(__APPLE__)
+#include <mach/mach_time.h>
+#endif
 
 static std::uint64_t GetMonotonicNanos() {
-#ifdef _WIN32
+#if defined(__APPLE__)
+    // clock_gettime and steady_clock go through mach_continuous_time, a slow path under Rosetta,
+    // and titles read the clock in tight loops (Hades spent half its main thread there).
+    static const mach_timebase_info_data_t timebase = [] {
+        mach_timebase_info_data_t info{};
+        mach_timebase_info(&info);
+        return info;
+    }();
+    return static_cast<std::uint64_t>(static_cast<unsigned __int128>(mach_absolute_time()) * timebase.numer / timebase.denom);
+#elif defined(_WIN32)
     static const std::uint64_t freq = [] {
         LARGE_INTEGER f{};
         QueryPerformanceFrequency(&f);
@@ -120,6 +132,15 @@ int APS5_VABI clock_gettime_nid_postfix(int clockId, KernelTimespec* tp) {
     }
     throw std::runtime_error(std::string(__func__) + ": unsupported clock_id " + std::to_string(clockId));
 #else
+#if defined(__APPLE__)
+    // The monotonic clocks skip the native clock_gettime (a slow path under Rosetta).
+    if (clockId == 4 || clockId == 7 || clockId == 11 || clockId == 5 || clockId == 8 || clockId == 12) {
+        const std::uint64_t nanos = GetMonotonicNanos();
+        tp->tv_sec = static_cast<std::int64_t>(nanos / 1000000000ULL);
+        tp->tv_nsec = static_cast<std::int64_t>(nanos % 1000000000ULL);
+        return 0;
+    }
+#endif
     clockid_t nativeId;
     switch (clockId) {
         case 0:
@@ -301,11 +322,11 @@ int APS5_VABI sceKernelGettimezone(KernelTimezone* tz) {
 }
 
 uint64_t APS5_VABI sceKernelReadTsc(void) {
-    return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+    return GetMonotonicNanos();
 }
 
 uint64_t APS5_VABI sceKernelGetTscFrequency(void) {
-    return 1000000000ull; // sceKernelReadTsc counts nanoseconds of the host's steady clock
+    return 1000000000ull; // sceKernelReadTsc counts nanoseconds of the host's monotonic clock
 }
 
 unsigned int APS5_VABI sceKernelSleep(unsigned int seconds) {
