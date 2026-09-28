@@ -421,16 +421,18 @@ bool splitOneLoopMerge(ControlFlowGraph& graph) {
 
 std::vector<std::uint32_t> selectionRegion(const ControlFlowGraph& graph, const BasicBlock& header, std::uint32_t merge) {
     std::vector<std::uint32_t> region;
+    std::vector<bool> visited(graph.blocks.size(), false);
     std::vector<std::uint32_t> pending = {header.terminator.trueBlock, header.terminator.falseBlock};
     const auto* loop = findInnermostContainingLoop(graph, header.id);
     while (!pending.empty()) {
         const auto blockId = pending.back();
         pending.pop_back();
-        if (blockId == merge || contains(region, blockId) || (loop != nullptr && (blockId == loop->mergeBlock || blockId == loop->continueBlock))) {
+        if (blockId == merge || (blockId < visited.size() && visited[blockId]) || (loop != nullptr && (blockId == loop->mergeBlock || blockId == loop->continueBlock))) {
             continue;
         }
         const auto& block = graph.FindBlock(blockId);
-        addUnique(region, blockId);
+        visited[blockId] = true;
+        region.push_back(blockId);
         pending.insert(pending.end(), block.successors.begin(), block.successors.end());
     }
     sortUnique(region);
@@ -471,7 +473,7 @@ bool splitOneSelectionMerge(ControlFlowGraph& graph) {
         const auto external = std::find_if(region.begin(), region.end(), [&](std::uint32_t member) {
             const auto& memberBlock = graph.FindBlock(member);
             return std::any_of(memberBlock.predecessors.begin(), memberBlock.predecessors.end(), [&](std::uint32_t predecessor) {
-                return predecessor != blockId && !contains(region, predecessor);
+                return predecessor != blockId && !std::binary_search(region.begin(), region.end(), predecessor);
             });
         });
         if (external != region.end()) {
@@ -628,39 +630,75 @@ void Structurizer::Structurize(ControlFlowGraph& graph) const {
     }
 }
 
+// Cooper-Harvey-Kennedy from a virtual root before the entry and every block without predecessors;
+// a block's set is its chain to that root. Blocks it never reaches keep every block.
 void Structurizer::computeDominatorTree(ControlFlowGraph& graph) const {
     const auto count = static_cast<std::uint32_t>(graph.blocks.size());
-    const auto all = allBlockIds(count);
-
-    for (auto& block : graph.blocks) {
-        block.dominators = block.id == graph.entryBlock ? std::vector<std::uint32_t>{block.id} : all;
+    const auto root = count;
+    const auto rooted = [&](const BasicBlock& block) { return block.id == graph.entryBlock || block.predecessors.empty(); };
+    std::vector<std::vector<std::uint32_t>> forward(count + 1u);
+    for (const auto& block : graph.blocks) {
+        if (rooted(block)) forward[root].push_back(block.id);
+        else for (const auto predecessor : block.predecessors) forward[predecessor].push_back(block.id);
     }
 
-    bool changed = true;
-    while (changed) {
+    std::vector<std::uint32_t> postorder;
+    std::vector<std::uint32_t> number(count + 1u, InvalidControlFlowId);
+    std::vector<bool> seen(count + 1u, false);
+    std::vector<std::pair<std::uint32_t, std::size_t>> stack = {{root, 0}};
+    seen[root] = true;
+    while (!stack.empty()) {
+        auto& [node, next] = stack.back();
+        if (next < forward[node].size()) {
+            const auto child = forward[node][next++];
+            if (!seen[child]) {
+                seen[child] = true;
+                stack.emplace_back(child, 0);
+            }
+            continue;
+        }
+        number[node] = static_cast<std::uint32_t>(postorder.size());
+        postorder.push_back(node);
+        stack.pop_back();
+    }
+
+    std::vector<std::uint32_t> idom(count + 1u, InvalidControlFlowId);
+    idom[root] = root;
+    const auto intersect = [&](std::uint32_t left, std::uint32_t right) {
+        while (left != right) {
+            while (number[left] < number[right]) left = idom[left];
+            while (number[right] < number[left]) right = idom[right];
+        }
+        return left;
+    };
+    for (bool changed = true; changed;) {
         changed = false;
-        for (auto& block : graph.blocks) {
-            if (block.id == graph.entryBlock) {
-                continue;
-            }
-
-            std::vector<std::uint32_t> next;
-            if (block.predecessors.empty()) {
-                next = {block.id};
-            } else {
-                next = graph.blocks[block.predecessors.front()].dominators;
-                for (std::size_t i = 1; i < block.predecessors.size(); ++i) {
-                    next = intersectSorted(next, graph.blocks[block.predecessors[i]].dominators);
+        for (auto index = postorder.size() - 1u; index-- > 0u;) {
+            const auto node = postorder[index];
+            const auto& block = graph.blocks[node];
+            auto candidate = rooted(block) ? root : InvalidControlFlowId;
+            if (!rooted(block)) {
+                for (const auto predecessor : block.predecessors) {
+                    if (idom[predecessor] == InvalidControlFlowId) continue;
+                    candidate = candidate == InvalidControlFlowId ? predecessor : intersect(predecessor, candidate);
                 }
-                addUnique(next, block.id);
-                sortUnique(next);
             }
-
-            if (next != block.dominators) {
-                block.dominators = std::move(next);
+            if (idom[node] != candidate) {
+                idom[node] = candidate;
                 changed = true;
             }
         }
+    }
+
+    const auto all = allBlockIds(count);
+    for (auto& block : graph.blocks) {
+        if (number[block.id] == InvalidControlFlowId) {
+            block.dominators = all;
+            continue;
+        }
+        block.dominators.clear();
+        for (auto node = block.id; node != root; node = idom[node]) block.dominators.push_back(node);
+        std::sort(block.dominators.begin(), block.dominators.end());
     }
 }
 
