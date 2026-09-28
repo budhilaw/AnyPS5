@@ -1,3 +1,4 @@
+#include <algorithm>
 #include "prx/libSceAgcDriver/Graphics/include/ShaderResources.hpp"
 #include "prx/libSceAgcDriver/Execution/include/MemoryAccessScope.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/RenderCache.hpp"
@@ -81,7 +82,7 @@ void ShaderResources::build(std::span<const CompiledShader> shaders, const Color
     try {
         Require(!shaders.empty() && context.limits.maxBoundDescriptorSets >= 1, "shader descriptor set exceeds device limits");
         std::vector<Binding> bindings;
-        std::set<std::uint32_t> occupied;
+        std::vector<std::uint32_t> occupied;
         std::uint64_t storageBuffers = 0;
         for (const auto& shader : shaders) {
             Require(shader.program != nullptr, "missing compiled shader");
@@ -89,7 +90,8 @@ void ShaderResources::build(std::span<const CompiledShader> shaders, const Color
             std::uint64_t stageDescriptors = 0;
             for (const auto& binding : shader.program->bindings) {
                 Require(binding.descriptorSet == 0, "unexpected descriptor set: every shader resource must use descriptor set zero");
-                Require(occupied.insert(binding.binding).second, "duplicate shader binding");
+                Require(std::find(occupied.begin(), occupied.end(), binding.binding) == occupied.end(), "duplicate shader binding");
+                occupied.push_back(binding.binding);
                 const bool addressRole = binding.role == ShaderRecompiler::DescriptorRole::BdaPagetable || binding.role == ShaderRecompiler::DescriptorRole::FaultBuffer;
                 const bool gdsRole = binding.role == ShaderRecompiler::DescriptorRole::Gds;
                 const bool bufferRole = addressRole || gdsRole || binding.role == ShaderRecompiler::DescriptorRole::GuestBuffers || binding.role == ShaderRecompiler::DescriptorRole::ShaderData || binding.role == ShaderRecompiler::DescriptorRole::FlattenedSrt;
@@ -251,8 +253,8 @@ std::size_t ShaderResources::addGuestBuffer(std::span<const std::uint32_t> words
     }
     Require(target == nullptr || !overlap(address, size, target->address, target->bytes), "shader buffer aliases the render target");
     Require(!written || !overlap(address, size, indexAddress, indexBytes), "writable shader buffer aliases the index buffer");
-    if (written) guestMemory.AddWritable(address, size);
-    else guestMemory.AddReadOnly(address, size);
+    if (written) guestMemory.AddWritable(address, size, true);
+    else guestMemory.AddReadOnly(address, size, true);
     allocations.push_back({address, size, true, nullptr});
     return allocations.size() - 1;
 }

@@ -35,9 +35,9 @@ void GuestBufferMemory::validate(std::uint64_t address, std::size_t bytes) const
 
 // The device's access resolution (waiting for queued GPU writes, saving render targets) runs at
 // upload, once it is known whether the GPU reads guest memory in place or the host copies it.
-void GuestBufferMemory::AddWritable(std::uint64_t address, std::size_t bytes) {
+void GuestBufferMemory::AddWritable(std::uint64_t address, std::size_t bytes, bool checked) {
     validate(address, bytes);
-    {
+    if (!checked) {
         const GuestMemory::MemoryAccessScope deferred(nullptr, nullptr);
         GuestMemory::CheckRange(reinterpret_cast<const void*>(address), bytes, 1, true);
     }
@@ -46,9 +46,9 @@ void GuestBufferMemory::AddWritable(std::uint64_t address, std::size_t bytes) {
     writes.emplace_back(address, address + bytes);
 }
 
-void GuestBufferMemory::AddReadOnly(std::uint64_t address, std::size_t bytes) {
+void GuestBufferMemory::AddReadOnly(std::uint64_t address, std::size_t bytes, bool checked) {
     validate(address, bytes);
-    {
+    if (!checked) {
         const GuestMemory::MemoryAccessScope deferred(nullptr, nullptr);
         GuestMemory::CheckRange(reinterpret_cast<const void*>(address), bytes, 1, false);
     }

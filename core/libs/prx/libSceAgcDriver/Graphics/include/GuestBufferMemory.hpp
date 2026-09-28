@@ -23,9 +23,10 @@ public:
     static constexpr std::uint64_t ViewAlignment = 256;
     explicit GuestBufferMemory(const Context& context);
     void AcquireRegistered();
-    void AddWritable(std::uint64_t address, std::size_t bytes);
+    // `checked`: the caller already range-checked it the same way.
+    void AddWritable(std::uint64_t address, std::size_t bytes, bool checked = false);
     // A buffer the shader only reads: uploaded from guest memory, never written back.
-    void AddReadOnly(std::uint64_t address, std::size_t bytes);
+    void AddReadOnly(std::uint64_t address, std::size_t bytes, bool checked = false);
     void AddSnapshot(const GuestMemorySnapshot& snapshot);
     void Upload(bool addressable);
     VkDescriptorBufferInfo Descriptor(std::uint64_t address, std::size_t bytes) const;
