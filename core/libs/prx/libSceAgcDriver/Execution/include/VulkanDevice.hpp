@@ -42,6 +42,10 @@ public:
     void GdsTransfer(std::span<const std::uint32_t> packet);
     void AcquireGpuMemory();
     void ResolveMemory(std::uint64_t address, std::size_t bytes, bool writable);
+    // Whether a host access to the range may need ResolveMemory (queued GPU writes or resident
+    // render targets overlap it), without the device's lock: a list published as they change. An
+    // access racing a change reaches the memory tracking (a protected page faults and resolves).
+    bool NeedsResolve(std::uint64_t address, std::size_t bytes) const;
     void* Window() const;
     void Resize(std::uint32_t width, std::uint32_t height);
     bool Presentable() const;

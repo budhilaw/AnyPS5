@@ -37,6 +37,7 @@ constexpr std::uint32_t LcDyldInfoOnly = 0x80000022;
 constexpr std::uint32_t LcMain = 0x80000028;
 constexpr std::uint32_t LcBuildVersion = 0x32;
 constexpr std::uint32_t LcIdDylib = 0xd;
+constexpr std::uint32_t LcFunctionStarts = 0x26;
 constexpr std::uint32_t SectionModInitFuncPointers = 0x9;
 
 constexpr std::uint32_t VmProtRead = 1, VmProtWrite = 2, VmProtExecute = 4;
@@ -586,6 +587,50 @@ std::vector<std::uint8_t> MachOPatcher::Patch(
     }
     const auto exportOffset = linkedit.Fileoff + linkeditData.size(); linkeditData.insert(linkeditData.end(), exportTrie.begin(), exportTrie.end()); while (linkeditData.size() % 8) linkeditData.push_back(0);
     const auto stringOffset = linkedit.Fileoff + linkeditData.size(); linkeditData.push_back(0); linkeditData.push_back(0); while (linkeditData.size() % 8) linkeditData.push_back(0);
+    // Function starts: Rosetta translates ahead of time the code it can find from them. Without
+    // them it finds little of a stripped guest image and translates the rest at run time, which
+    // runs markedly slower (Hades: 52 ms frames became 42 ms). Every FDE of the unwind table
+    // starts a function; so does code that relative relocations point at (vtables, callbacks).
+    Bytes functionStarts;
+    {
+        std::set<std::uint64_t> starts;
+        const auto executable = [&](std::uint64_t vaddr) {
+            for (const auto& load : loads) if ((load.Flags & 1) && vaddr >= load.MappedAddress && vaddr - load.MappedAddress < load.FileSize) return true;
+            return false;
+        };
+        if (exceptionHeader != nullptr && exceptionHeader->FileSize >= 12) {
+            const auto base = static_cast<std::size_t>(exceptionHeader->Offset);
+            const auto version = sourceElf[base], countEncoding = sourceElf[base + 2], tableEncoding = sourceElf[base + 3];
+            // DW_EH_PE_udata4 count, DW_EH_PE_datarel | DW_EH_PE_sdata4 table: what linkers emit.
+            if (version == 1 && countEncoding == 0x03 && tableEncoding == 0x3b) {
+                const auto count = Io::ReadU32(sourceElf, base + 8);
+                if (12 + static_cast<std::uint64_t>(count) * 8 <= exceptionHeader->FileSize) {
+                    for (std::uint32_t i = 0; i < count; ++i) {
+                        const auto initial = static_cast<std::int32_t>(Io::ReadU32(sourceElf, base + 12 + static_cast<std::size_t>(i) * 8));
+                        const auto vaddr = exceptionHeader->MappedAddress + static_cast<std::int64_t>(initial);
+                        if (executable(vaddr)) starts.insert(vaddr);
+                    }
+                }
+            }
+        }
+        for (const auto& relocation : relocations) {
+            if (relocation.Type == RelocationRelative && relocation.Addend > 0 && executable(static_cast<std::uint64_t>(relocation.Addend))) starts.insert(static_cast<std::uint64_t>(relocation.Addend));
+        }
+        if (!module && executable(entry)) starts.insert(entry);
+        for (const auto& item : exports) if (executable(item.Vaddr)) starts.insert(item.Vaddr);
+        std::uint64_t previous = HeaderVmaddr;
+        for (const auto start : starts) {
+            auto delta = GuestBase + start - previous;
+            previous = GuestBase + start;
+            do {
+                auto byte = static_cast<std::uint8_t>(delta & 0x7f);
+                delta >>= 7;
+                functionStarts.push_back(static_cast<Bytes::value_type>(delta != 0 ? byte | 0x80 : byte));
+            } while (delta != 0);
+        }
+        if (!functionStarts.empty()) functionStarts.push_back(0);
+    }
+    const auto functionStartsOffset = linkedit.Fileoff + linkeditData.size(); linkeditData.insert(linkeditData.end(), functionStarts.begin(), functionStarts.end()); while (linkeditData.size() % 8) linkeditData.push_back(0);
     linkedit.Filesize = linkeditData.size();
     linkedit.Vmsize = alignUp(linkeditData.size(), Page);
     layout.Segments.push_back(linkedit);
@@ -625,6 +670,10 @@ std::vector<std::uint8_t> MachOPatcher::Patch(
     }
     {
         Bytes command; appendU32(command, LcDysymtab); appendU32(command, 80); for (int i = 0; i < 18; ++i) appendU32(command, 0);
+        commands.insert(commands.end(), command.begin(), command.end()); ++commandCount;
+    }
+    if (!functionStarts.empty()) {
+        Bytes command; appendU32(command, LcFunctionStarts); appendU32(command, 16); appendU32(command, static_cast<std::uint32_t>(functionStartsOffset)); appendU32(command, static_cast<std::uint32_t>(functionStarts.size()));
         commands.insert(commands.end(), command.begin(), command.end()); ++commandCount;
     }
     {

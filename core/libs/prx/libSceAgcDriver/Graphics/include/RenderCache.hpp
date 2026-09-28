@@ -66,6 +66,10 @@ public:
     explicit RenderCache(const Context& context) : context(context) {}
     ~RenderCache();
     std::shared_ptr<ResidentColor> Get(const ColorTarget& color, bool blending);
+    // The guest ranges of every resident color target.
+    void AppendColorRanges(std::vector<std::pair<std::uint64_t, std::uint64_t>>& ranges) const {
+        for (const auto& [address, entry] : entries) ranges.emplace_back(address, address + entry->Description().bytes);
+    }
     // The parts of [begin, end) whose watchers need to hear of an in-place GPU write by the
     // queued work numbered `sequence` (resident targets that adopted it are left out).
     std::vector<std::pair<std::uint64_t, std::uint64_t>> UnadoptedRanges(std::uint64_t begin, std::uint64_t end, std::uint64_t sequence) const;

@@ -18,6 +18,7 @@
 #include <bit>
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <condition_variable>
 #include <cstring>
 #include <deque>
@@ -35,6 +36,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <functional>
 #include <unordered_map>
 
 namespace AgcDriver {
@@ -120,6 +122,13 @@ std::uint32_t readUserData(const Registers& registers, std::uint32_t offset) {
 }
 
 class Driver {
+    // Device work the graphics thread records in order (see graphicsJobs).
+    struct GraphicsJob {
+        std::function<void()> run;
+        std::vector<std::pair<std::uint64_t, std::uint64_t>> writes;  // guest memory it may write
+        bool writesUnknown = false;  // stores whose ranges are not known (images, device addresses)
+    };
+
 public:
     static Driver& Get() {
         static Driver driver;
@@ -145,6 +154,104 @@ private:
         }
         changed.notify_all();
         if (worker.joinable()) worker.join();
+        {
+            std::lock_guard lock(graphicsMutex);
+            graphicsStopping = true;
+        }
+        graphicsChanged.notify_all();
+        if (graphicsThread.joinable()) graphicsThread.join();
+    }
+
+    void runGraphics() noexcept {
+        std::unique_lock lock(graphicsMutex);
+        while (true) {
+            graphicsChanged.wait(lock, [&] { return graphicsStopping || !graphicsJobs.empty(); });
+            if (graphicsJobs.empty()) return;
+            auto run = std::move(graphicsJobs.front().run);
+            graphicsBusy = true;
+            lock.unlock();
+            try {
+                run();
+            } catch (...) {
+                ReportFailure(std::current_exception());
+            }
+            lock.lock();
+            graphicsJobs.pop_front();
+            graphicsBusy = false;
+            graphicsCompleted.fetch_add(1, std::memory_order_release);
+            graphicsChanged.notify_all();
+        }
+    }
+
+    void postGraphics(GraphicsJob job) {
+        if (!job.writes.empty() || job.writesUnknown) postedWrites.push_back({graphicsPosted + 1, job.writes, job.writesUnknown});
+        ++graphicsPosted;
+        std::unique_lock lock(graphicsMutex);
+        graphicsChanged.wait(lock, [&] { return graphicsJobs.size() < MaxGraphicsJobs || graphicsStopping; });
+        require(!graphicsStopping, "graphics work after shutdown");
+        graphicsJobs.push_back(std::move(job));
+        graphicsChanged.notify_all();
+    }
+
+    // Waits until the graphics thread recorded everything queued. Never with the GPU (memory
+    // tracking) lock held: the graphics thread takes it for every job.
+    void drainGraphics() {
+        PerformanceTimer timing("Driver.GraphicsDrain");
+        std::unique_lock lock(graphicsMutex);
+        graphicsChanged.wait(lock, [&] { return graphicsJobs.empty(); });
+    }
+
+    // Posting thread only.
+    bool graphicsPending() const {
+        return graphicsCompleted.load(std::memory_order_acquire) != graphicsPosted;
+    }
+
+    // Whether queued graphics work may write guest memory in the range (posting thread only).
+    bool graphicsMayWrite(std::uint64_t address, std::size_t bytes) {
+        const auto completed = graphicsCompleted.load(std::memory_order_acquire);
+        while (!postedWrites.empty() && postedWrites.front().number <= completed) postedWrites.pop_front();
+        const auto end = address + bytes;
+        for (const auto& job : postedWrites) {
+            if (job.writesUnknown) return true;
+            for (const auto& [first, last] : job.writes) if (first < end && address < last) return true;
+        }
+        return false;
+    }
+
+    // Host reads while preparing a draw: resolved on the device only when queued or recorded GPU
+    // work may affect the range (the check takes no GPU lock, so the graphics thread goes on).
+    static void resolveForHost(void* context, std::uint64_t address, std::size_t bytes, bool writable) {
+        auto& self = *static_cast<Driver*>(context);
+        const auto current = self.graphicsDevice;
+        if (current == nullptr) return;
+        const bool queuedWrite = self.graphicsMayWrite(address, bytes);
+        const bool recorded = !queuedWrite && current->NeedsResolve(address, bytes);
+        if (!writable && !queuedWrite && !recorded) return;
+        // ANYPS5_TRACE_DRAINS=1: why host accesses wait for the graphics thread (diagnostics).
+        if (static const bool trace = std::getenv("ANYPS5_TRACE_DRAINS") != nullptr; trace) {
+            static int reported = 0;
+            if (reported++ < 400) {
+                std::string ranges;
+                {
+                    std::lock_guard lock(self.graphicsMutex);
+                    for (const auto& job : self.graphicsJobs) {
+                        if (job.writesUnknown) { ranges += " unknown"; continue; }
+                        for (const auto& [first, last] : job.writes) if (first < address + bytes && address < last) { char item[64]; std::snprintf(item, sizeof(item), " 0x%llx+0x%llx", static_cast<unsigned long long>(first), static_cast<unsigned long long>(last - first)); ranges += item; }
+                    }
+                }
+                std::fprintf(stderr, "[drain] 0x%llx+0x%zx %s queued %d recorded %d:%s\n", static_cast<unsigned long long>(address), bytes, writable ? "write" : "read", queuedWrite ? 1 : 0, recorded ? 1 : 0, ranges.c_str());
+            }
+        }
+        self.drainGraphics();
+        current->ResolveMemory(address, bytes, writable);
+    }
+    std::shared_ptr<VulkanDevice> graphicsDevice;  // the device the worker prepares draws for
+    std::mutex deviceMutex;  // guards `device` (the presentation thread replaces it)
+
+    std::shared_ptr<VulkanDevice> currentDevice(bool create = false) {
+        std::lock_guard lock(deviceMutex);
+        if (device == nullptr && create) device = std::make_shared<VulkanDevice>();
+        return device;
     }
 
 public:
@@ -274,11 +381,16 @@ public:
         timing.Mark("validate");
         try {
             {
+                // Queued graphics work records on the device a windowed one replaces: finish it
+                // first (before the GPU lock, which the graphics thread takes).
+                if (const auto existing = currentDevice(); existing == nullptr || existing->Window() == nullptr) drainGraphics();
                 std::unique_lock lock(gpuMutex);
                 timing.Mark("gpu_mutex_wait");
                 if (device == nullptr || device->Window() == nullptr) {
                     if (device) device->WaitIdle();
-                    device = std::make_shared<VulkanDevice>(&window);
+                    auto replacement = std::make_shared<VulkanDevice>(&window);
+                    std::lock_guard deviceLock(deviceMutex);
+                    device = std::move(replacement);
                 }
                 require(device->Window() == window.context, "presentation window does not match device surface");
                 presenting = device;
@@ -319,7 +431,9 @@ public:
     }
 
     void ReleaseWindow(void* window) {
+        drainGraphics();
         std::lock_guard lock(gpuMutex);
+        std::lock_guard deviceLock(deviceMutex);
         if (device && device->Window() == window) device.reset();
     }
 
@@ -363,9 +477,30 @@ private:
     bool stopping = false;
     std::shared_ptr<FrameTiming> frameTiming;
     std::uint64_t frameSerial = 0;
+
+    // The graphics thread records queued device work (draws, barriers, deferred label writes,
+    // flips) in order while the worker decodes packets and prepares the next draws' shaders.
+    // Device operations that need the device's current state drain it first.
+    static constexpr std::size_t MaxGraphicsJobs = 256;
+    std::mutex graphicsMutex;
+    std::condition_variable graphicsChanged;
+    std::deque<GraphicsJob> graphicsJobs;  // the front one runs while `graphicsBusy`
+    bool graphicsBusy = false;
+    // The writes of posted jobs, kept by the posting (worker) thread alone: host reads check them
+    // without the queue lock. A job's entry goes once `graphicsCompleted` reaches its number.
+    struct PostedWrites {
+        std::uint64_t number;
+        std::vector<std::pair<std::uint64_t, std::uint64_t>> writes;
+        bool writesUnknown;
+    };
+    std::deque<PostedWrites> postedWrites;
+    std::uint64_t graphicsPosted = 0;
+    std::atomic<std::uint64_t> graphicsCompleted{0};
+    bool graphicsStopping = false;
+    std::thread graphicsThread;
     std::thread worker;
 
-    Driver() : worker([this] { run(); }) {
+    Driver() : graphicsThread([this] { runGraphics(); }), worker([this] { run(); }) {
         try {
             LibcRegisterShutdown_nid_postfix([] { Driver::Get().Shutdown(); });
         } catch (...) {
@@ -446,8 +581,6 @@ private:
 
     void dispatch(QueueState& queue, std::span<const std::uint32_t> packet, const Submission& submission) {
         PerformanceTimer timing("Driver.Dispatch");
-        std::lock_guard gpuLock(gpuMutex);
-        timing.Mark("gpu_mutex_wait");
         const auto address = (static_cast<std::uint64_t>(readRegister(queue.shader, 0x20c)) << 8u) | (static_cast<std::uint64_t>(readRegister(queue.shader, 0x20d) & 0xffu) << 40u);
         auto it = submission.shaders.upper_bound(address);
         require(it != submission.shaders.begin(), "compute program does not belong to a registered shader");
@@ -468,20 +601,19 @@ private:
         }
         const auto compute = Graphics::DecodeComputeStageInfo(queue.shader);
         const std::array<ShaderRecompiler::MemoryRegion, 2> memory{{{snapshot.codeAddress, std::as_bytes(std::span(snapshot.code))}, {snapshot.headerAddress, snapshot.header}}};
-        if (device == nullptr) {
-            device = std::make_shared<VulkanDevice>();
-        }
-        const GuestMemory::MemoryAccessScope memoryScope(device.get(), [](void* context, std::uint64_t address, std::size_t bytes, bool writable) {
-            static_cast<VulkanDevice*>(context)->ResolveMemory(address, bytes, writable);
-        });
+        // Prepared here without the GPU lock, recorded by the graphics thread like draws.
+        const auto current = currentDevice(true);
+        graphicsDevice = current;
+        const GuestMemory::MemoryAccessScope memoryScope(this, &Driver::resolveForHost);
         const auto codeOffset = static_cast<std::size_t>((address - snapshot.codeAddress) / sizeof(std::uint32_t));
         ShaderRecompiler::RecompileRequest request{
             {ShaderRecompiler::ShaderStage::Compute, address, std::span(snapshot.code).subspan(codeOffset), snapshot.headerAddress, snapshot.header, snapshot.CodeHash(codeOffset)},
             {(packet[4] & 0x8000u) != 0 ? 32u : 64u, 0, userData, compute, std::nullopt, std::nullopt, memory},
-            device->Target(),
+            current->Target(),
             {0, 0, 0, 128}
         };
-        ShaderMemory shaderMemory(memory);
+        auto shaderMemoryOwner = std::make_unique<ShaderMemory>(memory);
+        auto& shaderMemory = *shaderMemoryOwner;
         timing.Mark("prepare");
         shaderMemory.Capture(request);
         timing.Mark("shader_memory_capture");
@@ -490,7 +622,7 @@ private:
         request.materializedSnapshot = &shaderMemory.Snapshot();
         request.materializedSpecialization = &shaderMemory.Specialization();
         timing.Mark("request_memory");
-        const auto compiled = ShaderRecompiler::Recompile(request);
+        auto compiled = ShaderRecompiler::Recompile(request);
         timing.Mark(compiled.cacheHit ? "shader_cache_hit" : "shader_compile");
         if (traceDispatch) {
             bool gds = false;
@@ -546,8 +678,36 @@ private:
             std::snprintf(text, sizeof(text), "dispatch program 0x%llx groups %ux%ux%u wave%u%s", static_cast<unsigned long long>(address), packet[1], packet[2], packet[3], (packet[4] & 0x8000u) != 0 ? 32u : 64u, journalIndirect ? " (indirect)" : "");
             GpuJournal::Record(text);
         }
-        device->Dispatch(compiled, packet[1], packet[2], packet[3], snapshots);
-        timing.Mark("dispatch_and_resource_release");
+        GraphicsJob job;
+        for (const auto& binding : compiled.bindings) {
+            if (binding.role == ShaderRecompiler::DescriptorRole::GuestBuffers) {
+                for (std::size_t element = 0; element < binding.elementWritten.size() && element * 4 + 4 <= binding.guestDescriptor.size(); ++element) {
+                    if (!binding.elementWritten[element]) continue;
+                    const auto* words = binding.guestDescriptor.data() + element * 4;
+                    const auto base = (words[0] | (static_cast<std::uint64_t>(words[1]) << 32u)) & 0xffffffffffffull;
+                    const auto stride = (words[1] >> 16u) & 0x3fffu;
+                    const auto bytes = stride == 0 ? static_cast<std::uint64_t>(words[2]) : static_cast<std::uint64_t>(stride) * words[2];
+                    job.writes.emplace_back(base, base + bytes);
+                }
+            } else if (!binding.readOnly && binding.kind == ShaderRecompiler::DescriptorKind::StorageImage) {
+                job.writesUnknown = true;
+            }
+        }
+        struct DispatchWork {
+            std::shared_ptr<VulkanDevice> device;
+            std::shared_ptr<FrameTiming> timing;
+            std::unique_ptr<ShaderMemory> memory;  // owns the bytes the snapshots view
+            ShaderRecompiler::RecompileResult compiled;
+            std::array<std::uint32_t, 3> groups;
+            std::vector<Graphics::GuestMemorySnapshot> snapshots;
+        };
+        auto work = std::make_shared<DispatchWork>(DispatchWork{current, frameTiming, std::move(shaderMemoryOwner), std::move(compiled), {packet[1], packet[2], packet[3]}, std::move(snapshots)});
+        job.run = [work] {
+            PerformanceContext timingContext(work->timing.get());
+            work->device->Dispatch(work->compiled, work->groups[0], work->groups[1], work->groups[2], work->snapshots);
+        };
+        postGraphics(std::move(job));
+        timing.Mark("post");
     }
 
     void draw(QueueState& queue, std::span<const std::uint32_t> packet, const Submission& submission) {
@@ -659,7 +819,9 @@ private:
             memory.insert(memory.end(), program.memory.begin(), program.memory.end());
             linked.push_back({roles[i], program.binary, program.userDataBase, program.firstUserSgpr, program.userData});
         }
-        {
+        // ANYPS5_GPU_JOURNAL_DRAWS=1: every draw joins the GPU journal hang reports print (formatting
+        // one per draw costs about a millisecond a frame).
+        if (static const bool journalDraws = std::getenv("ANYPS5_GPU_JOURNAL_DRAWS") != nullptr; journalDraws) {
             char text[320];
             std::snprintf(text, sizeof(text), "draw programs 0x%llx/0x%llx %s count %u instances %u target %ux%u format %u%s mask 0x%x blend %u vp %.0fx%.0f@%.0f,%.0f sc %ux%u@%d,%d depth %s%s%s", static_cast<unsigned long long>(programs.front().binary.codeAddress), static_cast<unsigned long long>(programs.back().binary.codeAddress), drawParameters.indexed ? "indexed" : "auto", drawParameters.indexCount, drawParameters.instanceCount, graphics.renderExtent.width, graphics.renderExtent.height, graphics.hasColorTarget ? static_cast<unsigned>(graphics.color.format) : 0u, graphics.hasDepthTarget ? " depth" : "", graphics.blend.colorWriteMask, graphics.blend.blendEnable, graphics.viewport.width, graphics.viewport.height, graphics.viewport.x, graphics.viewport.y, graphics.scissor.extent.width, graphics.scissor.extent.height, graphics.scissor.offset.x, graphics.scissor.offset.y, graphics.depthState.test ? "test" : "-", graphics.depthState.write ? "+write" : "", graphics.hasColorTarget ? (graphics.color.gpuOnly ? " gpuonly" : "") : "");
             if (graphics.blend.blendEnable) {
@@ -675,14 +837,13 @@ private:
             GpuJournal::Record(text);
         }
         timing.Mark("prepare");
-        std::lock_guard gpuLock(gpuMutex);
-        timing.Mark("gpu_mutex_wait");
-        if (device == nullptr) device = std::make_shared<VulkanDevice>();
+        // The shaders are prepared without the GPU lock; the graphics thread records the draw.
+        const auto current = currentDevice(true);
         timing.Mark("device_setup");
-        const GuestMemory::MemoryAccessScope memoryScope(device.get(), [](void* context, std::uint64_t address, std::size_t bytes, bool writable) {
-            static_cast<VulkanDevice*>(context)->ResolveMemory(address, bytes, writable);
-        });
-        ShaderMemory shaderMemory(memory);
+        graphicsDevice = current;
+        const GuestMemory::MemoryAccessScope memoryScope(this, &Driver::resolveForHost);
+        auto shaderMemoryOwner = std::make_unique<ShaderMemory>(memory);
+        auto& shaderMemory = *shaderMemoryOwner;
         std::vector<ShaderRecompiler::RecompileResult> results;
         std::vector<Graphics::CompiledShader> stages;
         results.reserve(programs.size() + (graphics.rectList ? 2u : 0u));
@@ -695,7 +856,7 @@ private:
             ShaderRecompiler::RecompileRequest request{
                 program.binary,
                 {waveSize, program.firstUserSgpr, program.userData, std::nullopt, program.binary.stage == Stage::Fragment ? std::optional(pixel) : std::nullopt, program.binary.stage == Stage::Fragment ? std::nullopt : std::optional(Graphics::DecodeVertexStageInfo(program.binary.header, program.binary.headerAddress, program.userData)), memory},
-                device->Target(),
+                current->Target(),
                 {0, 0, pushCursorBytes, Graphics::PipelinePushConstantBytes - pushCursorBytes},
                 ShaderRecompiler::GraphicsCompileContext{program.firstUserSgpr, linked, graphics.stages.mesh, graphics.stages.tessellation, {drawParameters.indexAddress, drawParameters.indexCount, drawParameters.indexSize, drawParameters.instanceCount}}
             };
@@ -731,7 +892,7 @@ private:
         timing.Mark("shaders");
         if (graphics.rectList) {
             require(stages.size() == 2, "rect-list requires vertex and fragment programs");
-            auto rectangle = ShaderRecompiler::BuildRectListShaders(results[0], results[1], device->Target());
+            auto rectangle = ShaderRecompiler::BuildRectListShaders(results[0], results[1], current->Target());
             results.push_back(std::move(rectangle.control));
             results.push_back(std::move(rectangle.evaluation));
             stages.insert(stages.begin() + 1, {{Stage::TessellationControl, &results[2], 0}, {Stage::TessellationEvaluation, &results[3], 0}});
@@ -739,8 +900,50 @@ private:
         std::vector<Graphics::GuestMemorySnapshot> snapshots;
         for (const auto& region : memory) snapshots.push_back({region.guestAddress, region.bytes});
         timing.Mark("post_compile_prepare");
-        device->EnqueueDraw(graphics, drawParameters, stages, snapshots);
-        timing.Mark("draw_and_resource_release");
+        // What the draw may write, for host reads racing the graphics thread (resolveForHost).
+        GraphicsJob job;
+        if (graphics.hasColorTarget) {
+            job.writes.emplace_back(graphics.color.address, graphics.color.address + graphics.color.bytes);
+            for (const auto& extra : graphics.extraColors) job.writes.emplace_back(extra.address, extra.address + extra.bytes);
+        }
+        for (const auto& result : results) {
+            for (const auto& binding : result.bindings) {
+                if (binding.role == ShaderRecompiler::DescriptorRole::GuestBuffers) {
+                    for (std::size_t element = 0; element < binding.elementWritten.size() && element * 4 + 4 <= binding.guestDescriptor.size(); ++element) {
+                        if (!binding.elementWritten[element]) continue;
+                        const auto* words = binding.guestDescriptor.data() + element * 4;
+                        const auto base = (words[0] | (static_cast<std::uint64_t>(words[1]) << 32u)) & 0xffffffffffffull;
+                        const auto stride = (words[1] >> 16u) & 0x3fffu;
+                        const auto bytes = stride == 0 ? static_cast<std::uint64_t>(words[2]) : static_cast<std::uint64_t>(stride) * words[2];
+                        job.writes.emplace_back(base, base + bytes);
+                    }
+                } else if (!binding.readOnly && binding.kind == ShaderRecompiler::DescriptorKind::StorageImage) {
+                    // Image stores land in textures of guest memory the host cannot bound cheaply.
+                    // (Memory reached through device addresses is bound read-only: see
+                    // GuestBufferMemory::AddressRanges.)
+                    job.writesUnknown = true;
+                }
+            }
+        }
+        struct DrawWork {
+            std::shared_ptr<VulkanDevice> device;
+            std::shared_ptr<FrameTiming> timing;
+            Graphics::State graphics;
+            Pm4::DrawParameters draw;
+            std::unique_ptr<ShaderMemory> memory;  // owns the bytes the snapshots view
+            std::vector<ShaderRecompiler::RecompileResult> results;  // the stages point into it
+            std::vector<Graphics::CompiledShader> stages;
+            std::vector<Graphics::GuestMemorySnapshot> snapshots;
+        };
+        auto work = std::make_shared<DrawWork>(DrawWork{current, frameTiming, graphics, drawParameters, std::move(shaderMemoryOwner), std::move(results), std::move(stages), std::move(snapshots)});
+        job.run = [work] {
+            PerformanceContext timingContext(work->timing.get());
+            PerformanceTimer timing("Driver.GraphicsJob");
+            work->device->EnqueueDraw(work->graphics, work->draw, work->stages, work->snapshots);
+            timing.Mark("draw");
+        };
+        postGraphics(std::move(job));
+        timing.Mark("post");
     }
 
     void includeSubmission(const Submission& submission, bool firstSegment) {
@@ -801,6 +1004,7 @@ private:
         if (submission.suspend) {
             PerformanceContext timingContext(frameTiming.get());
             PerformanceTimer timing("Driver.Suspend");
+            drainGraphics();
             std::lock_guard gpuLock(gpuMutex);
             timing.Mark("gpu_mutex_wait");
             if (device != nullptr) device->WaitIdle();
@@ -831,7 +1035,8 @@ private:
                 std::uint64_t writeAddress = 0, writeValue = 0;
                 std::uint32_t writeBytes = 0;
                 bool writeKnown = false;
-                if (device != nullptr && (opcode == 0x37 || opcode == 0x40 || opcode == 0x50 || opcode == 0x49) && Pm4::DeferrableWrite(packet, writeAddress, writeBytes, writeValue, writeKnown) && device->HasPendingWork()) {
+                const auto current = currentDevice();
+                if (current != nullptr && (opcode == 0x37 || opcode == 0x40 || opcode == 0x50 || opcode == 0x49) && Pm4::DeferrableWrite(packet, writeAddress, writeBytes, writeValue, writeKnown) && (graphicsPending() || current->HasPendingWork())) {
                     // A label write behind pending GPU work completes with that work instead of
                     // draining the device now; waits see its value meanwhile (lookupDeferred).
                     const auto id = ++deferredSerial;
@@ -843,49 +1048,50 @@ private:
                     const auto interrupt = opcode == 0x49 ? (packet[2] >> 24u) & 7u : 0u;
                     const auto interruptId = opcode == 0x49 && packet.size() > 7 ? packet[7] & 0x7ffffffu : 0u;
                     QueueState* queuePointer = &queue;
-                    device->Defer([this, copy = std::move(copy), queuePointer, id, writeAddress, interrupt, interruptId] {
+                    std::function<void()> write = [this, copy = std::move(copy), queuePointer, id, writeAddress, interrupt, interruptId] {
                         Pm4::Execute(std::span<const std::uint32_t>(copy), *queuePointer);
                         if (interrupt != 0) AgcDriver::Eq::Trigger(interruptId);
                         std::lock_guard lock(deferredMutex);
                         const auto it = deferred.find(writeAddress);
                         if (it != deferred.end() && it->second.id == id) deferred.erase(it);
-                    });
+                    };
+                    // It completes with the GPU work recorded before it, queued work included.
+                    postGraphics({[current, write] { current->Defer(write); }, {}, false});
                     timing.Mark("deferred_write");
                     execution.cursor += count;
                     return Step::Progressed;
                 }
                 if (opcode == 0x37 || opcode == 0x40 || opcode == 0x50 || opcode == 0x42 || opcode == 0x46 || opcode == 0x49 || opcode == 0x58 || header == FlipPacketHeader) {
-                    std::lock_guard gpuLock(gpuMutex);
-                    timing.Mark("gpu_mutex_wait");
                     const auto memoryTransfer = opcode == 0x37 || opcode == 0x40 || opcode == 0x50;
-                    if (device != nullptr) {
+                    if (current != nullptr) {
                         if (opcode == 0x58) {
                             // ACQUIRE_MEM: GPU caches meet GPU work; a barrier inside the queue.
-                            device->AcquireGpuMemory();
+                            postGraphics({[current] { current->AcquireGpuMemory(); }, {}, false});
                             timing.Mark("gpu_cache_barrier");
                         } else if (opcode == 0x42 || opcode == 0x46) {
                             // PFP_SYNC_ME and cache events order GPU work against GPU work: a
                             // barrier inside the queue, no host wait.
-                            device->RecordBarrier();
+                            postGraphics({[current] { current->RecordBarrier(); }, {}, false});
                             timing.Mark("gpu_barrier");
                         } else if (memoryTransfer) {
                             // Executed on the host: only pending GPU writes to its ranges matter.
+                            drainGraphics();
+                            std::lock_guard gpuLock(gpuMutex);
                             std::uint64_t destination = 0, source = 0;
                             std::size_t destinationBytes = 0, sourceBytes = 0;
                             Pm4::TransferRanges(packet, destination, destinationBytes, source, sourceBytes);
-                            device->ResolveGpuWrites(destination, destinationBytes);
-                            device->ResolveGpuWrites(source, sourceBytes);
+                            current->ResolveGpuWrites(destination, destinationBytes);
+                            current->ResolveGpuWrites(source, sourceBytes);
                             timing.Mark("transfer_resolve");
+                        } else if (header == FlipPacketHeader && AsyncFlips()) {
+                            // The graphics thread submits the frame and hands it to presentation.
                         } else {
                             const auto scope = header == FlipPacketHeader ? "Driver.FlipWait" : "Driver.ReleaseWait";
                             PerformanceTimer waitTiming(scope);
-                            if (header == FlipPacketHeader && AsyncFlips()) {
-                                device->FlushDraws();
-                                timing.Mark("flip_submit");
-                            } else {
-                                device->WaitIdle();
-                                timing.Mark("device_idle_wait");
-                            }
+                            drainGraphics();
+                            std::lock_guard gpuLock(gpuMutex);
+                            current->WaitIdle();
+                            timing.Mark("device_idle_wait");
                         }
                     }
                 }
@@ -910,6 +1116,7 @@ private:
                 } else if (opcode == 0x16) {
                     std::array<std::uint32_t, 5> direct;
                     {
+                        drainGraphics();
                         std::lock_guard gpuLock(gpuMutex);
                         const GuestMemory::MemoryAccessScope memoryScope(device.get(), [](void* context, std::uint64_t address, std::size_t bytes, bool writable) {
                             if (context) static_cast<VulkanDevice*>(context)->ResolveMemory(address, bytes, writable);
@@ -922,6 +1129,7 @@ private:
                 } else if (opcode == 0x35 || opcode == 0x2d || opcode == 0x27 || opcode == 0x24 || opcode == 0x25) {
                     draw(queue, packet, submission);
                 } else if (opcode == 0x50 && (Pm4::DmaGdsDestination(packet) || Pm4::DmaGdsSource(packet))) {
+                    drainGraphics();
                     std::lock_guard gpuLock(gpuMutex);
                     require(device != nullptr, "GDS transfer without a device");
                     const GuestMemory::MemoryAccessScope memoryScope(device.get(), [](void* context, std::uint64_t address, std::size_t bytes, bool writable) {
@@ -930,10 +1138,10 @@ private:
                     device->GdsTransfer(packet);
                     timing.Mark("gds_transfer");
                 } else if (opcode != 0x42 && opcode != 0x46 && opcode != 0x58) {
-                    std::lock_guard gpuLock(gpuMutex);
-                    const GuestMemory::MemoryAccessScope memoryScope(device.get(), [](void* context, std::uint64_t address, std::size_t bytes, bool writable) {
-                        if (context) static_cast<VulkanDevice*>(context)->ResolveMemory(address, bytes, writable);
-                    });
+                    // Register packets need no GPU lock; memory they touch resolves on demand
+                    // (after the graphics thread recorded what may affect it).
+                    graphicsDevice = currentDevice();
+                    const GuestMemory::MemoryAccessScope memoryScope(this, &Driver::resolveForHost);
                     Pm4::Execute(packet, queue);
                     timing.Mark("pm4_execute");
                     if (opcode == 0x49 && ((packet[2] >> 24u) & 7u) != 0) {
@@ -945,7 +1153,15 @@ private:
             if (header == FlipPacketHeader) {
                 frameTiming->SetFlip(submission.serial, cursor, submission.received, FrameTiming::Clock::now());
                 const auto completedFrame = std::exchange(frameTiming, nullptr);
-                submission.flips.at(cursor)->GpuReady(completedFrame);
+                auto flip = submission.flips.at(cursor);
+                if (const auto current = currentDevice(); current != nullptr && AsyncFlips()) {
+                    postGraphics({[current, flip, completedFrame] {
+                        current->FlushDraws();
+                        flip->GpuReady(completedFrame);
+                    }, {}, false});
+                } else {
+                    flip->GpuReady(completedFrame);
+                }
             }
             execution.cursor += count;
         }
@@ -1012,12 +1228,15 @@ private:
                     }
                 }
                 {
-                    // Completed GPU batches deliver their write-backs and label writes.
-                    std::lock_guard gpuLock(gpuMutex);
-                    if (device != nullptr) {
-                        device->Collect();
-                        gpuPending = device->HasPendingWork();
-                    } else gpuPending = false;
+                    // Completed GPU batches deliver their write-backs and label writes. The
+                    // graphics thread collects as it records, so a busy GPU lock is skipped.
+                    std::unique_lock gpuLock(gpuMutex, std::try_to_lock);
+                    const auto current = currentDevice();
+                    if (current == nullptr) gpuPending = false;
+                    else if (gpuLock.owns_lock()) {
+                        current->Collect();
+                        gpuPending = graphicsPending() || current->HasPendingWork();
+                    } else gpuPending = true;
                 }
                 // Every queue steps one packet per round; a queue blocked on a label waits for
                 // the others (or the title) to release it.
@@ -1050,15 +1269,21 @@ private:
                     std::this_thread::sleep_for(std::chrono::microseconds(20));
                 }
             }
+            drainGraphics();
             std::lock_guard gpuLock(gpuMutex);
+            std::lock_guard deviceLock(deviceMutex);
             device.reset();
+            graphicsDevice.reset();
         } catch (...) {
             const auto error = std::current_exception();
             for (auto& [id, fifo] : queued) for (auto& execution : fifo) for (const auto& [offset, flip] : execution.submission.flips) flip->Fail(error);
             ReportFailure(error);
             {
+                drainGraphics();
                 std::lock_guard gpuLock(gpuMutex);
+                std::lock_guard deviceLock(deviceMutex);
                 device.reset();
+                graphicsDevice.reset();
             }
         }
     }

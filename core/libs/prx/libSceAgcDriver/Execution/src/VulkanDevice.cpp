@@ -82,6 +82,21 @@ struct VulkanDevice::State {
     VkFence acquireFence = VK_NULL_HANDLE;
     VkFence renderFence = VK_NULL_HANDLE;
     bool renderPending = false;  // the last presentation's commands may still execute
+    // Ranges host accesses have to resolve (see NeedsResolve), republished under the memory
+    // tracking lock by the entry points that change them.
+    mutable std::mutex hostRangesMutex;
+    std::shared_ptr<const std::vector<std::pair<std::uint64_t, std::uint64_t>>> hostRanges = std::make_shared<const std::vector<std::pair<std::uint64_t, std::uint64_t>>>();
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> hostRangesScratch;
+    void PublishHostRanges() {
+        hostRangesScratch.clear();
+        if (renderCache) renderCache->AppendColorRanges(hostRangesScratch);
+        if (drawQueue) drawQueue->AppendWriteRanges(hostRangesScratch);
+        // Most draws change neither: readers keep the list they have.
+        if (hostRangesScratch == *hostRanges) return;
+        auto ranges = std::make_shared<const std::vector<std::pair<std::uint64_t, std::uint64_t>>>(hostRangesScratch);
+        std::lock_guard lock(hostRangesMutex);
+        hostRanges = std::move(ranges);
+    }
     std::mutex ticketMutex;
     std::condition_variable ticketDone;
     std::uint64_t ticketsIssued = 0;
@@ -584,6 +599,7 @@ void VulkanDevice::WaitIdle() {
     std::lock_guard memoryLock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
     PerformanceTimer timing("Vulkan.WaitIdle");
     state->drawQueue->Wait();
+    state->PublishHostRanges();
     timing.Mark("draw_wait");
     // Nothing reached the queue since the device was last idle: it still is.
     const auto submissions = Graphics::QueueSubmissionCounter().load(std::memory_order_relaxed);
@@ -608,6 +624,7 @@ bool VulkanDevice::HasPendingWork() {
 void VulkanDevice::Collect() {
     std::lock_guard memoryLock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
     state->drawQueue->Collect();
+    state->PublishHostRanges();
 }
 
 void VulkanDevice::RecordBarrier() {
@@ -674,6 +691,7 @@ void VulkanDevice::WaitDraws() {
     std::lock_guard memoryLock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
     PerformanceTimer timing("Vulkan.WaitDraws");
     state->drawQueue->Wait();
+    state->PublishHostRanges();
 }
 
 void VulkanDevice::FlushDraws() {
@@ -800,6 +818,7 @@ void VulkanDevice::present(std::uint32_t width, std::uint32_t height, bool opaqu
     } else {
         state->drawQueue->Wait();
     }
+    state->PublishHostRanges();
     timing.Mark("draw_wait");
     require(state->swapchain != VK_NULL_HANDLE, "device has no swapchain");
     require(state->extent.width != 0 && state->extent.height != 0, "output window is minimized");
@@ -1048,6 +1067,17 @@ void VulkanDevice::ResolveMemory(std::uint64_t address, std::size_t bytes, bool 
     std::lock_guard memoryLock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
     state->drawQueue->Resolve(address, bytes);
     state->renderCache->Resolve(address, bytes, writable);
+    state->PublishHostRanges();
+}
+
+bool VulkanDevice::NeedsResolve(std::uint64_t address, std::size_t bytes) const {
+    std::shared_ptr<const std::vector<std::pair<std::uint64_t, std::uint64_t>>> ranges;
+    {
+        std::lock_guard lock(state->hostRangesMutex);
+        ranges = state->hostRanges;
+    }
+    const auto end = address + bytes;
+    return std::any_of(ranges->begin(), ranges->end(), [&](const auto& range) { return range.first < end && address < range.second; });
 }
 
 void VulkanDevice::Draw(const Graphics::State& graphics, const Pm4::DrawParameters& draw, std::span<const Graphics::CompiledShader> shaders, std::span<const Graphics::GuestMemorySnapshot> snapshots) {
@@ -1062,6 +1092,7 @@ void VulkanDevice::EnqueueDraw(const Graphics::State& graphics, const Pm4::DrawP
     });
     const auto context = graphicsContext();
     Graphics::Draw(context, graphics, draw, shaders, snapshots);
+    state->PublishHostRanges();
 }
 
 void VulkanDevice::Dispatch(const ShaderRecompiler::RecompileResult& shader, std::uint32_t x, std::uint32_t y, std::uint32_t z, std::span<const Graphics::GuestMemorySnapshot> snapshots) {
@@ -1225,6 +1256,7 @@ void VulkanDevice::Dispatch(const ShaderRecompiler::RecompileResult& shader, std
             }
         }
         timing.Mark("enqueue");
+        state->PublishHostRanges();
     } catch (...) {
         throw;
     }

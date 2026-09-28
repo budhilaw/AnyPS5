@@ -226,6 +226,14 @@ CompiledVariant compileVariant(const RecompileRequest& request, IrProgram progra
     result.spirv = ValidateAndOptimizeSpirv(result.spirv, request.target.vulkanVersion, request.target.spirvVersion);
 #endif
 
+    {
+        std::uint64_t hash = 0x9e3779b97f4a7c15ull ^ result.spirv.size();
+        for (const auto word : result.spirv) {
+            hash = (hash ^ word) * 0xff51afd7ed558ccdull;
+            hash ^= hash >> 32u;
+        }
+        result.spirvHash = hash != 0 ? hash : 1;
+    }
     result.bdaAbiVersion = program.Info().usesDma ? request.target.bdaAbiVersion : 0u;
     result.vertexOffsetSgpr = program.Info().vertexOffsetSgpr;
     result.instanceOffsetSgpr = program.Info().instanceOffsetSgpr;

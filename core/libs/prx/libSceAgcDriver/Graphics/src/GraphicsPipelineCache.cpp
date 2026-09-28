@@ -115,6 +115,10 @@ std::string makeKey(const Context& context, const State& state, const std::share
     for (const auto& shader : shaders) {
         append(key, shader.stage);
         append(key, shader.program->spirv.size());
+        if (shader.program->spirvHash != 0) {
+            append(key, shader.program->spirvHash);
+            continue;
+        }
         const auto bytes = std::as_bytes(std::span(shader.program->spirv));
         if (!bytes.empty()) key.append(reinterpret_cast<const char*>(bytes.data()), bytes.size());
         shaderBytes += bytes.size();

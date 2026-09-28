@@ -6,9 +6,11 @@
 #include "prx/libc/include/MemoryTrackingPlatform.hpp"
 #include "prx/libc/include/GuestMemoryBacking.hpp"
 #include <algorithm>
+#include <atomic>
 #include <exception>
 #include <limits>
 #include <map>
+#include <mutex>
 #include <memory>
 #include <stdexcept>
 #include <vector>
@@ -27,15 +29,48 @@ struct Entry {
     bool active = false;
 };
 
+// A watch whose protection a CPU access may have to resolve.
+struct ProtectedRange {
+    std::uint64_t begin;
+    std::uint64_t end;
+    Protection protection;
+};
+
 struct Registry {
     std::recursive_mutex mutex;
     std::map<std::uint64_t, std::shared_ptr<Entry>> entries;
     bool installed = false;
+    // The protected watches, republished (under `mutex`) whenever a protection changes: threads
+    // that do not hold `mutex` (the GPU driver preparing draws while its worker records others)
+    // check their accesses against it without the lock. An access that misses a protection set
+    // meanwhile faults and resolves in the handler.
+    std::mutex publishedMutex;
+    std::shared_ptr<const std::vector<ProtectedRange>> published = std::make_shared<const std::vector<ProtectedRange>>();
+    // Set when a protection changes; the next locked resolve republishes (rebuilding the list on
+    // every change would cost more than it saves when protections churn).
+    std::atomic<bool> stale{true};
 };
 
 Registry& registry() {
     static auto* value = new Registry;
     return *value;
+}
+
+// Requires the registry mutex. Only inaccessible watches are published: host reads are what
+// runs without the lock, and they only have to resolve those.
+void publish() {
+    registry().stale.store(false, std::memory_order_release);
+    auto ranges = std::make_shared<std::vector<ProtectedRange>>();
+    for (const auto& [address, entry] : registry().entries) {
+        if (entry->protection == Protection::None) ranges->push_back({entry->address, entry->address + entry->bytes, entry->protection});
+    }
+    std::lock_guard lock(registry().publishedMutex);
+    registry().published = std::move(ranges);
+}
+
+std::shared_ptr<const std::vector<ProtectedRange>> published() {
+    std::lock_guard lock(registry().publishedMutex);
+    return registry().published;
 }
 
 std::uint64_t checkedEnd(std::uint64_t address, std::size_t bytes) {
@@ -133,7 +168,9 @@ void GuestMemoryTrackingDestroy_nid_postfix(void* handle) noexcept {
     std::unique_ptr<std::shared_ptr<Entry>> owner(static_cast<std::shared_ptr<Entry>*>(handle));
     const auto& entry = **owner;
     Platform::Restore(entry.original);
+    const bool inaccessible = entry.protection == Protection::None;
     registry().entries.erase(entry.address);
+    if (inaccessible) publish();
 }
 
 void GuestMemoryTrackingProtect_nid_postfix(void* handle, Protection protection) {
@@ -141,6 +178,7 @@ void GuestMemoryTrackingProtect_nid_postfix(void* handle, Protection protection)
     std::lock_guard lock(registry().mutex);
     auto& entry = **static_cast<std::shared_ptr<Entry>*>(handle);
     if (entry.protection == protection) return;
+    const bool inaccessibleChanged = entry.protection == Protection::None || protection == Protection::None;
     if (protection == Protection::ReadWrite) {
         Platform::Restore(entry.original);
         entry.original.clear();
@@ -150,11 +188,18 @@ void GuestMemoryTrackingProtect_nid_postfix(void* handle, Protection protection)
         entry.active = true;
     }
     entry.protection = protection;
+    if (inaccessibleChanged) publish();
 }
 
 void GuestMemoryTrackingResolve_nid_postfix(std::uint64_t address, std::size_t bytes, bool writable) {
     if (bytes == 0) return;
+    if (!writable && !registry().stale.load(std::memory_order_acquire)) {
+        const auto end = checkedEnd(address, bytes);
+        const auto ranges = published();
+        if (std::none_of(ranges->begin(), ranges->end(), [&](const ProtectedRange& range) { return range.begin < end && address < range.end; })) return;
+    }
     std::lock_guard lock(registry().mutex);
+    if (registry().stale.load(std::memory_order_acquire)) publish();
     {
         // Most checks touch no protected watch: find that out without building a list (the GPU
         // driver checks every descriptor dword it reads).

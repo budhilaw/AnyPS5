@@ -1,6 +1,8 @@
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/MemoryAccessScope.hpp"
 #include "prx/libc/include/GuestMemoryTracking.hpp"
+#include <array>
+#include "prx/libc/include/GuestAllocations.hpp"
 #include <limits>
 #if defined(__APPLE__)
 #include <mach/mach.h>
@@ -49,10 +51,20 @@ std::size_t MappedGpuBytes(const void* pointer, std::size_t bytes, bool writable
 void CheckGpuRange(const void* pointer, std::size_t bytes, std::size_t alignment, bool writable) {
     const auto address = reinterpret_cast<std::uintptr_t>(pointer);
     if (alignment == 0 || address == 0 || address % alignment != 0 || bytes > std::numeric_limits<std::uintptr_t>::max() - address) throw std::invalid_argument("invalid guest GPU memory range");
+    // Render targets are validated every draw: a range this thread validated stays valid until a
+    // guest mapping changes (and the validation takes the memory tracking lock).
+    struct Validated { std::uint64_t epoch; std::uintptr_t address; std::size_t bytes; bool writable; };
+    thread_local std::array<Validated, 16> validated{};
+    thread_local std::size_t nextValidated = 0;
+    const auto epoch = GuestAllocations::GuestAllocationsMapEpoch_nid_postfix();
+    for (const auto& entry : validated) {
+        if (entry.epoch == epoch && entry.address == address && entry.bytes == bytes && (entry.writable || !writable)) return;
+    }
     const MemoryAccessScope suspended(nullptr, nullptr);
     GuestMemoryTracking::GuestMemoryTrackingValidate_nid_postfix(address, bytes, [writable](std::uint64_t first, std::size_t count) {
         CheckRange(reinterpret_cast<const void*>(first), count, 1, writable);
     });
+    validated[nextValidated++ % validated.size()] = {epoch, address, bytes, writable};
 }
 
 }

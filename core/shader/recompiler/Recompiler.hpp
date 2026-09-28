@@ -276,6 +276,9 @@ struct FragmentParameter {
 
 struct RecompileResult {
     std::vector<std::uint32_t> spirv;
+    // Nonzero: identifies `spirv` (with its size) for host caches, computed once per compiled
+    // variant so draws need not hash the module again.
+    std::uint64_t spirvHash = 0;
     std::vector<DescriptorBinding> bindings;
     std::vector<std::byte> pushConstants;
     std::uint32_t bdaAbiVersion = 0;

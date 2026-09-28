@@ -51,6 +51,10 @@ public:
     // The sequence number the next queued draw or dispatch receives: GPU work recorded now
     // follows every queued one with a lower number.
     std::uint64_t NextSequence() const { return nextSequence; }
+    // The guest ranges queued work writes.
+    void AppendWriteRanges(std::vector<std::pair<std::uint64_t, std::uint64_t>>& ranges) const {
+        for (const auto& writer : writers) ranges.insert(ranges.end(), writer.resources->WriteRanges().begin(), writer.resources->WriteRanges().end());
+    }
     void Wait();
     void WaitGpu();
     void Collect();
