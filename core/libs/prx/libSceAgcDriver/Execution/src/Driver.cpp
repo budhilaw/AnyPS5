@@ -1,6 +1,9 @@
 #include "prx/libSceAgcDriver/Execution/include/GpuJournal.hpp"
 #include "RdnaDecoder/RdnaInstructionDecoder.hpp"
 #include <cxxabi.h>
+#ifdef __APPLE__
+#include <pthread/qos.h>
+#endif
 #include <cstdio>
 #include "prx/libSceAgcDriver/Execution/include/Driver.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
@@ -92,6 +95,14 @@ struct Submission {
     FrameTiming::Clock::time_point dequeued;
 };
 
+// The driver and graphics threads pace every frame: they belong on the performance cores the
+// title's spinning threads compete for.
+void preferPerformanceCores() {
+#ifdef __APPLE__
+    pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+#endif
+}
+
 std::uint32_t readRegister(const Registers& registers, std::uint32_t offset) {
     const auto it = registers.find(offset);
     if (it == registers.end()) {
@@ -160,6 +171,7 @@ private:
     }
 
     void runGraphics() noexcept {
+        preferPerformanceCores();
         std::unique_lock lock(graphicsMutex);
         while (true) {
             graphicsChanged.wait(lock, [&] { return graphicsStopping || !graphicsJobs.empty(); });
@@ -1226,6 +1238,7 @@ private:
     bool gpuPending = false;
 
     void run() noexcept {
+        preferPerformanceCores();
         try {
             for (;;) {
                 {

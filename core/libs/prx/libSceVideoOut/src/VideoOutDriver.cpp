@@ -1,3 +1,6 @@
+#ifdef __APPLE__
+#include <pthread/qos.h>
+#endif
 #include <cxxabi.h>
 #include <cstdio>
 #include <bit>
@@ -445,6 +448,9 @@ void VideoOutDriver::processFlip(FlipRequest& req) {
 }
 
 void VideoOutDriver::presentLoop(std::stop_token token) {
+#ifdef __APPLE__
+    pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);  // flips pace the title
+#endif
     std::shared_ptr<FlipRequest> current;
     PadInput padInput;
     try {
