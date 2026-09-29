@@ -11,4 +11,7 @@ int APS5_VABI libSceUserServiceUnknown_O6IW1_minus_Dwm_minus_w(int user_id, std:
     return 0;
 }
 
+APS5_EXPORT("D-CzAxQL0XI", libSceUserServiceUnknown_D_minus_CzAxQL0XI);
+int APS5_VABI libSceUserServiceUnknown_D_minus_CzAxQL0XI() { NotImplemented_nid_no_patch(__func__); return 0; }
+
 }
