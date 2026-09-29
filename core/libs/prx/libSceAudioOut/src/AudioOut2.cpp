@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -27,7 +28,8 @@ constexpr int SCE_AUDIO_OUT2_ERROR_PORT_FULL = static_cast<int>(0x8026000a);
 constexpr std::uint32_t GrainFrames = 256;
 constexpr std::uint32_t OutputRate = 48000;
 constexpr std::uint32_t OutputChannels = 2;
-constexpr std::uint32_t TargetLatencyGrains = 16;
+constexpr std::uint32_t MinLatencyGrains = 8;
+constexpr std::uint32_t MaxLatencyGrains = 32;
 constexpr std::uint32_t PORT_TYPE_VIBRATION = 10;
 constexpr std::uint32_t PORT_TYPE_PADSPK = 4;
 constexpr std::uint32_t PORT_TYPE_HAPTICS = 6;  // DualSense haptics as two-channel audio: not for speakers
@@ -63,6 +65,49 @@ std::map<AudioOut2ContextHandle, Context> contexts;
 std::map<AudioOut2PortHandle, Port> ports;
 std::uint64_t nextHandle = 0x10;
 SDL_AudioDeviceID device = 0;
+
+// The mix waiting for the device, which pulls it from its own thread. A pull that finds too little
+// (Bluetooth outputs pull large, irregular chunks) deepens the buffer for the rest of the run.
+struct Output {
+    std::mutex mutex;
+    std::vector<float> ring = std::vector<float>(OutputRate * OutputChannels);
+    std::size_t read = 0, fill = 0;
+    bool primed = false;  // filled to the target once: shortages before that are the start
+    std::atomic<std::uint32_t> targetGrains{MinLatencyGrains};
+    std::atomic<std::uint64_t> shortages{0};
+};
+Output output;
+
+void pull(void*, Uint8* stream, int bytes) {
+    auto* samples = reinterpret_cast<float*>(stream);
+    const auto wanted = static_cast<std::size_t>(bytes) / sizeof(float);
+    std::lock_guard lock(output.mutex);
+    const auto available = std::min(wanted, output.fill);
+    for (std::size_t i = 0; i < available; ++i) samples[i] = output.ring[(output.read + i) % output.ring.size()];
+    std::fill(samples + available, samples + wanted, 0.0f);
+    output.read = (output.read + available) % output.ring.size();
+    output.fill -= available;
+    if (available < wanted && output.primed) {
+        ++output.shortages;
+        auto target = output.targetGrains.load();
+        if (target < MaxLatencyGrains) output.targetGrains = std::min(MaxLatencyGrains, target + 4);
+    }
+}
+
+std::size_t queuedFloats() {
+    std::lock_guard lock(output.mutex);
+    return output.fill;
+}
+
+void queueMix(const std::vector<float>& mix) {
+    std::lock_guard lock(output.mutex);
+    for (const auto value : mix) {
+        if (output.fill == output.ring.size()) break;
+        output.ring[(output.read + output.fill) % output.ring.size()] = value;
+        ++output.fill;
+    }
+    if (output.fill >= output.targetGrains.load() * GrainFrames * OutputChannels) output.primed = true;
+}
 std::set<std::uint32_t> reportedAttributes;
 
 bool decodeFormat(std::uint32_t format, std::uint32_t& channels, bool& isFloat) {
@@ -94,9 +139,11 @@ bool openDevice() {
     desired.format = AUDIO_F32SYS;
     desired.channels = static_cast<Uint8>(OutputChannels);
     desired.samples = static_cast<Uint16>(GrainFrames * 2);
+    desired.callback = pull;
     SDL_AudioSpec obtained{};
     device = SDL_OpenAudioDevice(nullptr, 0, &desired, &obtained, 0);
     if (device == 0) { APS5_LOG_OUT("cannot open the audio device: %s", SDL_GetError()); return false; }
+    APS5_LOG_OUT("audio device: %d Hz, %u channels, %u frames per pull", obtained.freq, obtained.channels, obtained.samples);
     SDL_PauseAudioDevice(device, 0);
     return true;
 }
@@ -120,18 +167,16 @@ float limit(float value) {
     return std::copysign(0.8f + 0.2f * std::tanh((magnitude - 0.8f) / 0.2f), value);
 }
 
-// The device ran dry before a push: the title's mixer fell behind (the first ten, then a count
-// every ten seconds).
+// Device pulls that found too little since the last report, and the buffer depth they led to
+// (reported at most every ten seconds).
 void reportUnderrun() {
-    static std::uint64_t total = 0, count = 0;
+    static std::uint64_t reported = 0;
     static auto last = std::chrono::steady_clock::now();
-    ++total;
-    ++count;
-    if (total <= 10) APS5_LOG_OUT("audio: output underrun %llu", static_cast<unsigned long long>(total));
     const auto now = std::chrono::steady_clock::now();
-    if (now - last < std::chrono::seconds(10)) return;
-    APS5_LOG_OUT("audio: %llu output underruns in the last %.0f s", static_cast<unsigned long long>(count), std::chrono::duration<double>(now - last).count());
-    count = 0;
+    const auto shortages = output.shortages.load();
+    if (shortages == reported || now - last < std::chrono::seconds(10)) return;
+    APS5_LOG_OUT("audio: %llu short device pulls in the last %.0f s; buffering %u grains", static_cast<unsigned long long>(shortages - reported), std::chrono::duration<double>(now - last).count(), output.targetGrains.load());
+    reported = shortages;
     last = now;
 }
 
@@ -258,7 +303,7 @@ int APS5_VABI sceAudioOut2ContextGetQueueLevel(AudioOut2ContextHandle ctx, uint3
     if (found == contexts.end()) return SCE_AUDIO_OUT2_ERROR_INVALID_HANDLE;
     const auto depth = std::max(1u, found->second.param.queue_depth);
     std::uint32_t queued = 0;
-    if (device != 0) queued = static_cast<std::uint32_t>(SDL_GetQueuedAudioSize(device) / (GrainFrames * OutputChannels * sizeof(float)));
+    if (device != 0) queued = static_cast<std::uint32_t>(queuedFloats() / (GrainFrames * OutputChannels));
     const auto level = std::min(depth, queued);
     if (queue_level != nullptr) *queue_level = level;
     if (available_queues != nullptr) *available_queues = depth - level;
@@ -288,19 +333,19 @@ int APS5_VABI sceAudioOut2ContextPush(AudioOut2ContextHandle ctx, uint32_t block
             static FILE* dump = [] { const char* directory = std::getenv("ANYPS5_DUMP_AUDIO"); return directory != nullptr ? std::fopen((std::string(directory) + "/mix.f32").c_str(), "wb") : nullptr; }();
             if (dump != nullptr) std::fwrite(context.mix.data(), sizeof(float), context.mix.size(), dump);
             if (device != 0) {
-                if (SDL_GetQueuedAudioSize(device) == 0) reportUnderrun();
-                SDL_QueueAudio(device, context.mix.data(), static_cast<Uint32>(context.mix.size() * sizeof(float)));
+                reportUnderrun();
+                queueMix(context.mix);
             }
         }
         const auto now = std::chrono::steady_clock::now();
         context.nextGrain = std::max(context.nextGrain, now - std::chrono::milliseconds(50)) + std::chrono::microseconds(1000000ull * GrainFrames / OutputRate);
         due = context.nextGrain;
     }
-    // Pace the caller: keep about TargetLatencyGrains grains queued on the device, or real time for
-    // a context that queues nothing (a thread pushing both then waits once).
-    const auto grainBytes = GrainFrames * OutputChannels * sizeof(float);
+    // Pace the caller: keep the target number of grains queued for the device, or real time for a
+    // context that queues nothing (a thread pushing both then waits once).
+    const auto grainFloats = GrainFrames * OutputChannels;
     if (device != 0 && audible) {
-        while (SDL_GetQueuedAudioSize(device) > TargetLatencyGrains * grainBytes) {
+        while (queuedFloats() > output.targetGrains.load() * grainFloats) {
             if (blocking == 0) break;
             std::this_thread::sleep_for(std::chrono::microseconds(500));
         }
