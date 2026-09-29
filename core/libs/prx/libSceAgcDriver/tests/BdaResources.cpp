@@ -35,12 +35,13 @@ void RunBdaResourceTests(const Context& context, const BdaTestAccess& access) {
     memory.Upload(true);
     const auto first = memory.Descriptor(address, sizeof(guest));
     const auto alias = memory.Descriptor(address + 16, 16);
-    Require(first.buffer == alias.buffer && alias.offset == 16, "aliased guest buffers have different owners");
+    const auto aliasData = alias.offset + (address + 16) % GuestBufferMemory::ViewAlignment;
+    Require(first.buffer == alias.buffer && aliasData == first.offset + address % GuestBufferMemory::ViewAlignment + 16, "aliased guest buffers have different owners");
     const auto ranges = memory.AddressRanges();
     Require(ranges.size() == 1 && ranges[0].begin == address && ranges[0].end == address + sizeof(guest), "incorrect BDA range bounds");
     Require(ranges[0].deviceAddress != 0 && ranges[0].permissions == ShaderRecompiler::BdaAbi::Read, "incorrect BDA address or permissions");
     std::uint32_t changed = 321;
-    std::memcpy(access.bytes(alias.buffer).data() + alias.offset, &changed, sizeof(changed));
+    std::memcpy(access.bytes(alias.buffer).data() + aliasData, &changed, sizeof(changed));
     memory.WriteBack();
     Require(guest[4] == changed, "aliased GPU write was not published");
     reject([&] { memory.WriteBack(); }, "cannot be committed twice");
@@ -76,7 +77,8 @@ void RunBdaResourceTests(const Context& context, const BdaTestAccess& access) {
         reject([&] { resources.WriteBack(); }, "rect-list requires");
         std::memset(fault.data(), 0, fault.size());
         changed = 456;
-        std::memcpy(access.bytes(access.descriptor(6).buffer).data() + sizeof(std::uint32_t), &changed, sizeof(changed));
+        const auto view = access.descriptor(6);
+        std::memcpy(access.bytes(view.buffer).data() + view.offset + address % GuestBufferMemory::ViewAlignment + sizeof(std::uint32_t), &changed, sizeof(changed));
         resources.WriteBack();
         Require(guest[1] == changed, "rect-list fault-only path lost guest buffer writes");
     }
@@ -115,7 +117,16 @@ void RunBdaResourceTests(const Context& context, const BdaTestAccess& access) {
         GuestBufferMemory unaligned(aligned);
         unaligned.AddWritable(address, sizeof(guest));
         unaligned.Upload(true);
-        reject([&] { unaligned.Descriptor(address + 4, 4); }, "offset alignment");
+        const auto widened = unaligned.Descriptor(address + 4, 4);
+        Require(widened.offset % 16 == 0 && widened.range == 4 + (address + 4) % GuestBufferMemory::ViewAlignment, "unaligned guest view was not widened to an aligned offset");
         reject([&] { unaligned.Descriptor(address + sizeof(guest), 4); }, "exceeds its GPU owner");
+    }
+    {
+        auto coarse = context;
+        coarse.limits.minStorageBufferOffsetAlignment = GuestBufferMemory::ViewAlignment * 2;
+        GuestBufferMemory unaligned(coarse);
+        unaligned.AddWritable(address, sizeof(guest));
+        unaligned.Upload(true);
+        reject([&] { unaligned.Descriptor(address, 4); }, "offset alignment");
     }
 }

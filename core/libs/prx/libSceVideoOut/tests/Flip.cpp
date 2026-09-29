@@ -198,10 +198,12 @@ void testPresentation(bool expectUnavailable) {
     VideoOutBuffers buffer{storage.data(), nullptr, {nullptr, nullptr}};
     VideoOutBufferAttribute2 attribute{};
     sceVideoOutSetBufferAttribute2(&attribute, 0x8000000000000000ull, 0, 259, 137, 0, 0, 0);
-    auto invalid = attribute;
-    invalid.dcc_control = 1;
-    check(expectFailure([&] { sceVideoOutRegisterBuffers2(handle, 0, 0, &buffer, 1, &invalid, 0, nullptr); }).find("DCC") != std::string::npos, "DCC buffer was accepted");
-    check(!cfg->groups[0].occupied, "rejected registration changed the buffer group");
+    auto compressed = attribute;
+    compressed.dcc_control = 1;
+    sceVideoOutRegisterBuffers2(handle, 0, 0, &buffer, 1, &compressed, 0, nullptr);
+    check(cfg->groups[0].occupied, "DCC buffer was rejected");
+    sceVideoOutUnregisterBuffers(handle, 0);
+    check(!cfg->groups[0].occupied, "unregistered DCC buffer kept its group");
     sceVideoOutRegisterBuffers2(handle, 0, 0, &buffer, 1, &attribute, 0, nullptr);
     sceVideoOutSetFlipRate(handle, 2);
     for (int index : {0, -2, -1, 0}) {

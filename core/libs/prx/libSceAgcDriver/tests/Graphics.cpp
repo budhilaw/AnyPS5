@@ -4,7 +4,9 @@
 #include "prx/libSceAgcDriver/Graphics/include/TextureDetiler.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/VertexInput.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Draw.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/GuestBufferMemory.hpp"
 #include <spirv/unified1/spirv.hpp>
+#include <algorithm>
 #include <array>
 #include <bit>
 #include <cstring>
@@ -59,7 +61,7 @@ void expectFailure(TAction action, std::string_view reason) {
     try {
         action();
     } catch (const std::runtime_error& error) {
-        Require(std::string_view(error.what()).find(reason) != std::string_view::npos, std::string("unexpected failure: ") + error.what());
+        Require(std::string_view(error.what()).find(reason) != std::string_view::npos, "unexpected failure (expected " + std::string(reason) + "): " + error.what());
         return;
     }
     throw std::runtime_error("expected graphics rejection: " + std::string(reason));
@@ -250,10 +252,13 @@ void DepthClipTests() {
     expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "inverted viewport depth clamp");
     queue.context[0xb4] = 0;
     for (std::uint32_t bit = 0; bit < 32; ++bit) {
-        if (bit == 19) continue;
+        if (bit == 19 || bit == 26 || bit == 27) continue;
         queue.context[0x204] = 1u << bit;
         expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "PA_CL_CLIP_CNTL");
     }
+    queue.context[0x204] = 0x0c080000u;
+    const auto clamped = AgcDriver::Graphics::DecodeState(queue);
+    Require(clamped.depthClamp && !clamped.negativeOneToOne, "depth plane clipping disable did not clamp depth");
 }
 
 void InitialContextTests() {
@@ -564,6 +569,16 @@ const std::vector<std::byte>& bufferBytes(VkBuffer buffer) {
     return mock.memories.at(mock.bufferMemory.at(buffer));
 }
 
+std::size_t viewResidue(const void* data) {
+    return reinterpret_cast<std::uintptr_t>(data) % AgcDriver::Graphics::GuestBufferMemory::ViewAlignment;
+}
+
+bool viewHolds(const VkDescriptorBufferInfo& view, const void* data, std::size_t bytes) {
+    const auto residue = viewResidue(data);
+    const auto& memory = bufferBytes(view.buffer);
+    return view.range == bytes + residue && view.offset + residue + bytes <= memory.size() && std::memcmp(memory.data() + view.offset + residue, data, bytes) == 0;
+}
+
 void expectResourceFailure(const ShaderRecompiler::RecompileResult& vertex, const ShaderRecompiler::RecompileResult& fragment, std::string_view reason) {
     mock = MockVulkan{};
     const auto context = mockContext();
@@ -577,6 +592,23 @@ void expectSingleFailure(const ShaderRecompiler::DescriptorBinding& binding, std
     ShaderRecompiler::RecompileResult fragment;
     vertex.bindings.push_back(binding);
     expectResourceFailure(vertex, fragment, reason);
+}
+
+void expectZeroBound(const ShaderRecompiler::DescriptorBinding& binding, std::size_t element) {
+    mock = MockVulkan{};
+    const auto context = mockContext();
+    const auto color = AgcDriver::Graphics::DecodeState(makeState()).color;
+    ShaderRecompiler::RecompileResult vertex;
+    ShaderRecompiler::RecompileResult fragment;
+    vertex.bindings.push_back(binding);
+    {
+        AgcDriver::Graphics::ShaderResources resources(context, vertex, fragment, color, 0, 0);
+        const auto& view = findWrite(binding.binding).buffers.at(element);
+        const auto& memory = bufferBytes(view.buffer);
+        const auto first = memory.begin() + static_cast<std::ptrdiff_t>(view.offset);
+        Require(view.range >= 8 && view.offset + view.range <= memory.size() && std::all_of(first, first + static_cast<std::ptrdiff_t>(view.range), [](std::byte value) { return value == std::byte{0}; }), "unmapped shader buffer was not bound as zeros");
+    }
+    Require(mock.live == 0, "zero-bound shader resources leaked Vulkan objects");
 }
 
 void pushConstantTests() {
@@ -627,17 +659,16 @@ void resourceTests() {
         Require(mock.poolMaxSets == 1 && mock.poolSizes.size() == 1 && mock.poolSizes[0].type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER && mock.poolSizes[0].descriptorCount == 5, "descriptor pool must hold one set with every storage descriptor");
         const auto& array = findWrite(0);
         Require(array.count == 2 && array.buffers.size() == 2 && array.type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, "guest buffer array write is incorrect");
-        Require(array.buffers[0].offset == 0 && array.buffers[0].range == 16 && array.buffers[1].offset == 0 && array.buffers[1].range == 32, "guest buffers must be bound at zero offset with their descriptor size");
-        Require(sameBytes(bufferBytes(array.buffers[0].buffer), guestFirst.data(), 16) && sameBytes(bufferBytes(array.buffers[1].buffer), guestSecond.data(), 32), "guest buffer contents were not uploaded");
+        Require(viewHolds(array.buffers[0], guestFirst.data(), 16) && viewHolds(array.buffers[1], guestSecond.data(), 32), "guest buffer views must start at the aligned address below their data and hold it");
         const std::array<std::uint32_t, 3> data{7, 8, 9};
         Require(findWrite(5).buffers.size() == 1 && findWrite(5).buffers[0].range == 12 && sameBytes(bufferBytes(findWrite(5).buffers[0].buffer), data.data(), 12), "shader data buffer is incorrect");
         const std::array<std::uint32_t, 2> srt{1, 2};
         Require(findWrite(43).buffers.size() == 1 && findWrite(43).buffers[0].range == 8 && sameBytes(bufferBytes(findWrite(43).buffers[0].buffer), srt.data(), 8), "flattened SRT buffer is incorrect");
-        Require(findWrite(44).buffers.size() == 1 && findWrite(44).buffers[0].range == 8 && sameBytes(bufferBytes(findWrite(44).buffers[0].buffer), guestThird.data(), 8), "fragment guest buffer is incorrect");
+        Require(findWrite(44).buffers.size() == 1 && viewHolds(findWrite(44).buffers[0], guestThird.data(), 8), "fragment guest buffer is incorrect");
         resources.Bind(commands, VK_PIPELINE_BIND_POINT_GRAPHICS, VK_NULL_HANDLE);
         Require(mock.boundPoint == VK_PIPELINE_BIND_POINT_GRAPHICS && mock.boundFirst == 0 && mock.boundSets == 1, "exactly one descriptor set must be bound at set zero");
         auto& first = mock.memories.at(mock.bufferMemory.at(array.buffers[0].buffer));
-        std::memset(first.data(), 0xab, 16);
+        std::memset(first.data() + array.buffers[0].offset + viewResidue(guestFirst.data()), 0xab, 16);
         auto& shaderData = mock.memories.at(mock.bufferMemory.at(findWrite(5).buffers[0].buffer));
         std::memset(shaderData.data(), 0xcd, 12);
         resources.WriteBack();
@@ -666,7 +697,8 @@ void resourceTests() {
         resources.Bind(commands, VK_PIPELINE_BIND_POINT_COMPUTE, VK_NULL_HANDLE);
         Require(mock.boundPoint == VK_PIPELINE_BIND_POINT_COMPUTE && mock.boundSets == 1, "compute descriptors were bound to the wrong bind point");
         guestThird = {0xaaaaaaaa, 0xbbbbbbbb};
-        std::memset(mock.memories.at(mock.bufferMemory.at(findWrite(3).buffers[0].buffer)).data(), 0x5a, 8);
+        const auto& view = findWrite(3).buffers[0];
+        std::memset(mock.memories.at(mock.bufferMemory.at(view.buffer)).data() + view.offset + viewResidue(guestThird.data()), 0x5a, 8);
         resources.WriteBack();
         Require(guestThird[0] == 0x5a5a5a5a && guestThird[1] == 0x5a5a5a5a, "compute buffer was not written back");
         guestThird = {0xaaaaaaaa, 0xbbbbbbbb};
@@ -682,11 +714,11 @@ void resourceTests() {
         const AgcDriver::Graphics::CompiledShader shader{ShaderRecompiler::ShaderStage::Compute, &compute, 0};
         AgcDriver::Graphics::ShaderResources resources(context, shader);
         const auto& buffer = findWrite(3).buffers.at(0);
-        Require(buffer.range == sizeof(guestSecond), "strided buffer range does not cover every record");
-        Require(sameBytes(bufferBytes(buffer.buffer), guestSecond.data(), sizeof(guestSecond)), "strided buffer contents were not uploaded");
+        Require(buffer.range == sizeof(guestSecond) + viewResidue(guestSecond.data()), "strided buffer range does not cover every record");
+        Require(viewHolds(buffer, guestSecond.data(), sizeof(guestSecond)), "strided buffer contents were not uploaded");
         const std::uint32_t changed = 0x12345678u;
         auto& bytes = mock.memories.at(mock.bufferMemory.at(buffer.buffer));
-        std::memcpy(bytes.data() + 16, &changed, sizeof(changed));
+        std::memcpy(bytes.data() + buffer.offset + viewResidue(guestSecond.data()) + 16, &changed, sizeof(changed));
         resources.WriteBack();
         Require(guestSecond[4] == changed && guestSecond[0] == 1 && guestSecond[7] == 8, "strided buffer write back changed the wrong record");
         guestSecond[4] = 5;
@@ -703,9 +735,9 @@ void resourceTests() {
         mutate(binding);
         return binding;
     };
-    expectSingleFailure(changed([](auto& binding) { binding.role = Role::GuestImages; binding.kind = Kind::SampledImage; }), "sampled and storage image resources are not implemented");
-    expectSingleFailure(changed([](auto& binding) { binding.role = Role::GuestImages; binding.kind = Kind::StorageImage; }), "sampled and storage image resources are not implemented");
-    expectSingleFailure(changed([](auto& binding) { binding.role = Role::GuestSamplers; binding.kind = Kind::Sampler; }), "sampled and storage image resources are not implemented");
+    expectSingleFailure(changed([](auto& binding) { binding.role = Role::GuestImages; binding.kind = Kind::SampledImage; }), "guest texture descriptor must contain 8 dwords");
+    expectSingleFailure(changed([](auto& binding) { binding.role = Role::GuestImages; binding.kind = Kind::StorageImage; }), "guest texture descriptor must contain 8 dwords");
+    expectSingleFailure(changed([](auto& binding) { binding.role = Role::GuestSamplers; binding.kind = Kind::Sampler; }), "shader sampler descriptors exceed per-stage limits");
     expectSingleFailure(changed([](auto& binding) { binding.role = Role::Gds; binding.guestDescriptor.clear(); }), "GDS is unavailable");
     expectSingleFailure(changed([](auto& binding) { binding.role = Role::BdaPagetable; binding.guestDescriptor.clear(); }), "BDA table and fault descriptors");
     expectSingleFailure(changed([](auto& binding) { binding.role = Role::FaultBuffer; binding.guestDescriptor.clear(); }), "BDA table and fault descriptors");
@@ -726,9 +758,9 @@ void resourceTests() {
     expectSingleFailure(changed([](auto& binding) { binding.guestDescriptor[3] |= 0x40000000u; }), "unsupported type");
     expectSingleFailure(changed([](auto& binding) { binding.guestDescriptor[1] |= 0x3fffu << 16u; binding.guestDescriptor[2] = 0xffffffffu; }), "descriptor range limit");
     expectSingleFailure(changed([](auto& binding) { binding.guestDescriptor[2] = 8192; }), "descriptor range limit");
-    expectSingleFailure(changed([](auto& binding) { binding.guestDescriptor = vsharp(reinterpret_cast<const void*>(0x1000), 8); }), "not readable");
+    expectZeroBound(changed([](auto& binding) { binding.guestDescriptor = vsharp(reinterpret_cast<const void*>(0x1000), 8); }), 0);
     expectSingleFailure(changed([&](auto& binding) { binding.guestDescriptor = vsharp(reinterpret_cast<const void*>(state.color.address), 64); }), "aliases the render target");
-    expectSingleFailure(changed([](auto& binding) { binding.count = 3; binding.guestDescriptor = join(join(vsharp(guestFirst.data(), 16), vsharp(guestSecond.data(), 32)), vsharp(reinterpret_cast<const void*>(0x1000), 8)); }), "not readable");
+    expectZeroBound(changed([](auto& binding) { binding.count = 3; binding.guestDescriptor = join(join(vsharp(guestFirst.data(), 16), vsharp(guestSecond.data(), 32)), vsharp(reinterpret_cast<const void*>(0x1000), 8)); }), 2);
     expectSingleFailure(changed([&](auto& binding) { binding.count = 2; binding.guestDescriptor = join(vsharp(guestFirst.data(), 16), vsharp(reinterpret_cast<const void*>(state.color.address), 64)); }), "aliases the render target");
     expectSingleFailure(changed([](auto& binding) { binding.count = 17; binding.guestDescriptor.assign(68, 0); }), "per-stage limits");
     {
@@ -950,7 +982,8 @@ void rectListTests() {
     expectFailure([&] { static_cast<void>(BuildRectListShaders(vertex, fragment, target)); }, "per-vertex interpolation");
     fragment.fragmentParameters[0].perVertex = false;
     vertex.parameterExports.clear();
-    expectFailure([&] { static_cast<void>(BuildRectListShaders(vertex, fragment, target)); }, "no vertex export");
+    const auto unexported = BuildRectListShaders(vertex, fragment, target);
+    Require(!unexported.control.spirv.empty() && !unexported.evaluation.spirv.empty(), "rect-list shaders without vertex exports are empty");
     fragment.fragmentParameters.clear();
     target.tessellation->maxPatchSize = 3;
     expectFailure([&] { static_cast<void>(BuildRectListShaders(vertex, fragment, target)); }, "device limits");

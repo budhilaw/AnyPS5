@@ -255,10 +255,15 @@ void RunGuestTextureResourceTests() {
     badLevels.maxMip = 1;
     rejectFields(badLevels, "base mip level past its last mip level");
 
+    Fields partialMips = base;
+    partialMips.lastLevel = 1;
+    partialMips.maxMip = 2;
+    Require(DecodeTextureResource(pack(partialMips)).lastLevel == 1, "a view of the upper mip levels was not decoded");
+
     Fields badMaxMip = base;
-    badMaxMip.lastLevel = 1;
-    badMaxMip.maxMip = 2;
-    rejectFields(badMaxMip, "must expose every mip level");
+    badMaxMip.lastLevel = 2;
+    badMaxMip.maxMip = 1;
+    rejectFields(badMaxMip, "mip levels past the surface");
 
     std::array<std::uint32_t, 4> shortWords{};
     reject([&] { DecodeTextureResource(shortWords); }, "8 dwords");
