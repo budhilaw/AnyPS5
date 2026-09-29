@@ -35,7 +35,20 @@ Mapping Map(void* address, std::size_t bytes, std::size_t alignment, int protect
     try {
         vm_prot_t current = VM_PROT_NONE;
         vm_prot_t maximum = VM_PROT_NONE;
-        check(mach_vm_remap(task, &guest, bytes, static_cast<mach_vm_offset_t>(alignment - 1), address != nullptr ? VM_FLAGS_FIXED : VM_FLAGS_ANYWHERE, task, alias, FALSE, &current, &maximum, VM_INHERIT_NONE), "mach_vm_remap guest backing view");
+        const auto remapped = mach_vm_remap(task, &guest, bytes, static_cast<mach_vm_offset_t>(alignment - 1), address != nullptr ? VM_FLAGS_FIXED : VM_FLAGS_ANYWHERE, task, alias, FALSE, &current, &maximum, VM_INHERIT_NONE);
+        if (remapped != KERN_SUCCESS && address != nullptr) {
+            mach_vm_address_t region = reinterpret_cast<mach_vm_address_t>(address);
+            mach_vm_size_t size = 0;
+            vm_region_extended_info_data_t info{};
+            mach_msg_type_number_t count = VM_REGION_EXTENDED_INFO_COUNT;
+            mach_port_t object = MACH_PORT_NULL;
+            const bool found = mach_vm_region(task, &region, &size, VM_REGION_EXTENDED_INFO, reinterpret_cast<vm_region_info_t>(&info), &count, &object) == KERN_SUCCESS;
+            if (object != MACH_PORT_NULL) mach_port_deallocate(task, object);
+            char text[224];
+            std::snprintf(text, sizeof(text), "mach_vm_remap guest backing view 0x%llx+0x%zx: %s; first region at or above it: %s0x%llx+0x%llx prot %d tag %u", static_cast<unsigned long long>(reinterpret_cast<mach_vm_address_t>(address)), bytes, mach_error_string(remapped), found ? "" : "(none) ", static_cast<unsigned long long>(region), static_cast<unsigned long long>(size), info.protection, info.user_tag);
+            throw std::runtime_error(text);
+        }
+        check(remapped, "mach_vm_remap guest backing view");
         try {
             if (address != nullptr && guest != reinterpret_cast<mach_vm_address_t>(address)) throw std::runtime_error("fixed guest backing reservation address mismatch");
             if (guest % alignment != 0) throw std::runtime_error("guest backing view is not aligned");
