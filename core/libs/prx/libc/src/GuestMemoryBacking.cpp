@@ -24,14 +24,22 @@ std::map<std::uint64_t, Allocation>& allocations() {
     return *value;
 }
 
-Allocation& find(std::uint64_t address, std::size_t bytes) {
-    if (address == 0 || bytes == 0 || bytes > std::numeric_limits<std::uint64_t>::max() - address) throw std::invalid_argument("invalid guest backing range");
+// Null when the range has no active shared backing (lookups on the GPU path must not throw).
+Allocation* lookup(std::uint64_t address, std::size_t bytes) {
+    if (address == 0 || bytes == 0 || bytes > std::numeric_limits<std::uint64_t>::max() - address) return nullptr;
     auto found = allocations().upper_bound(address);
-    if (found == allocations().begin()) throw std::runtime_error("guest memory has no shared backing");
+    if (found == allocations().begin()) return nullptr;
     auto& allocation = std::prev(found)->second;
     auto range = allocation.ranges.upper_bound(address);
-    if (range == allocation.ranges.begin() || address + bytes > std::prev(range)->second) throw std::runtime_error("guest memory backing range is unmapped");
-    return allocation;
+    if (range == allocation.ranges.begin() || address + bytes > std::prev(range)->second) return nullptr;
+    return &allocation;
+}
+
+Allocation& find(std::uint64_t address, std::size_t bytes) {
+    if (address == 0 || bytes == 0 || bytes > std::numeric_limits<std::uint64_t>::max() - address) throw std::invalid_argument("invalid guest backing range");
+    auto* allocation = lookup(address, bytes);
+    if (allocation == nullptr) throw std::runtime_error("guest memory backing range is unmapped");
+    return *allocation;
 }
 
 }
@@ -98,27 +106,21 @@ void GuestMemoryBackingRequire_nid_postfix(std::uint64_t address, std::size_t by
 
 void* GuestMemoryBackingAlias_nid_postfix(std::uint64_t address, std::size_t bytes) {
     std::lock_guard lock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
-    try {
-        auto& allocation = find(address, bytes);
-        return static_cast<std::byte*>(allocation.mapping.alias) + (address - allocation.mapping.address);
-    } catch (const std::exception&) {
-        return nullptr;
-    }
+    const auto* allocation = lookup(address, bytes);
+    if (allocation == nullptr) return nullptr;
+    return static_cast<std::byte*>(allocation->mapping.alias) + (address - allocation->mapping.address);
 }
 
 bool GuestMemoryBackingExtent_nid_postfix(std::uint64_t address, std::size_t bytes, GuestMemoryBackingExtentInfo* info) {
     if (info == nullptr) return false;
     std::lock_guard lock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
-    try {
-        const auto& allocation = find(address, bytes);
-        info->address = allocation.mapping.address;
-        info->bytes = allocation.mapping.bytes;
-        info->alias = allocation.mapping.alias;
-        info->serial = allocation.serial;
-        return true;
-    } catch (const std::exception&) {
-        return false;
-    }
+    const auto* allocation = lookup(address, bytes);
+    if (allocation == nullptr) return false;
+    info->address = allocation->mapping.address;
+    info->bytes = allocation->mapping.bytes;
+    info->alias = allocation->mapping.alias;
+    info->serial = allocation->serial;
+    return true;
 }
 
 void GuestMemoryBackingWrite_nid_postfix(std::uint64_t address, const void* source, std::size_t bytes) {
