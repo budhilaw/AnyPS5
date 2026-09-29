@@ -238,9 +238,7 @@ void testPresentation(bool expectUnavailable) {
     LibcRunShutdown_nid_postfix();
 }
 
-}
-
-int main(int argc, char** argv) {
+int run(int argc, char** argv) {
     try {
         if (argc == 2 && std::string(argv[1]) == "decode") testDecode();
         else if (argc == 2 && std::string(argv[1]) == "controls") testControls();
@@ -255,4 +253,27 @@ int main(int argc, char** argv) {
         catch (const std::exception& shutdown) { std::fprintf(stderr, "shutdown: %s\n", shutdown.what()); }
         return 1;
     }
+}
+
+struct Arguments {
+    int count;
+    char** values;
+};
+
+}
+
+#if defined(__APPLE__)
+extern "C" int LibcRunGuestMain_nid_no_patch(void* args, int (*entry)(void*, void*));
+#endif
+
+int main(int argc, char** argv) {
+#if defined(__APPLE__)
+    Arguments arguments{argc, argv};
+    return LibcRunGuestMain_nid_no_patch(&arguments, [](void* opaque, void*) {
+        const auto& start = *static_cast<Arguments*>(opaque);
+        return run(start.count, start.values);
+    });
+#else
+    return run(argc, argv);
+#endif
 }

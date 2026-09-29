@@ -4,6 +4,7 @@
 #include "ColorTransferTests.hpp"
 #include <fstream>
 #include "prx/libSceAgcDriver/Execution/include/BdaFeatures.hpp"
+#include "prx/libSceAgcDriver/Execution/include/VulkanLibrary.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Resources.hpp"
 #include <SDL_loadso.h>
 #include <array>
@@ -17,13 +18,7 @@ using namespace AgcDriver::Graphics;
 class Device {
 public:
     Device() {
-#ifdef _WIN32
-        library = SDL_LoadObject("vulkan-1.dll");
-#elif defined(__APPLE__)
-        library = SDL_LoadObject("libvulkan.1.dylib");
-#else
-        library = SDL_LoadObject("libvulkan.so.1");
-#endif
+        library = SDL_LoadObject(AgcDriver::ResolveVulkanLibrary());
         Require(library != nullptr, "cannot load Vulkan");
         try {
             instanceProc = reinterpret_cast<PFN_vkGetInstanceProcAddr>(SDL_LoadFunction(library, "vkGetInstanceProcAddr"));

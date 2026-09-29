@@ -258,6 +258,7 @@ add_executable(agc_driver_bda_device_tests EXCLUDE_FROM_ALL
         tests/BdaExecution.cpp
         tests/BdaContracts.cpp
         Execution/src/BdaFeatures.cpp
+        Execution/src/VulkanLibrary.cpp
         Graphics/src/Resources.cpp
         Graphics/src/BufferAddress.cpp
 )
@@ -300,6 +301,8 @@ if(AGC_BUILD_VISUAL_TEST)
     add_executable(agc_driver_visual_test EXCLUDE_FROM_ALL
             tests/Visual.cpp
             Execution/src/VulkanDevice.cpp
+            Execution/src/GpuJournal.cpp
+            Execution/src/Pm4.cpp
             Execution/src/VulkanLibrary.cpp
             Execution/src/SwapchainState.cpp
             Execution/src/AspectFit.cpp

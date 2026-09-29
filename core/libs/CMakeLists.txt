@@ -374,7 +374,10 @@ if(BUILD_TESTING)
     endif()
 endif()
 
-add_executable(application_heap_tests EXCLUDE_FROM_ALL tests/ApplicationHeap.cpp prx/libc/src/ApplicationHeap.cpp)
+add_executable(application_heap_tests EXCLUDE_FROM_ALL tests/ApplicationHeap.cpp prx/libc/src/ApplicationHeap.cpp prx/libc/src/ApplicationProcessParameters.cpp)
+if(APPLE)
+    target_sources(application_heap_tests PRIVATE prx/libc/src/specifics/darwin/GuestImage.cpp)
+endif()
 target_include_directories(application_heap_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 set_target_properties(application_heap_tests PROPERTIES CXX_EXTENSIONS OFF)
 
