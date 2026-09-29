@@ -219,7 +219,7 @@ private:
     // work may affect the range (the check takes no GPU lock, so the graphics thread goes on).
     static void resolveForHost(void* context, std::uint64_t address, std::size_t bytes, bool writable) {
         auto& self = *static_cast<Driver*>(context);
-        const auto current = self.graphicsDevice;
+        auto* current = self.graphicsDevice.get();
         if (current == nullptr) return;
         const bool queuedWrite = self.graphicsMayWrite(address, bytes);
         const bool recorded = !queuedWrite && current->NeedsResolve(address, bytes);
@@ -241,6 +241,10 @@ private:
         }
         self.drainGraphics();
         current->ResolveMemory(address, bytes, writable);
+    }
+    static bool quietForHost(void* context, std::uint64_t address, std::size_t bytes) {
+        auto& self = *static_cast<Driver*>(context);
+        return self.graphicsDevice == nullptr || (!self.graphicsMayWrite(address, bytes) && !self.graphicsDevice->NeedsResolve(address, bytes));
     }
     std::shared_ptr<VulkanDevice> graphicsDevice;  // the device the worker prepares draws for
     std::mutex deviceMutex;  // guards `device` (the presentation thread replaces it)
@@ -602,7 +606,7 @@ private:
         // Prepared here without the GPU lock, recorded by the graphics thread like draws.
         const auto current = currentDevice(true);
         graphicsDevice = current;
-        const GuestMemory::MemoryAccessScope memoryScope(this, &Driver::resolveForHost);
+        const GuestMemory::MemoryAccessScope memoryScope(this, &Driver::resolveForHost, &Driver::quietForHost);
         const auto codeOffset = static_cast<std::size_t>((address - snapshot.codeAddress) / sizeof(std::uint32_t));
         ShaderRecompiler::RecompileRequest request{
             {ShaderRecompiler::ShaderStage::Compute, address, std::span(snapshot.code).subspan(codeOffset), snapshot.headerAddress, snapshot.header, snapshot.CodeHash(codeOffset)},
@@ -856,7 +860,7 @@ private:
         const auto current = currentDevice(true);
         timing.Mark("device_setup");
         graphicsDevice = current;
-        const GuestMemory::MemoryAccessScope memoryScope(this, &Driver::resolveForHost);
+        const GuestMemory::MemoryAccessScope memoryScope(this, &Driver::resolveForHost, &Driver::quietForHost);
         auto shaderMemoryOwner = std::make_unique<ShaderMemory>(memory, std::move(memoryOwners));
         auto& shaderMemory = *shaderMemoryOwner;
         std::vector<ShaderRecompiler::RecompileResult> results;
@@ -1157,7 +1161,7 @@ private:
                     // Register packets need no GPU lock; memory they touch resolves on demand
                     // (after the graphics thread recorded what may affect it).
                     graphicsDevice = currentDevice();
-                    const GuestMemory::MemoryAccessScope memoryScope(this, &Driver::resolveForHost);
+                    const GuestMemory::MemoryAccessScope memoryScope(this, &Driver::resolveForHost, &Driver::quietForHost);
                     Pm4::Execute(packet, queue);
                     timing.Mark("pm4_execute");
                     if (opcode == 0x49 && ((packet[2] >> 24u) & 7u) != 0) {

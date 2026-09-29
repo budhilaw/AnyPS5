@@ -26,7 +26,7 @@ private:
     std::vector<std::shared_ptr<const void>> owners;
     // Guest memory the captures read, by address: spans into it stay valid once capturing ends.
     std::vector<std::pair<std::uint64_t, std::uint32_t>> dwords;
-    std::uint64_t checkedPage = ~0ull;
+    std::vector<std::uint64_t> checkedPages;
     ShaderRecompiler::ResourceSnapshot snapshot;
     ShaderRecompiler::ResourceSpecialization specialization;
 };

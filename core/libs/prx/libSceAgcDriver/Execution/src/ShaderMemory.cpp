@@ -43,20 +43,21 @@ bool ShaderMemory::read(void* context, std::uint64_t address, std::uint32_t* val
     if (next != self.initial.end() && next->guestAddress - address < sizeof(*value)) {
         throw std::runtime_error("AGC driver: shader memory read overlaps a snapshot boundary");
     }
-    const auto slot = std::lower_bound(self.dwords.begin(), self.dwords.end(), address, [](const auto& entry, std::uint64_t value) { return entry.first < value; });
+    const bool last = self.dwords.empty() || self.dwords.back().first < address;
+    const auto slot = last ? self.dwords.end() : std::lower_bound(self.dwords.begin(), self.dwords.end(), address, [](const auto& entry, std::uint64_t value) { return entry.first < value; });
     if (slot != self.dwords.end() && slot->first == address) {
         *value = slot->second;
         return true;
     }
-    // A page checked earlier in this capture needs no range check: tracking that protects it
-    // since faults and resolves. Queued GPU writes are still resolved per read.
+    // A page no queued GPU work touches needs one check per draw: tracking that protects it
+    // later faults and resolves, and nothing is queued before the draw is.
     constexpr std::uint64_t pageBytes = 4096;
-    if (address / pageBytes == self.checkedPage) {
-        GuestMemory::MemoryAccessScope::Resolve(address, sizeof(*value), false);
+    const auto page = address / pageBytes;
+    if (std::find(self.checkedPages.begin(), self.checkedPages.end(), page) != self.checkedPages.end()) {
         std::memcpy(value, reinterpret_cast<const void*>(address), sizeof(*value));
     } else {
         GuestMemory::Read(address, std::as_writable_bytes(std::span(value, 1)), alignof(std::uint32_t));
-        self.checkedPage = address / pageBytes;
+        if (GuestMemory::MemoryAccessScope::Quiet(page * pageBytes, pageBytes)) self.checkedPages.push_back(page);
     }
     self.dwords.insert(slot, {address, *value});
     return true;
@@ -73,7 +74,6 @@ void ShaderMemory::Capture(const ShaderRecompiler::RecompileRequest& request) {
     runtime.readSpecializationMemory = &read;
     snapshot = {};
     specialization = {};
-    checkedPage = ~0ull;
     materializer.Materialize(*plan, runtime, snapshot, specialization);
 }
 
