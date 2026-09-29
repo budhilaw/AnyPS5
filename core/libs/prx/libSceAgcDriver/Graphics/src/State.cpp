@@ -63,7 +63,7 @@ std::uint32_t read(const Registers& registers, std::uint32_t offset, const char*
 
 float readFloat(const Registers& registers, std::uint32_t offset) {
     const auto value = std::bit_cast<float>(read(registers, offset));
-    Require(std::isfinite(value), "non-finite register at DWORD " + std::to_string(offset));
+    if (!std::isfinite(value)) Require(false, "non-finite register at DWORD " + std::to_string(offset));
     return value;
 }
 
@@ -88,7 +88,7 @@ VkStencilOp stencilOp(std::uint32_t value) {
 }
 
 void zero(const Registers& registers, std::uint32_t offset, std::uint32_t mask, const char* name, const char* bank = "context") {
-    Require((read(registers, offset, bank) & mask) == 0, std::string(name) + " is unsupported");
+    if ((read(registers, offset, bank) & mask) != 0) Require(false, std::string(name) + " is unsupported");
 }
 
 VkBlendFactor blendFactor(std::uint32_t value) {
@@ -152,9 +152,12 @@ void intersect(VkRect2D& result, const Registers& registers, std::uint32_t offse
 
 ShaderStages DecodeShaderStages(const QueueState& queue) {
     const auto value = read(queue.context, 0x2d5);
-    std::ostringstream prefix;
-    prefix << "VGT_SHADER_STAGES_EN=0x" << std::hex << value << ": ";
-    const auto validate = [&](bool condition, const char* reason) { Require(condition, prefix.str() + reason); };
+    const auto validate = [&](bool condition, const char* reason) {
+        if (condition) return;
+        std::ostringstream prefix;
+        prefix << "VGT_SHADER_STAGES_EN=0x" << std::hex << value << ": " << reason;
+        Require(false, prefix.str());
+    };
     validate((value & 0xfc000000u) == 0, "reserved stage bits are set");
     validate((value & 3u) != 3u && ((value >> 3u) & 3u) != 3u && ((value >> 6u) & 3u) != 3u, "reserved LS_EN, ES_EN or VS_EN encoding");
     const auto primitive = read(queue.userConfig, 0x242, "user-config");
