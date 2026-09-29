@@ -63,11 +63,14 @@ void GuestBufferCache::resolve(void* owner, GuestMemoryTracking::Access access) 
 }
 
 bool GuestBufferCache::current(const Mirror& mirror) {
-    for (auto address = mirror.begin - mirror.begin % chunkBytes; address < mirror.end; address += chunkBytes) {
-        const auto it = chunks.find(address);
-        if (it == chunks.end()) return false;
+    // Chunks of a range are neighbours in the map: one lookup, then a walk.
+    const auto protection = GuestAllocations::GuestAllocationsProtectionGeneration_nid_postfix();
+    const auto first = mirror.begin - mirror.begin % chunkBytes;
+    auto it = chunks.find(first);
+    for (auto address = first; address < mirror.end; address += chunkBytes, ++it) {
+        if (it == chunks.end() || it->first != address) return false;
         const auto& chunk = *it->second;
-        if (chunk.immutableSince != 0 && chunk.immutableSince == GuestAllocations::GuestAllocationsProtectionGeneration_nid_postfix()) continue;
+        if (chunk.immutableSince != 0 && chunk.immutableSince == protection) continue;
         if (chunk.untrackable || chunk.lost || !chunk.protectedRead || chunk.generation > mirror.synced) return false;
     }
     return true;
