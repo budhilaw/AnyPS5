@@ -1,7 +1,14 @@
 #include "prx/libc/include/ApplicationHeap.hpp"
 #include "prx/libc/include/General.hpp"
+#include <atomic>
 #include <cstddef>
 #include <stdexcept>
+
+namespace {
+
+std::atomic<void*> newHandler{nullptr};
+
+}
 
 extern "C" {
 
@@ -17,4 +24,5 @@ void APS5_VABI _ZdaPv_nid_postfix(void* pointer) { _ZdlPv_nid_postfix(pointer); 
 
 }
 
-extern "C" void* APS5_VABI _ZSt15get_new_handlerv_nid_postfix() { return nullptr; }
+extern "C" void* APS5_VABI _ZSt15get_new_handlerv_nid_postfix() { return newHandler.load(); }
+extern "C" void* APS5_VABI _ZSt15set_new_handlerPFvvE_nid_postfix(void* handler) { return newHandler.exchange(handler); }
