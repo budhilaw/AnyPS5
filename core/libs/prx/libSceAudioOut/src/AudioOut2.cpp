@@ -54,6 +54,7 @@ struct Context {
     AudioOut2ContextParam param;
     std::set<AudioOut2PortHandle> ports;
     std::vector<float> mix;
+    std::chrono::steady_clock::time_point nextGrain{};  // pacing without the device queue
 };
 
 std::mutex mutex;
@@ -119,11 +120,14 @@ float limit(float value) {
     return std::copysign(0.8f + 0.2f * std::tanh((magnitude - 0.8f) / 0.2f), value);
 }
 
-// The device ran dry before a push: the title's mixer fell behind (reported every ten seconds).
+// The device ran dry before a push: the title's mixer fell behind (the first ten, then a count
+// every ten seconds).
 void reportUnderrun() {
-    static std::uint64_t count = 0;
+    static std::uint64_t total = 0, count = 0;
     static auto last = std::chrono::steady_clock::now();
+    ++total;
     ++count;
+    if (total <= 10) APS5_LOG_OUT("audio: output underrun %llu", static_cast<unsigned long long>(total));
     const auto now = std::chrono::steady_clock::now();
     if (now - last < std::chrono::seconds(10)) return;
     APS5_LOG_OUT("audio: %llu output underruns in the last %.0f s", static_cast<unsigned long long>(count), std::chrono::duration<double>(now - last).count());
@@ -262,7 +266,8 @@ int APS5_VABI sceAudioOut2ContextGetQueueLevel(AudioOut2ContextHandle ctx, uint3
 }
 
 int APS5_VABI sceAudioOut2ContextPush(AudioOut2ContextHandle ctx, uint32_t blocking) {
-    std::vector<float>* mix = nullptr;
+    bool audible = false;
+    std::chrono::steady_clock::time_point due{};
     {
         std::lock_guard lock(mutex);
         const auto found = contexts.find(ctx);
@@ -271,27 +276,36 @@ int APS5_VABI sceAudioOut2ContextPush(AudioOut2ContextHandle ctx, uint32_t block
         std::fill(context.mix.begin(), context.mix.end(), 0.0f);
         for (const auto handle : context.ports) {
             auto port = ports.find(handle);
-            if (port != ports.end()) mixPort(port->second, context.mix);
+            if (port == ports.end()) continue;
+            mixPort(port->second, context.mix);
+            audible = audible || (port->second.data != nullptr && port->second.type != PORT_TYPE_VIBRATION && port->second.type != PORT_TYPE_HAPTICS);
         }
-        for (auto& value : context.mix) value = limit(value);
-        mix = &context.mix;
-        // ANYPS5_DUMP_AUDIO=<directory>: the mix sent to the device, as raw stereo float (diagnostics).
-        static FILE* dump = [] { const char* directory = std::getenv("ANYPS5_DUMP_AUDIO"); return directory != nullptr ? std::fopen((std::string(directory) + "/mix.f32").c_str(), "wb") : nullptr; }();
-        if (dump != nullptr) std::fwrite(mix->data(), sizeof(float), mix->size(), dump);
-        if (device != 0) {
-            if (SDL_GetQueuedAudioSize(device) == 0) reportUnderrun();
-            SDL_QueueAudio(device, mix->data(), static_cast<Uint32>(mix->size() * sizeof(float)));
+        // Titles push a haptics-only context of their own: its silent grains would cut into the
+        // speakers' queue between the audible context's grains.
+        if (audible) {
+            for (auto& value : context.mix) value = limit(value);
+            // ANYPS5_DUMP_AUDIO=<directory>: the mix sent to the device, as raw stereo float (diagnostics).
+            static FILE* dump = [] { const char* directory = std::getenv("ANYPS5_DUMP_AUDIO"); return directory != nullptr ? std::fopen((std::string(directory) + "/mix.f32").c_str(), "wb") : nullptr; }();
+            if (dump != nullptr) std::fwrite(context.mix.data(), sizeof(float), context.mix.size(), dump);
+            if (device != 0) {
+                if (SDL_GetQueuedAudioSize(device) == 0) reportUnderrun();
+                SDL_QueueAudio(device, context.mix.data(), static_cast<Uint32>(context.mix.size() * sizeof(float)));
+            }
         }
+        const auto now = std::chrono::steady_clock::now();
+        context.nextGrain = std::max(context.nextGrain, now - std::chrono::milliseconds(50)) + std::chrono::microseconds(1000000ull * GrainFrames / OutputRate);
+        due = context.nextGrain;
     }
-    // Pace the caller: keep about TargetLatencyGrains grains queued on the device.
+    // Pace the caller: keep about TargetLatencyGrains grains queued on the device, or real time for
+    // a context that queues nothing (a thread pushing both then waits once).
     const auto grainBytes = GrainFrames * OutputChannels * sizeof(float);
-    if (device != 0) {
+    if (device != 0 && audible) {
         while (SDL_GetQueuedAudioSize(device) > TargetLatencyGrains * grainBytes) {
             if (blocking == 0) break;
             std::this_thread::sleep_for(std::chrono::microseconds(500));
         }
     } else if (blocking != 0) {
-        std::this_thread::sleep_for(std::chrono::microseconds(1000000ull * GrainFrames / OutputRate));
+        std::this_thread::sleep_until(due);
     }
     return 0;
 }
