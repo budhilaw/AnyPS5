@@ -12,6 +12,7 @@
 #include <vector>
 #include <memory>
 #include <type_traits>
+#include <unordered_set>
 
 namespace AgcDriver::Graphics {
 namespace {
@@ -554,6 +555,28 @@ void ValidateShaders(std::span<const CompiledShader> shaders, const State& state
     Require(!state.rectList || (state.stages.path == ShaderPath::Vertex && state.topology == VK_PRIMITIVE_TOPOLOGY_PATCH_LIST && state.cullMode == VK_CULL_MODE_NONE), "invalid rect-list pipeline state");
     Require(shaders.size() == (tessellation || state.rectList ? 4u : 2u), "incorrect graphics stage count");
     const std::array<Stage, 4> tessStages{Stage::Local, Stage::TessellationControl, Stage::TessellationEvaluation, Stage::Fragment};
+    // Draws repeat a few combinations: one that passed before (same inputs as the inspection
+    // keys, plus the pass state) passes again.
+    std::uint64_t hash = 0xcbf29ce484222325ull;
+    const auto mix = [&hash](std::uint64_t value) { hash = (hash ^ value) * 0x100000001b3ull; hash ^= hash >> 29u; };
+    mix(state.rectList); mix(static_cast<std::uint64_t>(state.stages.path)); mix(state.hasColorTarget); mix(shaders.size());
+    if (state.stages.mesh) { mix(state.stages.mesh->threadsPerGroup); mix(state.stages.mesh->maxVertices); mix(state.stages.mesh->maxPrimitives); }
+    if (state.stages.tessellation) { mix(state.stages.tessellation->inputControlPoints); mix(state.stages.tessellation->outputControlPoints); }
+    mix(subgroup.supportedStages); mix(subgroup.supportedOperations); mix(fragmentShaderBarycentric);
+    bool hashed = true;
+    for (const auto& compiled : shaders) {
+        if (compiled.program == nullptr || compiled.program->spirvHash == 0) { hashed = false; break; }
+        const auto& shader = *compiled.program;
+        mix(static_cast<std::uint64_t>(compiled.stage)); mix(compiled.pushConstantOffset); mix(shader.pushConstants.size()); mix(shader.bdaAbiVersion);
+        mix(shader.spirvHash); mix(shader.spirv.size()); mix(shader.bindings.size()); mix(shader.vertexAttributes.size());
+        for (const auto& binding : shader.bindings) {
+            mix(static_cast<std::uint64_t>(binding.kind)); mix(static_cast<std::uint64_t>(binding.role)); mix(binding.descriptorSet); mix(binding.binding);
+            mix(binding.count); mix(binding.readOnly); mix(binding.guestDescriptor.empty());
+        }
+        for (const auto& attribute : shader.vertexAttributes) { mix(attribute.location); mix(attribute.components); mix(attribute.resource.fields[3]); }
+    }
+    thread_local std::unordered_set<std::uint64_t> passed;
+    if (hashed && passed.contains(hash)) return;
     static_cast<void>(AssemblePushConstants(shaders));
     std::shared_ptr<const ValidatedInterface> previous;
     for (std::size_t i = 0; i < shaders.size(); ++i) {
@@ -578,6 +601,9 @@ void ValidateShaders(std::span<const CompiledShader> shaders, const State& state
         Require(location < 8, "fragment shader exports a color beyond location seven");
         Require(signature == "vertex:f32x4" || signature == "vertex:u32x4", "fragment shader color export at location " + std::to_string(location) + " is not a four-component vector: " + signature);
     }
+    if (!hashed) return;
+    if (passed.size() >= 4096) passed.clear();
+    passed.insert(hash);
 }
 
 void ValidateShaderPair(const ShaderRecompiler::RecompileResult& vertex, const ShaderRecompiler::RecompileResult& fragment) {
