@@ -27,7 +27,7 @@ constexpr int SCE_AUDIO_OUT2_ERROR_PORT_FULL = static_cast<int>(0x8026000a);
 constexpr std::uint32_t GrainFrames = 256;
 constexpr std::uint32_t OutputRate = 48000;
 constexpr std::uint32_t OutputChannels = 2;
-constexpr std::uint32_t TargetLatencyGrains = 8;
+constexpr std::uint32_t TargetLatencyGrains = 16;
 constexpr std::uint32_t PORT_TYPE_VIBRATION = 10;
 constexpr std::uint32_t PORT_TYPE_PADSPK = 4;
 constexpr std::uint32_t PORT_TYPE_HAPTICS = 6;  // DualSense haptics as two-channel audio: not for speakers
@@ -112,6 +112,25 @@ float sample(const Port& port, std::uint32_t frame, std::uint32_t channel) {
     return static_cast<float>(value) / 32768.0f;
 }
 
+// Rounds peaks above 0.8 off towards full scale: hard clipping a loud mix crackles.
+float limit(float value) {
+    const float magnitude = std::fabs(value);
+    if (magnitude <= 0.8f) return value;
+    return std::copysign(0.8f + 0.2f * std::tanh((magnitude - 0.8f) / 0.2f), value);
+}
+
+// The device ran dry before a push: the title's mixer fell behind (reported every ten seconds).
+void reportUnderrun() {
+    static std::uint64_t count = 0;
+    static auto last = std::chrono::steady_clock::now();
+    ++count;
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last < std::chrono::seconds(10)) return;
+    APS5_LOG_OUT("audio: %llu output underruns in the last %.0f s", static_cast<unsigned long long>(count), std::chrono::duration<double>(now - last).count());
+    count = 0;
+    last = now;
+}
+
 // Mixes a port's grain into a stereo buffer: 7.1 layouts fold their surround channels down.
 void mixPort(Port& port, std::vector<float>& mix) {
     if (port.data == nullptr || port.type == PORT_TYPE_VIBRATION || port.type == PORT_TYPE_HAPTICS) return;
@@ -137,10 +156,10 @@ void mixPort(Port& port, std::vector<float>& mix) {
         if (port.channels == 1) { left = right = sample(port, frame, 0); }
         else if (port.channels == 2) { left = sample(port, frame, 0); right = sample(port, frame, 1); }
         else {
-            // L R C LFE Ls Rs Lb Rb (standard order; the console's own order swaps the pairs, both fold alike)
-            const float center = sample(port, frame, 2) * 0.7071f, lfe = sample(port, frame, 3) * 0.5f;
-            left = sample(port, frame, 0) + center + lfe + (sample(port, frame, 4) + sample(port, frame, 6)) * 0.7071f;
-            right = sample(port, frame, 1) + center + lfe + (sample(port, frame, 5) + sample(port, frame, 7)) * 0.7071f;
+            // L R C LFE Ls Rs Lb Rb, folded as ITU does: without the LFE (the console's order swaps the pairs, both fold alike)
+            const float center = sample(port, frame, 2) * 0.7071f;
+            left = sample(port, frame, 0) + center + (sample(port, frame, 4) + sample(port, frame, 6)) * 0.7071f;
+            right = sample(port, frame, 1) + center + (sample(port, frame, 5) + sample(port, frame, 7)) * 0.7071f;
         }
         mix[frame * 2] += left * port.volume;
         mix[frame * 2 + 1] += right * port.volume;
@@ -254,9 +273,15 @@ int APS5_VABI sceAudioOut2ContextPush(AudioOut2ContextHandle ctx, uint32_t block
             auto port = ports.find(handle);
             if (port != ports.end()) mixPort(port->second, context.mix);
         }
-        for (auto& value : context.mix) value = std::clamp(value, -1.0f, 1.0f);
+        for (auto& value : context.mix) value = limit(value);
         mix = &context.mix;
-        if (device != 0) SDL_QueueAudio(device, mix->data(), static_cast<Uint32>(mix->size() * sizeof(float)));
+        // ANYPS5_DUMP_AUDIO=<directory>: the mix sent to the device, as raw stereo float (diagnostics).
+        static FILE* dump = [] { const char* directory = std::getenv("ANYPS5_DUMP_AUDIO"); return directory != nullptr ? std::fopen((std::string(directory) + "/mix.f32").c_str(), "wb") : nullptr; }();
+        if (dump != nullptr) std::fwrite(mix->data(), sizeof(float), mix->size(), dump);
+        if (device != 0) {
+            if (SDL_GetQueuedAudioSize(device) == 0) reportUnderrun();
+            SDL_QueueAudio(device, mix->data(), static_cast<Uint32>(mix->size() * sizeof(float)));
+        }
     }
     // Pace the caller: keep about TargetLatencyGrains grains queued on the device.
     const auto grainBytes = GrainFrames * OutputChannels * sizeof(float);
