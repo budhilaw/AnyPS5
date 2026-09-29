@@ -103,9 +103,10 @@ bool GpuColorTransfer::UploadView(std::uint64_t address, std::uint32_t newWidth,
     if (!viewsEnabled || context.guestBufferCache == nullptr) return false;
     PerformanceTimer timing("ColorTransfer.UploadView");
     const ColorTargetLayout layout(newWidth, newHeight, newMode);
+    // The import covers active guest mappings only, read through their alias: no CPU access to
+    // resolve (a check would unprotect the target's own pages, and its next use protect them).
     auto view = context.guestBufferCache->HostRange(address, layout.Bytes());
     if (!view.buffer) return false;
-    GuestMemory::CheckRange(reinterpret_cast<const void*>(address), static_cast<std::size_t>(layout.Bytes()), layout.Alignment());
     prepare(newWidth, newHeight, newMode);
     Require(upload->Bytes().size() <= layout.Bytes(), "color upload exceeds its guest surface");
     uploadSource = std::move(view.buffer);
