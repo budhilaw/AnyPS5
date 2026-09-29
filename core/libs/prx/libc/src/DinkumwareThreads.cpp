@@ -8,6 +8,7 @@
 #include <new>
 #include <stdexcept>
 #include <thread>
+#include "prx/libc/include/GuestLock.hpp"
 
 // Sony's libc is Dinkumware-based: std::mutex, std::condition_variable and this_thread in guest
 // code call these `_Mtx_*`, `_Cnd_*`, `_Thrd_*` and `_Xtime_*` entry points. Handles are pointers
@@ -21,8 +22,8 @@ struct Xtime { std::int64_t seconds; std::int32_t nanoseconds; };
 
 struct Mutex {
     bool recursive;
-    std::recursive_timed_mutex recursiveMutex;
-    std::timed_mutex plainMutex;
+    RecursiveGuestLock recursiveMutex;
+    GuestLock plainMutex;
     explicit Mutex(bool isRecursive) : recursive(isRecursive) {}
     void lock() { recursive ? recursiveMutex.lock() : plainMutex.lock(); }
     void unlock() { recursive ? recursiveMutex.unlock() : plainMutex.unlock(); }

@@ -67,25 +67,35 @@ int APS5_VABI scePthreadCondBroadcast(PthreadCond* cond) {
     return SCE_OK;
 }
 
+// The wait releases the mutex entirely (a recursive one at every depth) and takes it back for
+// this thread with its depth.
+namespace {
+struct HeldMutex {
+    PthreadMutexPrivate* mutex;
+    int depth = 0;
+    void unlock() {
+        depth = mutex->_count;
+        mutex->_count = 0;
+        mutex->_owner.store(std::thread::id{}, std::memory_order_relaxed);
+        MutexClearOwner(mutex);
+        mutex->_lock.unlock();
+    }
+    void lock() {
+        mutex->_lock.lock();
+        mutex->_owner.store(std::this_thread::get_id(), std::memory_order_relaxed);
+        mutex->_count = depth;
+        MutexNoteOwner(mutex);
+    }
+};
+}
+
 int APS5_VABI scePthreadCondTimedwait(PthreadCond* cond, PthreadMutex* mutex, unsigned int usec) {
     if (!mutex || !*mutex) throw std::runtime_error("scePthreadCondTimedwait: null mutex");
-    auto* m = *mutex;
     auto* c = EnsureCond(cond, "scePthreadCondTimedwait");
-    if (m->_type == MutexType::Recursive) {
-        std::unique_lock<std::recursive_timed_mutex> lk(m->_rmtx, std::adopt_lock);
-        MutexClearOwner(m);
-        auto res = c->_cv.wait_for(lk, std::chrono::microseconds(usec));
-        lk.release();
-        m->_owner.store(std::this_thread::get_id(), std::memory_order_relaxed); // the wait re-acquired the mutex for this thread
-        MutexNoteOwner(m);
-        return res == std::cv_status::timeout ? SCE_KERNEL_ERROR_ETIMEDOUT : SCE_OK;
-    }
-    std::unique_lock<std::timed_mutex> lk(m->_mtx, std::adopt_lock);
-    MutexClearOwner(m);
-    auto res = c->_cv.wait_for(lk, std::chrono::microseconds(usec));
+    HeldMutex held{*mutex};
+    std::unique_lock<HeldMutex> lk(held, std::adopt_lock);
+    const auto res = c->_cv.wait_for(lk, std::chrono::microseconds(usec));
     lk.release();
-    m->_owner.store(std::this_thread::get_id(), std::memory_order_relaxed); // the wait re-acquired the mutex for this thread
-    MutexNoteOwner(m);
     return res == std::cv_status::timeout ? SCE_KERNEL_ERROR_ETIMEDOUT : SCE_OK;
 }
 
@@ -98,23 +108,11 @@ int APS5_VABI scePthreadCondSignalto(PthreadCond* cond, Pthread thread) {
 
 int APS5_VABI scePthreadCondWait(PthreadCond* cond, PthreadMutex* mutex) {
     if (!mutex || !*mutex) throw std::runtime_error("scePthreadCondWait: null mutex");
-    auto* m = *mutex;
     auto* c = EnsureCond(cond, "scePthreadCondWait");
-    if (m->_type == MutexType::Recursive) {
-        std::unique_lock<std::recursive_timed_mutex> lk(m->_rmtx, std::adopt_lock);
-        MutexClearOwner(m);
-        c->_cv.wait(lk);
-        lk.release();
-        m->_owner.store(std::this_thread::get_id(), std::memory_order_relaxed); // the wait re-acquired the mutex for this thread
-        MutexNoteOwner(m);
-        return SCE_OK;
-    }
-    std::unique_lock<std::timed_mutex> lk(m->_mtx, std::adopt_lock);
-    MutexClearOwner(m);
+    HeldMutex held{*mutex};
+    std::unique_lock<HeldMutex> lk(held, std::adopt_lock);
     c->_cv.wait(lk);
     lk.release();
-    m->_owner.store(std::this_thread::get_id(), std::memory_order_relaxed); // the wait re-acquired the mutex for this thread
-    MutexNoteOwner(m);
     return SCE_OK;
 }
 

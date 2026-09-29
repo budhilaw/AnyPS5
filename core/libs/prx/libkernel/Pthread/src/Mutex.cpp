@@ -116,16 +116,20 @@ int APS5_VABI scePthreadMutexLock(PthreadMutex* mutex) {
     auto* m = EnsureMutex(mutex, "scePthreadMutexLock");
     const auto tid = std::this_thread::get_id();
     if (m->_type == MutexType::Recursive) {
-        LockReporting(m->_rmtx, m);
+        if (m->_owner.load(std::memory_order_relaxed) == tid) {
+            ++m->_count;
+            return SCE_OK;
+        }
+        LockReporting(m->_lock, m);
         m->_owner.store(tid, std::memory_order_relaxed);
         MutexNoteOwner(m);
-        ++m->_count;
+        m->_count = 1;
         return SCE_OK;
     }
     if (m->_type == MutexType::ErrorCheck) {
         if (m->_owner.load(std::memory_order_acquire) == tid) return SCE_KERNEL_ERROR_EDEADLK;
     }
-    LockReporting(m->_mtx, m);
+    LockReporting(m->_lock, m);
     m->_owner.store(tid, std::memory_order_relaxed);
     MutexNoteOwner(m);
     return SCE_OK;
@@ -134,56 +138,41 @@ int APS5_VABI scePthreadMutexLock(PthreadMutex* mutex) {
 int APS5_VABI scePthreadMutexUnlock(PthreadMutex* mutex) {
     if (!mutex || !*mutex) throw std::runtime_error("scePthreadMutexUnlock: null mutex");
     auto* m = *mutex;
-    if (m->_type == MutexType::ErrorCheck || m->_type == MutexType::Normal) {
-        if (m->_owner.load(std::memory_order_acquire) != std::this_thread::get_id())
-            return SCE_KERNEL_ERROR_EPERM;
-    }
-    if (m->_type == MutexType::Recursive) {
-        if (--m->_count == 0) {
-            m->_owner.store(std::thread::id{}, std::memory_order_relaxed);
-            MutexClearOwner(m);
-        }
-        m->_rmtx.unlock();
-        return SCE_OK;
-    }
+    if (m->_owner.load(std::memory_order_relaxed) != std::this_thread::get_id()) return SCE_KERNEL_ERROR_EPERM;
+    if (m->_type == MutexType::Recursive && --m->_count != 0) return SCE_OK;
     m->_owner.store(std::thread::id{}, std::memory_order_relaxed);
     MutexClearOwner(m);
-    m->_mtx.unlock();
+    m->_lock.unlock();
     return SCE_OK;
 }
 
 int APS5_VABI scePthreadMutexTimedlock(PthreadMutex* mutex, KernelUseconds usec) {
     auto* m = EnsureMutex(mutex, "scePthreadMutexTimedlock");
     const auto tid = std::this_thread::get_id();
-    const auto timeout = std::chrono::microseconds(usec);
-    if (m->_type == MutexType::Recursive) {
-        if (!m->_rmtx.try_lock_for(timeout)) return SCE_KERNEL_ERROR_ETIMEDOUT;
-        m->_owner.store(tid, std::memory_order_relaxed);
-        MutexNoteOwner(m);
+    if (m->_type == MutexType::Recursive && m->_owner.load(std::memory_order_relaxed) == tid) {
         ++m->_count;
         return SCE_OK;
     }
     if (m->_type == MutexType::ErrorCheck && m->_owner.load(std::memory_order_acquire) == tid) return SCE_KERNEL_ERROR_EDEADLK;
-    if (!m->_mtx.try_lock_for(timeout)) return SCE_KERNEL_ERROR_ETIMEDOUT;
+    if (!m->_lock.try_lock_for(std::chrono::microseconds(usec))) return SCE_KERNEL_ERROR_ETIMEDOUT;
     m->_owner.store(tid, std::memory_order_relaxed);
     MutexNoteOwner(m);
+    if (m->_type == MutexType::Recursive) m->_count = 1;
     return SCE_OK;
 }
 
 int APS5_VABI scePthreadMutexTrylock(PthreadMutex* mutex) {
     auto* m = EnsureMutex(mutex, "scePthreadMutexTrylock");
     const auto tid = std::this_thread::get_id();
-    if (m->_type == MutexType::Recursive) {
-        if (!m->_rmtx.try_lock()) return SCE_KERNEL_ERROR_EBUSY;
-        m->_owner.store(tid, std::memory_order_relaxed);
-        MutexNoteOwner(m);
+    if (m->_type == MutexType::Recursive && m->_owner.load(std::memory_order_relaxed) == tid) {
         ++m->_count;
         return SCE_OK;
     }
     if (m->_type == MutexType::ErrorCheck && m->_owner.load(std::memory_order_acquire) == tid) return SCE_KERNEL_ERROR_EDEADLK;
-    if (!m->_mtx.try_lock()) return SCE_KERNEL_ERROR_EBUSY;
+    if (!m->_lock.try_lock()) return SCE_KERNEL_ERROR_EBUSY;
     m->_owner.store(tid, std::memory_order_relaxed);
     MutexNoteOwner(m);
+    if (m->_type == MutexType::Recursive) m->_count = 1;
     return SCE_OK;
 }
 

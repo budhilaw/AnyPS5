@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
+#include "prx/libc/include/GuestLock.hpp"
 #include <string>
 #include <thread>
 #ifndef _WIN32
@@ -26,13 +27,13 @@ struct PthreadMutexattrPrivate {
 };
 
 struct PthreadPrivate;
+
 struct PthreadMutexPrivate {
-    std::recursive_timed_mutex _rmtx;
-    std::timed_mutex _mtx;
+    GuestLock _lock;
     MutexType _type;
     std::atomic<std::thread::id> _owner;
     std::atomic<PthreadPrivate*> _ownerThread{nullptr}; // for the ANYPS5_TRACE_LOCKS stall report only
-    int _count;
+    int _count;  // recursive mutexes: how often the owner holds it
 
     PthreadMutexPrivate() : _type(MutexType::Normal), _count(0) {}
 };
