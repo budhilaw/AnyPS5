@@ -28,7 +28,7 @@ ScriptedInput ScriptedControls(std::chrono::steady_clock::time_point now) {
         const char* text = std::getenv("ANYPS5_DEBUG_PRESS");
         if (text == nullptr) return result;
         const std::vector<std::pair<std::string, Pad::PadButton>> names = {
-            {"cross", Pad::PadButton::Cross}, {"circle", Pad::PadButton::Circle}, {"triangle", Pad::PadButton::Triangle},
+            {"cross", Pad::PadButton::Cross}, {"circle", Pad::PadButton::Circle}, {"triangle", Pad::PadButton::Triangle}, {"square", Pad::PadButton::Square},
             {"options", Pad::PadButton::Options}, {"up", Pad::PadButton::Up}, {"down", Pad::PadButton::Down},
             {"left", Pad::PadButton::Left}, {"right", Pad::PadButton::Right}, {"l1", Pad::PadButton::L1}, {"r1", Pad::PadButton::R1}};
         const std::vector<std::tuple<std::string, int, std::uint8_t>> axes = {
