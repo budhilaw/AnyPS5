@@ -1,6 +1,7 @@
 #include <map>
 // The audio job manager, shared by libSceAjm, libSceAjm.native and libSceAjmi (the same API
 // under three module names). Batches run synchronously at start; ATRAC9 decodes with LibAtrac9.
+#include <array>
 #include <cstdint>
 #include <cstddef>
 #include <cstring>
@@ -53,8 +54,12 @@ struct InstanceState {
     std::uint32_t skip = 0;  // gapless: samples per channel still to drop at the stream start
     std::uint32_t gaplessTotal = 0;
     std::uint16_t gaplessSkip = 0;
-    int frameIndex = 0;  // position in the current superframe, which may span jobs
-    std::size_t superframeUsed = 0;
+    // Decoded samples waiting for output room (their input was reported consumed).
+    std::vector<std::uint8_t> pendingPcm;
+    std::uint32_t id = 0;
+    // The last jobs, printed when a superframe fails to decode (diagnostics).
+    std::array<std::string, 8> recent;
+    std::size_t nextRecent = 0;
 };
 std::map<std::uint32_t, InstanceState> instanceStates;
 std::uint32_t nextContext = 1, nextInstance = 1, nextBatch = 1;
@@ -74,8 +79,7 @@ int append(AjmBatchInfo* info, Job job) {
 
 // Restarts the stream with the configuration the decoder was initialized with.
 void resetDecoder(InstanceState& state) {
-    state.frameIndex = 0;
-    state.superframeUsed = 0;
+    state.pendingPcm.clear();
     if (state.decoder != nullptr) Atrac9InitDecoder(state.decoder, state.info.configData);
 }
 
@@ -87,8 +91,7 @@ void restart(InstanceState& state) {
 void initialize(InstanceState& state, const std::uint8_t* config, std::size_t bytes) {
     state.decoded = 0;
     state.skip = 0;
-    state.frameIndex = 0;
-    state.superframeUsed = 0;
+    state.pendingPcm.clear();
     if (config == nullptr || bytes < ATRAC9_CONFIG_DATA_SIZE || config[0] != 0xFE) return;
     if (state.decoder == nullptr) state.decoder = Atrac9GetHandle();
     unsigned char data[ATRAC9_CONFIG_DATA_SIZE];
@@ -99,58 +102,86 @@ void initialize(InstanceState& state, const std::uint8_t* config, std::size_t by
         return;
     }
     state.channels = static_cast<std::uint32_t>(state.info.channels);
+    static int reported = 0;
+    if (reported++ < 64) APS5_LOG_OUT("ajm: ATRAC9 %d channels %d Hz, superframe %d bytes of %d frames (config %02x%02x%02x%02x)", state.info.channels, state.info.samplingRate, state.info.superframeSize, state.info.framesInSuperframe, config[0], config[1], config[2], config[3]);
 }
 
-// Decodes frames of `input` in order into `output` after the gapless skip while they fit, zero
-// filling the rest; returns the input bytes consumed and the PCM bytes written.
+// Decodes the whole superframes at the start of `input` while their samples find room, as the
+// hardware does: the title keeps a cut superframe and sends it again with the bytes that follow.
 std::pair<std::size_t, std::size_t> decode(InstanceState& state, const std::vector<std::uint8_t>& input, std::size_t bytes, const std::vector<std::pair<std::uint8_t*, std::size_t>>& output) {
     const std::size_t sampleBytes = state.format == 0 ? 2 : 4;
     const auto& info = state.info;
     std::size_t room = 0;
     for (const auto& [pointer, size] : output) room += pointer != nullptr ? size : 0;
-    std::vector<std::uint8_t> pcm;
     std::size_t consumed = 0;
     if (state.decoder != nullptr && info.superframeSize > 0 && info.framesInSuperframe > 0) {
+        const auto superframeBytes = static_cast<std::size_t>(info.superframeSize);
         const auto frameBytes = static_cast<std::size_t>(info.frameSamples) * info.channels * sampleBytes;
         std::vector<std::uint8_t> frame(frameBytes);
-        while (consumed < bytes) {
-            const auto dropped = std::min<std::uint32_t>(state.skip, static_cast<std::uint32_t>(info.frameSamples));
-            if (pcm.size() + frameBytes - dropped * info.channels * sampleBytes > room) break;
-            int used = 0;
-            const auto* bits = input.data() + consumed;
-            const int status = state.format == 0 ? Atrac9Decode(state.decoder, bits, reinterpret_cast<short*>(frame.data()), &used, 0)
-                : state.format == 1 ? Atrac9DecodeS32(state.decoder, bits, reinterpret_cast<int*>(frame.data()), &used, 0)
-                : Atrac9DecodeF32(state.decoder, bits, reinterpret_cast<float*>(frame.data()), &used, 0);
-            if (status != 0 || used <= 0 || consumed + static_cast<std::size_t>(used) > bytes) {
-                // A damaged or cut frame: go on at the next superframe with a clean decoder.
-                consumed += info.superframeSize - std::min<std::size_t>(state.superframeUsed, info.superframeSize);
-                resetDecoder(state);
-                continue;
+        // LibAtrac9's Huffman reader peeks a few bytes past the frame it decodes.
+        std::vector<std::uint8_t> superframe(superframeBytes + 16, 0);
+        while (bytes - consumed >= superframeBytes && state.pendingPcm.size() < room) {
+            std::copy_n(input.begin() + static_cast<std::ptrdiff_t>(consumed), superframeBytes, superframe.begin());
+            consumed += superframeBytes;
+            std::size_t used = 0;
+            for (int index = 0; index < info.framesInSuperframe; ++index) {
+                int frameUsed = 0;
+                const auto* bits = superframe.data() + used;
+                const int status = used >= superframeBytes ? -1
+                    : state.format == 0 ? Atrac9Decode(state.decoder, bits, reinterpret_cast<short*>(frame.data()), &frameUsed, 0)
+                    : state.format == 1 ? Atrac9DecodeS32(state.decoder, bits, reinterpret_cast<int*>(frame.data()), &frameUsed, 0)
+                    : Atrac9DecodeF32(state.decoder, bits, reinterpret_cast<float*>(frame.data()), &frameUsed, 0);
+                if (status != 0 || frameUsed <= 0) {
+                    static int reported = 0;
+                    if (reported++ < 16) {
+                        APS5_LOG_OUT("ajm: ATRAC9 frame %d of a superframe failed (%d) on instance %u at byte %zu of %zu; the decoder restarts. Its last jobs:", index, status, state.id, consumed - superframeBytes, bytes);
+                        for (std::size_t i = 0; i < state.recent.size(); ++i) {
+                            const auto& line = state.recent[(state.nextRecent + i) % state.recent.size()];
+                            if (!line.empty()) APS5_LOG_OUT("ajm:   %s", line.c_str());
+                        }
+                    }
+                    Atrac9InitDecoder(state.decoder, state.info.configData);
+                    break;
+                }
+                used += static_cast<std::size_t>(frameUsed);
+                const auto dropped = std::min<std::uint32_t>(state.skip, static_cast<std::uint32_t>(info.frameSamples));
+                state.skip -= dropped;
+                state.pendingPcm.insert(state.pendingPcm.end(), frame.begin() + dropped * info.channels * sampleBytes, frame.end());
             }
-            consumed += static_cast<std::size_t>(used);
-            state.superframeUsed += static_cast<std::size_t>(used);
-            if (++state.frameIndex == info.framesInSuperframe) {
-                consumed += info.superframeSize - std::min<std::size_t>(state.superframeUsed, info.superframeSize);
-                state.frameIndex = 0;
-                state.superframeUsed = 0;
-            }
-            state.skip -= dropped;
-            pcm.insert(pcm.end(), frame.begin() + dropped * info.channels * sampleBytes, frame.end());
         }
     }
     std::size_t cursor = 0;
     for (const auto& [pointer, size] : output) {
         if (pointer == nullptr) continue;
-        const auto copied = std::min(size, pcm.size() - std::min(cursor, pcm.size()));
-        if (copied != 0) std::memcpy(pointer, pcm.data() + cursor, copied);
+        const auto copied = std::min(size, state.pendingPcm.size() - cursor);
+        if (copied != 0) std::memcpy(pointer, state.pendingPcm.data() + cursor, copied);
         std::memset(pointer + copied, 0, size - copied);
         cursor += copied;
     }
-    return {std::min(consumed, bytes), cursor};
+    state.pendingPcm.erase(state.pendingPcm.begin(), state.pendingPcm.begin() + static_cast<std::ptrdiff_t>(cursor));
+    return {consumed, cursor};
 }
 
 void complete(const Job& job) {
     auto& state = instanceStates[job.instance];
+    state.id = job.instance;
+    {
+        std::size_t inputTotal = job.inputSize;
+        for (const auto& buffer : job.inputs) inputTotal += buffer.size;
+        char line[160];
+        const auto* in = static_cast<const std::uint8_t*>(job.input);
+        std::snprintf(line, sizeof(line), "kind %u flags 0x%llx input %zu (%zu buffers) head %02x%02x%02x%02x output %zu, %zu samples bytes waiting", static_cast<unsigned>(job.kind), static_cast<unsigned long long>(job.flags), inputTotal, job.inputs.size(),
+            in != nullptr && job.inputSize >= 4 ? in[0] : 0, in != nullptr && job.inputSize >= 4 ? in[1] : 0, in != nullptr && job.inputSize >= 4 ? in[2] : 0, in != nullptr && job.inputSize >= 4 ? in[3] : 0, job.outputSize, state.pendingPcm.size());
+        state.recent[state.nextRecent++ % state.recent.size()] = line;
+    }
+    // ANYPS5_TRACE_AJM=1: every job but decodes, and decode sizes that are not whole superframes.
+    static const bool trace = std::getenv("ANYPS5_TRACE_AJM") != nullptr;
+    if (trace) {
+        std::string bytes;
+        const auto* in = static_cast<const std::uint8_t*>(job.input);
+        for (std::size_t i = 0; in != nullptr && i < std::min<std::size_t>(job.inputSize, 16); ++i) { char item[4]; std::snprintf(item, sizeof(item), "%02x", in[i]); bytes += item; }
+        APS5_LOG_OUT("ajm trace: instance %u kind %u flags 0x%llx input %zu [%s] split %zu/%zu output %zu superframe %d", job.instance, static_cast<unsigned>(job.kind), static_cast<unsigned long long>(job.flags), job.inputSize, bytes.c_str(), job.inputs.size(), job.outputs.size(), job.outputSize, state.info.superframeSize);
+    }
     if (job.kind == Job::Initialize) initialize(state, static_cast<const std::uint8_t*>(job.input), job.inputSize);
     if (job.kind == Job::Clear) restart(state); // a new stream starts
     if (job.kind == Job::Control && (job.flags & 0x1ull) != 0) restart(state); // control reset
@@ -178,6 +209,19 @@ void complete(const Job& job) {
         if (job.output != nullptr) output.emplace_back(static_cast<std::uint8_t*>(job.output), job.outputSize);
         for (const auto& buffer : job.outputs) output.emplace_back(static_cast<std::uint8_t*>(buffer.ptr), buffer.size);
         progress = decode(state, input, data, output);
+        // ANYPS5_DUMP_AUDIO=<directory>: each instance's decoded PCM, raw (diagnostics).
+        if (static const char* directory = std::getenv("ANYPS5_DUMP_AUDIO"); directory != nullptr) {
+            static std::map<std::uint32_t, FILE*> files;
+            auto& file = files[job.instance];
+            if (file == nullptr) file = std::fopen((std::string(directory) + "/ajm_" + std::to_string(job.instance) + ".raw").c_str(), "wb");
+            std::size_t left = progress.second;
+            for (const auto& [pointer, size] : output) {
+                if (pointer == nullptr || left == 0) continue;
+                const auto count = std::min(size, left);
+                if (file != nullptr) std::fwrite(pointer, 1, count, file);
+                left -= count;
+            }
+        }
     } else {
         if (job.output != nullptr && job.outputSize != 0) std::memset(job.output, 0, job.outputSize);
         for (const auto& buffer : job.outputs) if (buffer.ptr != nullptr) std::memset(buffer.ptr, 0, buffer.size);
