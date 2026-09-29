@@ -1,6 +1,7 @@
 #include "prx/libc/include/general/VabiMacros.hpp"
 #include "prx/libc/include/General.hpp"
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <limits>
@@ -10,9 +11,11 @@
 #include <set>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 #if defined(__APPLE__)
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
+#include <os/lock.h>
 #endif
 
 extern "C" int* APS5_VABI __error_nid_postfix();
@@ -24,11 +27,16 @@ extern "C" int* APS5_VABI __error_nid_postfix();
 namespace {
 
 constexpr std::size_t Granule = 16;
+// Freed small blocks wait in per-size lists for the next allocation of their size (titles free
+// and allocate the same sizes every frame) instead of going back through the free maps.
+constexpr std::size_t QuickLimit = 1024;
+constexpr std::size_t QuickBudget = 32u << 20;
 
 struct Allocation {
     std::uintptr_t start;     // the block the allocation occupies (alignment padding included)
     std::size_t capacity;     // block bytes
     std::size_t requested;    // bytes the caller asked for (rounded to the granule)
+    bool cached = false;      // freed, waiting in a quick list
 };
 
 struct Arena {
@@ -37,6 +45,8 @@ struct Arena {
     std::map<std::uintptr_t, std::size_t> freeByAddress;                 // block start -> bytes
     std::set<std::pair<std::size_t, std::uintptr_t>> freeBySize;         // (bytes, start)
     std::unordered_map<std::uintptr_t, Allocation> allocations;          // user pointer -> block
+    std::array<std::vector<std::uintptr_t>, QuickLimit / Granule> quick; // freed blocks by size
+    std::size_t quickBytes = 0;
 
     void AddFree(std::uintptr_t address, std::size_t bytes) {
         if (bytes == 0) return;
@@ -66,7 +76,22 @@ struct Arena {
     }
 };
 
-std::mutex arenaMutex;
+#if defined(__APPLE__)
+// Titles allocate from many threads at once; the unfair lock hands over without a kernel round
+// trip. Every holder unlocks in the function that locked.
+class ArenaLock {
+public:
+    void lock() { os_unfair_lock_lock(&word); }
+    void unlock() { os_unfair_lock_unlock(&word); }
+
+private:
+    os_unfair_lock word = OS_UNFAIR_LOCK_INIT;
+};
+#else
+using ArenaLock = std::mutex;
+#endif
+
+ArenaLock arenaMutex;
 std::map<std::uintptr_t, std::unique_ptr<Arena>> arenas; // keyed by start
 
 void Error(int value) { *__error_nid_postfix() = value; }
@@ -86,9 +111,23 @@ Arena* Owner(const void* pointer) {
     while (it != arenas.begin()) {
         --it;
         auto* arena = it->second.get();
-        if (address < arena->end && arena->allocations.count(address) != 0) return arena;
+        const auto found = arena->allocations.find(address);
+        if (address < arena->end && found != arena->allocations.end() && !found->second.cached) return arena;
     }
     return nullptr;
+}
+
+void Release(Arena* arena, std::unordered_map<std::uintptr_t, Allocation>::iterator allocation);
+
+// Returns every cached block to the free maps (an allocation found no room without them).
+bool FlushQuick(Arena* arena) {
+    if (arena->quickBytes == 0) return false;
+    for (auto& list : arena->quick) {
+        for (const auto address : list) Release(arena, arena->allocations.find(address));
+        list.clear();
+    }
+    arena->quickBytes = 0;
+    return true;
 }
 
 void* Allocate(Arena* arena, std::size_t size, std::size_t alignment) {
@@ -96,6 +135,18 @@ void* Allocate(Arena* arena, std::size_t size, std::size_t alignment) {
     if (size > std::numeric_limits<std::size_t>::max() - 2 * Granule) { Error(12); return nullptr; }
     size = RoundUp(std::max<std::size_t>(size, 1));
     alignment = std::max(alignment, Granule);
+    if (alignment == Granule && size <= QuickLimit) {
+        auto& list = arena->quick[size / Granule - 1];
+        if (!list.empty()) {
+            const auto address = list.back();
+            list.pop_back();
+            auto& block = arena->allocations.find(address)->second;
+            block.cached = false;
+            block.requested = size;
+            arena->quickBytes -= block.capacity;
+            return reinterpret_cast<void*>(address);
+        }
+    }
     // Best fit: the smallest free block that holds the size; larger alignments may need a larger one.
     for (auto it = arena->freeBySize.lower_bound({size, 0}); it != arena->freeBySize.end(); ++it) {
         const auto [bytes, start] = *it;
@@ -119,6 +170,7 @@ void* Allocate(Arena* arena, std::size_t size, std::size_t alignment) {
         arena->allocations.emplace(aligned, Allocation{blockStart, blockBytes, size});
         return reinterpret_cast<void*>(aligned);
     }
+    if (FlushQuick(arena)) return Allocate(arena, size, alignment);
     {
         std::size_t freeBytes = 0, largest = 0;
         for (const auto& [bytes, start] : arena->freeBySize) { freeBytes += bytes; largest = std::max(largest, bytes); }
@@ -133,6 +185,18 @@ void Release(Arena* arena, std::unordered_map<std::uintptr_t, Allocation>::itera
     const auto block = allocation->second;
     arena->allocations.erase(allocation);
     arena->AddFree(block.start, block.capacity);
+}
+
+// A freed block of a quick size stays allocated in a quick list while the budget allows.
+void Free(Arena* arena, std::unordered_map<std::uintptr_t, Allocation>::iterator allocation) {
+    auto& block = allocation->second;
+    if (block.capacity <= QuickLimit && block.start == allocation->first && arena->quickBytes + block.capacity <= QuickBudget) {
+        block.cached = true;
+        arena->quick[block.capacity / Granule - 1].push_back(allocation->first);
+        arena->quickBytes += block.capacity;
+        return;
+    }
+    Release(arena, allocation);
 }
 
 // Grows or shrinks in place when the block (and a free block right after it) allows it.
@@ -167,14 +231,14 @@ void* Reallocate(Arena* arena, void* pointer, std::size_t alignment, std::size_t
     if (!pointer) return Allocate(arena, size, alignment);
     const auto address = reinterpret_cast<std::uintptr_t>(pointer);
     const auto found = arena->allocations.find(address);
-    if (found == arena->allocations.end()) { Error(22); return nullptr; }
-    if (size == 0) { Release(arena, found); return nullptr; }
+    if (found == arena->allocations.end() || found->second.cached) { Error(22); return nullptr; }
+    if (size == 0) { Free(arena, found); return nullptr; }
     if ((address & (std::max(alignment, Granule) - 1)) == 0 && ResizeInPlace(arena, found->second, address, size)) return pointer;
     const auto copied = std::min(found->second.requested, size);
     void* result = Allocate(arena, size, alignment);
     if (!result) return nullptr;
     std::memcpy(result, pointer, copied);
-    Release(arena, arena->allocations.find(address));
+    Free(arena, arena->allocations.find(address));
     return result;
 }
 
@@ -248,13 +312,13 @@ void APS5_VABI sceLibcMspaceFree_nid_postfix(void* handle, void* pointer) {
     auto* arena = Find(handle);
     if (!arena) return;
     const auto found = arena->allocations.find(reinterpret_cast<std::uintptr_t>(pointer));
-    if (found == arena->allocations.end()) {
+    if (found == arena->allocations.end() || found->second.cached) {
         static int reported = 0;
         if (reported++ < 16) APS5_LOG_OUT("mspace 0x%llx: free of unknown pointer %p", static_cast<unsigned long long>(arena->start), pointer);
         Error(22);
         return;
     }
-    Release(arena, found);
+    Free(arena, found);
 }
 
 void* APS5_VABI sceLibcMspaceCalloc_nid_postfix(void* handle, std::size_t count, std::size_t size) {
@@ -299,7 +363,7 @@ std::size_t APS5_VABI sceLibcMspaceMallocUsableSize_nid_postfix(const void* poin
     if (auto* arena = Owner(pointer)) {
         const auto address = reinterpret_cast<std::uintptr_t>(pointer);
         const auto found = arena->allocations.find(address);
-        if (found != arena->allocations.end()) return found->second.start + found->second.capacity - address;
+        if (found != arena->allocations.end() && !found->second.cached) return found->second.start + found->second.capacity - address;
     }
     Error(22);
     return 0;
