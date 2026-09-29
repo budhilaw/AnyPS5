@@ -687,6 +687,7 @@ private:
             }
         }
         std::vector<Graphics::GuestMemorySnapshot> snapshots;
+        snapshots.reserve(captured.size());
         for (const auto& region : captured) snapshots.push_back({region.guestAddress, region.bytes});
         timing.Mark("snapshots");
         {
@@ -920,6 +921,7 @@ private:
             stages.insert(stages.begin() + 1, {{Stage::TessellationControl, &results[2], 0}, {Stage::TessellationEvaluation, &results[3], 0}});
         }
         std::vector<Graphics::GuestMemorySnapshot> snapshots;
+        snapshots.reserve(memory.size());
         for (const auto& region : memory) snapshots.push_back({region.guestAddress, region.bytes});
         timing.Mark("post_compile_prepare");
         // What the draw may write, for host reads racing the graphics thread (resolveForHost).
