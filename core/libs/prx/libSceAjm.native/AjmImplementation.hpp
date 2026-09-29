@@ -211,9 +211,12 @@ void complete(const Job& job) {
         progress = decode(state, input, data, output);
         // ANYPS5_DUMP_AUDIO=<directory>: each instance's decoded PCM, raw (diagnostics).
         if (static const char* directory = std::getenv("ANYPS5_DUMP_AUDIO"); directory != nullptr) {
-            static std::map<std::uint32_t, FILE*> files;
+            static std::map<std::uint32_t, FILE*> files, inputs;
             auto& file = files[job.instance];
             if (file == nullptr) file = std::fopen((std::string(directory) + "/ajm_" + std::to_string(job.instance) + ".raw").c_str(), "wb");
+            auto& consumed = inputs[job.instance];
+            if (consumed == nullptr) consumed = std::fopen((std::string(directory) + "/ajm_" + std::to_string(job.instance) + ".in").c_str(), "wb");
+            if (consumed != nullptr) std::fwrite(input.data(), 1, progress.first, consumed);
             std::size_t left = progress.second;
             for (const auto& [pointer, size] : output) {
                 if (pointer == nullptr || left == 0) continue;
@@ -310,8 +313,8 @@ int APS5_VABI sceAjmInstanceCreate(uint32_t context, uint32_t codec, uint64_t fl
     instances.insert(*instance);
     // AjmInstanceFlags: version (3 bits), channels (4), output format (3), ...
     instanceStates[*instance].format = static_cast<std::uint32_t>((flags >> 7) & 0x7) <= 2 ? static_cast<std::uint32_t>((flags >> 7) & 0x7) : 0;
-    static int reported = 0;
-    if (reported++ < 4) APS5_LOG_OUT("ajm: instance %u codec %u flags 0x%llx", *instance, codec, static_cast<unsigned long long>(flags));
+    static std::set<std::uint64_t> reportedFlags;
+    if (reportedFlags.insert((static_cast<std::uint64_t>(codec) << 48) ^ flags).second) APS5_LOG_OUT("ajm: instance %u codec %u flags 0x%llx", *instance, codec, static_cast<unsigned long long>(flags));
     return 0;
 }
 

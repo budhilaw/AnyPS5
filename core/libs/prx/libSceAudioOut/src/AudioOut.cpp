@@ -1,3 +1,7 @@
+#include <cstdlib>
+#include <cstdio>
+#include <string>
+#include <map>
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -308,6 +312,7 @@ int APS5_VABI sceAudioOutOpen(int userId, int type, int index, std::uint32_t len
             if (type != PORT_TYPE_VIBRATION) {
                 openDevice(port);
             }
+            APS5_LOG_OUT("audio out port %d: type %d format %d (%d channels) %u Hz, %u samples per output", i + 1, type, static_cast<int>(format), port.channels, freq, len);
             return i + 1;
         }
     }
@@ -343,6 +348,14 @@ int APS5_VABI sceAudioOutOutput(int handle, const void* ptr) {
         nanosleep(&req, nullptr);
     }
 
+    // ANYPS5_DUMP_AUDIO=<directory>: each port's raw output (diagnostics).
+    if (static const char* directory = std::getenv("ANYPS5_DUMP_AUDIO"); directory != nullptr && ptr != nullptr) {
+        static std::map<int, FILE*> files;
+        auto& file = files[handle];
+        if (file == nullptr) file = std::fopen((std::string(directory) + "/out_" + std::to_string(handle) + ".raw").c_str(), "wb");
+        const bool floats = port->format == Format::F32Mono || port->format == Format::F32Stereo || port->format == Format::F32_8Ch || port->format == Format::F32_8ChStd;
+        if (file != nullptr) std::fwrite(ptr, floats ? 4 : 2, static_cast<std::size_t>(port->samplesNum) * port->channels, file);
+    }
     queueAudio(*port, ptr);
     port->lastOutputTime = sceKernelGetProcessTime();
     return static_cast<int>(port->samplesNum);
