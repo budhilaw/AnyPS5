@@ -19,6 +19,7 @@ enum class MutexType : std::uint32_t {
     ErrorCheck = 1,
     Recursive = 2,
     Normal = 3,
+    Adaptive = 4,
 };
 
 struct PthreadMutexattrPrivate {

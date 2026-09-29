@@ -71,7 +71,8 @@ int APS5_VABI scePthreadMutexattrSettype(PthreadMutexattr* attr, int type) {
     case 1: (*attr)->type = MutexType::ErrorCheck; break;
     case 2: (*attr)->type = MutexType::Recursive; break;
     case 3: (*attr)->type = MutexType::Normal; break;
-    default: throw std::runtime_error("scePthreadMutexattrSettype: invalid type");
+    case 4: (*attr)->type = MutexType::Adaptive; break;
+    default: throw std::runtime_error("scePthreadMutexattrSettype: invalid type " + std::to_string(type));
     }
     return SCE_OK;
 }
