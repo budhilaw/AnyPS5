@@ -2,7 +2,9 @@
 #define CORE_LIBS_PRX_LIBC_INCLUDE_FILESTREAM_HPP
 
 #include <cstdio>
+#include <source_location>
 #include <stdexcept>
+#include <string>
 #include <utility>
 #include <cstdint>
 #include <cstddef>
@@ -95,8 +97,12 @@ public:
 };
 static_assert(std::is_standard_layout_v<FileStream>);
 
-inline std::FILE* GetNativeStream(FileStream* stream) {
-    if (!stream) throw std::runtime_error("FileStream: null stream");
+[[gnu::always_inline]] inline std::FILE* GetNativeStream(FileStream* stream, std::source_location where = std::source_location::current()) {
+    if (!stream) {
+        char caller[32];
+        std::snprintf(caller, sizeof(caller), " (caller %p)", __builtin_return_address(0));
+        throw std::runtime_error(std::string("FileStream: null stream in ") + where.function_name() + caller);
+    }
     return stream->GetHandle();
 }
 
