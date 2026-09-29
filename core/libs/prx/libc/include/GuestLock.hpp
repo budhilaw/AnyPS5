@@ -52,7 +52,7 @@ public:
     bool try_lock() noexcept {
         const auto self = std::this_thread::get_id();
         if (owner.load(std::memory_order_relaxed) == self) { ++depth; return true; }
-        if (!lock_.try_lock()) return false;
+        if (!exclusive.try_lock()) return false;
         take(self);
         return true;
     }
@@ -60,21 +60,21 @@ public:
     void lock() noexcept {
         const auto self = std::this_thread::get_id();
         if (owner.load(std::memory_order_relaxed) == self) { ++depth; return; }
-        lock_.lock();
+        exclusive.lock();
         take(self);
     }
 
     void unlock() noexcept {
         if (--depth != 0) return;
         owner.store(std::thread::id{}, std::memory_order_relaxed);
-        lock_.unlock();
+        exclusive.unlock();
     }
 
     template <typename Clock, typename Duration>
     bool try_lock_until(const std::chrono::time_point<Clock, Duration>& deadline) {
         const auto self = std::this_thread::get_id();
         if (owner.load(std::memory_order_relaxed) == self) { ++depth; return true; }
-        if (!lock_.try_lock_until(deadline)) return false;
+        if (!exclusive.try_lock_until(deadline)) return false;
         take(self);
         return true;
     }
@@ -85,7 +85,7 @@ private:
         depth = 1;
     }
 
-    GuestLock lock_;
+    GuestLock exclusive;
     std::atomic<std::thread::id> owner{};
     unsigned depth = 0;
 };
