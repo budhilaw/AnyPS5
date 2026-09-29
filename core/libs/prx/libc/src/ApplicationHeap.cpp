@@ -1,6 +1,7 @@
 #include "prx/libc/include/ApplicationHeap.hpp"
 #include "prx/libc/include/general/VabiMacros.hpp"
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -25,6 +26,8 @@ std::mutex heapMutex;
 // Slot order of the SceLibcMallocReplace table from offset 0x20: malloc, free, calloc, realloc,
 // memalign, reallocalign, posix_memalign, malloc_stats, malloc_stats_fast, malloc_usable_size.
 std::array<void*, 10> heapApi{};
+// Registered once and never replaced: every allocation reads the table without the lock.
+std::atomic<bool> heapReady{false};
 std::once_flag heapInitialization;
 std::exception_ptr heapFailure;
 Initialize heapFinalize = nullptr;
@@ -54,6 +57,10 @@ template<typename TCallback>
 TCallback callback(std::size_t index) {
     static_assert(sizeof(TCallback) == sizeof(void*));
     TCallback result;
+    if (heapReady.load(std::memory_order_acquire)) {
+        std::memcpy(&result, &heapApi[index], sizeof(result));
+        return result;
+    }
     {
         std::lock_guard lock(heapMutex);
         if (heapFailure) std::rethrow_exception(heapFailure);
@@ -93,6 +100,7 @@ void finalize() {
     if (finalizeCallback != nullptr) finalizeCallback();
     std::lock_guard lock(heapMutex);
     heapFinalized = true;
+    heapReady.store(false, std::memory_order_release);
 }
 
 }
@@ -109,6 +117,7 @@ void ApplicationHeapRegister_nid_no_patch(void* const* api) {
     if (heapFinalized) throw std::runtime_error("application heap: allocator has been finalized");
     if (heapApi[0] != nullptr && heapApi != replacement) throw std::runtime_error("application heap: cannot replace an active allocator");
     heapApi = replacement;
+    heapReady.store(true, std::memory_order_release);
 }
 
 void ApplicationHeapInitialize_nid_no_patch(const void* processParameters) {
@@ -132,6 +141,7 @@ void ApplicationHeapInitialize_nid_no_patch(const void* processParameters) {
         } catch (...) {
             std::lock_guard lock(heapMutex);
             heapFailure = std::current_exception();
+            heapReady.store(false, std::memory_order_release);
         }
     });
     std::lock_guard lock(heapMutex);
