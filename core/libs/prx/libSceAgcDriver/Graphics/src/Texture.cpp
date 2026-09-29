@@ -47,7 +47,6 @@ VkImageViewType ViewTypeFor(TextureDimension dimension, std::uint32_t viewLayerC
     throw std::runtime_error("AGC graphics: Texture encountered an unknown guest texture dimension");
 }
 
-// The linear (non-sRGB) counterpart of a color format: storage views cannot be sRGB.
 VkFormat LinearFormat(VkFormat format) {
     switch (format) {
         case VK_FORMAT_R8_SRGB: return VK_FORMAT_R8_UNORM;
@@ -77,9 +76,6 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
         const auto mips = ComputeMipLayout(descriptor.tileMode, descriptor.format, descriptor.width, descriptor.height, descriptor.mipCount);
         const auto arrayLayers = FullArrayLayers(descriptor);
         const auto elementBytes = BytesPerElement(descriptor.format);
-        // Volumes: the guest layout is approximated as one 2D mip chain per depth slice (the
-        // console tiles volumes in thick blocks; see docs/TechnicalDebt.md). The host image has a
-        // single layer whose depth shrinks with the mip level.
         const bool volume = descriptor.dimension == TextureDimension::k3D;
         if (volume) {
             static std::once_flag once;
@@ -106,8 +102,6 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
         Require(arrayLayers == 0 || sliceLinearBytes <= UINT64_MAX / arrayLayers, "detiled texture buffer size overflows");
         const auto linearBytes = sliceLinearBytes * arrayLayers;
 
-        // Shader stores need a storage-capable, linear-color view: uncompressed formats get a
-        // mutable image so an sRGB texture can also be viewed as UNORM.
         bool storageCapable = false;
         if (context.storageImages && !IsBlockCompressed(descriptor.format)) {
             VkFormatProperties properties{};
@@ -128,7 +122,6 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
         imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
         imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         Check(context.Function<PFN_vkCreateImage>("vkCreateImage")(context.device, &imageInfo, nullptr, &image), "vkCreateImage");
-        // A storage-capable texture rests in the general layout so loads and stores need no transition.
         layout = storageCapable ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
         VkMemoryRequirements requirements{};
@@ -141,7 +134,6 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
         Check(context.Function<PFN_vkBindImageMemory>("vkBindImageMemory")(context.device, image, memory, 0), "vkBindImageMemory");
 
         {
-            // In the draw queue the buffers stay until the batch completes (ReleaseUpload).
             staging = std::make_unique<Buffer>(context, static_cast<std::size_t>(guestBytes), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
             std::memcpy(staging->Bytes().data(), snapshot.data(), snapshot.size());
             linear = std::make_unique<Buffer>(context, static_cast<std::size_t>(linearBytes), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
@@ -209,7 +201,7 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
             for (std::uint32_t layer = 0; layer < arrayLayers; ++layer) {
                 const auto linearLayerOffset = static_cast<std::uint64_t>(layer) * sliceLinearBytes;
                 for (std::uint32_t level = 0; level < descriptor.mipCount; ++level) {
-                    if (volume && layer >= std::max(arrayLayers >> level, 1u)) break; // the level has fewer slices
+                    if (volume && layer >= std::max(arrayLayers >> level, 1u)) break;
                     const auto& mip = mips[level];
                     VkBufferImageCopy region{};
                     region.bufferOffset = linearLayerOffset + mip.linearOffset;
@@ -278,7 +270,7 @@ void Texture::createGuestViews(const GuestTextureResource& descriptor, VkCompone
         const auto viewLevelCount = descriptor.lastLevel - descriptor.baseLevel + 1u;
         Require(descriptor.baseArray < imageLayers, "guest texture view starts past its last array slice");
         auto viewLayerCount = imageLayers - descriptor.baseArray;
-        if (descriptor.viewDimension == TextureDimension::k1D || descriptor.viewDimension == TextureDimension::k2D) viewLayerCount = 1u; // one slice through a non-array sampler
+        if (descriptor.viewDimension == TextureDimension::k1D || descriptor.viewDimension == TextureDimension::k2D) viewLayerCount = 1u;
         if (descriptor.viewDimension == TextureDimension::kCube) {
             Require(viewLayerCount % 6u == 0, "guest cube texture view does not contain a multiple of 6 array slices");
         }
@@ -310,7 +302,7 @@ VkImageView Texture::StorageView() {
         viewInfo.format = storageFormat;
         viewInfo.components = {VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY};
         viewInfo.subresourceRange = storageRange;
-        viewInfo.subresourceRange.levelCount = 1; // storage descriptors address one mip level
+        viewInfo.subresourceRange.levelCount = 1;
         Check(context.Function<PFN_vkCreateImageView>("vkCreateImageView")(context.device, &viewInfo, nullptr, &storageView), "vkCreateImageView storage");
     }
     return storageView;

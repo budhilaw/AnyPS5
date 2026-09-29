@@ -16,8 +16,6 @@ struct VertexFormat {
     const char* scalar;
 };
 
-// An attribute whose buffer descriptor is null or has the invalid format: the hardware fetches
-// zeros for it (titles leave unused vertex streams unbound).
 inline bool IsNullVertexAttribute(const ShaderRecompiler::VertexAttribute& attribute) {
     const auto& fields = attribute.resource.fields;
     const auto address = fields[0] | (static_cast<std::uint64_t>(fields[1] & 0xffffu) << 32u);
@@ -106,7 +104,6 @@ inline VertexInputLayout BuildVertexInputLayout(const Context& context, std::spa
         Require(attribute.location < context.limits.maxVertexInputAttributes && locations.insert(attribute.location).second, "invalid or duplicate vertex attribute location");
         Require(attribute.fetchIndex <= 1, "unsupported vertex fetch index");
         if (IsNullVertexAttribute(attribute)) {
-            // One zeroed record repeated for every vertex and instance.
             const auto binding = static_cast<std::uint32_t>(result.bindings.size());
             result.bindings.push_back({binding, 0u, VK_VERTEX_INPUT_RATE_VERTEX});
             result.attributes.push_back({attribute.location, binding, format.format, 0});

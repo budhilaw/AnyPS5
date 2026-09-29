@@ -112,8 +112,7 @@ void ShaderResources::build(std::span<const CompiledShader> shaders, const Color
                 if (binding.role == ShaderRecompiler::DescriptorRole::GuestBuffers) {
                     Require(binding.guestDescriptor.size() == static_cast<std::uint64_t>(binding.count) * 4, "guest buffer descriptor must contain four DWORDs per array element");
                     for (std::uint32_t element = 0; element < binding.count; ++element) {
-                        // Without write metadata every buffer counts as written (and is written back).
-                        static const bool writeBackAll = std::getenv("ANYPS5_DEBUG_WRITEBACK_ALL") != nullptr; // diagnostics
+                        static const bool writeBackAll = std::getenv("ANYPS5_DEBUG_WRITEBACK_ALL") != nullptr;
                         const bool written = writeBackAll || element >= binding.elementWritten.size() || binding.elementWritten[element];
                         const bool read = writeBackAll || element >= binding.elementRead.size() || binding.elementRead[element];
                         item.allocations.push_back(addGuestBuffer(std::span<const std::uint32_t>(binding.guestDescriptor).subspan(static_cast<std::size_t>(element) * 4, 4), written, read, target, indexAddress, indexBytes));
@@ -125,7 +124,6 @@ void ShaderResources::build(std::span<const CompiledShader> shaders, const Color
                     Require(context.gds != nullptr, "GDS is unavailable on this device");
                     static const bool traceGds = std::getenv("ANYPS5_TRACE_INDIRECT") != nullptr;
                     if (traceGds) { static int reported = 0; if (reported++ < 40) APS5_LOG_OUT("shader binds GDS (stage flags 0x%x, binding %u)", static_cast<unsigned>(flags), binding.binding); }
-                    // ANYPS5_DUMP_GDS_SHADERS=<directory>: the SPIR-V of every shader that binds GDS, once each.
                     if (static const char* dumpDirectory = std::getenv("ANYPS5_DUMP_GDS_SHADERS"); dumpDirectory != nullptr) {
                         static std::set<const void*> dumped;
                         if (dumped.insert(shader.program).second) {
@@ -230,24 +228,15 @@ std::size_t ShaderResources::addGuestBuffer(std::span<const std::uint32_t> words
     Require(byteSize <= context.limits.maxStorageBufferRange, "shader buffer exceeds descriptor range limit");
     Require(byteSize <= std::numeric_limits<std::size_t>::max(), "shader buffer size exceeds host address space");
     const auto size = static_cast<std::size_t>(byteSize);
-    // A buffer the shader only stores to replaces what it covers: render targets wholly inside it
-    // need no download first (a compute clear of a target through its memory, every frame).
-    static const bool keepDownloads = std::getenv("ANYPS5_NO_WRITE_ONLY_DISCARD") != nullptr; // diagnostics
+    static const bool keepDownloads = std::getenv("ANYPS5_NO_WRITE_ONLY_DISCARD") != nullptr;
     if (written && !read && !keepDownloads && context.renderCache != nullptr) context.renderCache->DiscardCovered(address, size);
     try {
-        // Only whether the range is mapped matters here: the device resolves the access when the
-        // guest memory uploads, knowing whether the GPU reads it in place.
         const GuestMemory::MemoryAccessScope deferred(nullptr, nullptr);
-        // Render target pages are left to the upload too: a CPU resolve here flips the
-        // protection of megabytes, and the target's next use flips it back.
         if (context.renderCache == nullptr) GuestMemory::CheckRange(reinterpret_cast<const void*>(address), size, 1, written);
         else for (const auto& [from, to] : context.renderCache->UnwatchedRanges(address, address + size)) GuestMemory::CheckRange(reinterpret_cast<const void*>(from), static_cast<std::size_t>(to - from), 1, written);
     } catch (const std::exception& error) {
-        // A descriptor over unmapped memory (a null descriptor with a baked-in offset): the
-        // console's GPU reads zeros there and drops writes, so the shader gets a zeroed buffer.
         static std::once_flag once;
         std::call_once(once, [&] { APS5_LOG_OUT("shader buffer at 0x%llx (%zu bytes) is not mapped (%s); binding zeros", static_cast<unsigned long long>(address), size, error.what()); });
-        // The shader adds the address residue to its accesses (see GuestBufferMemory::Descriptor).
         const auto padded = size + static_cast<std::size_t>(address % GuestBufferMemory::ViewAlignment);
         auto buffer = std::make_unique<Buffer>(context, padded, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
         std::memset(buffer->Bytes().data(), 0, padded);
@@ -293,7 +282,6 @@ void ShaderResources::addImageBinding(const ShaderRecompiler::DescriptorBinding&
         for (std::uint32_t element = 0; element < binding.count; ++element) {
             const auto words = std::span<const std::uint32_t>(binding.guestDescriptor).subspan(static_cast<std::size_t>(element) * elementWords, elementWords);
             if (words[0] == 0 && (words[1] & 0xffu) == 0) {
-                // A null descriptor: titles leave unused slots empty and the hardware reads zeros.
                 TextureDimension dimension = TextureDimension::k2D;
                 for (const auto candidate : {TextureDimension::k2D, TextureDimension::k2DArray, TextureDimension::kCube, TextureDimension::k1D}) if (MatchesGuestDimension(*binding.imageShape, candidate)) { dimension = candidate; break; }
                 textures.push_back(context.textureCache->Null(dimension));
@@ -303,9 +291,6 @@ void ShaderResources::addImageBinding(const ShaderRecompiler::DescriptorBinding&
             }
             auto resource = DecodeTextureResource(words);
             if (!MatchesGuestDimension(*binding.imageShape, resource.dimension)) {
-                // Titles sample a 2D texture through an array sampler (one layer), a cube map as a
-                // six-layer array or the first layer/face through a 2D sampler; the hardware
-                // addresses these alike, so the view follows the shader's shape.
                 using Shape = ShaderRecompiler::DescriptorImageShape;
                 const auto shape = *binding.imageShape;
                 bool converted = true;
@@ -320,8 +305,6 @@ void ShaderResources::addImageBinding(const ShaderRecompiler::DescriptorBinding&
             const VkComponentMapping components{ComponentSwizzleFor(resource.dstSelX), ComponentSwizzleFor(resource.dstSelY), ComponentSwizzleFor(resource.dstSelZ), ComponentSwizzleFor(resource.dstSelW)};
             textures.push_back(context.textureCache->Get(words, resource, components));
             textureBindings.emplace_back(binding.binding, element);
-            // Stores stay on the device: the cache keeps serving this image while the guest copy is
-            // untouched, so later reads see the shader's writes (see docs/TechnicalDebt.md).
             Require(!storageImage || textures.back()->StorageView() != VK_NULL_HANDLE, "storage image format or source does not support shader stores");
             if (storageImage) {
                 textures.back()->MarkStored();

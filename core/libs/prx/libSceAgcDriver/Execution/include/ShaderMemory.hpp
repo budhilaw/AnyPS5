@@ -11,10 +11,7 @@ namespace AgcDriver {
 
 class ShaderMemory {
 public:
-    // The initial regions are read in place: `owners` keep their bytes alive.
     explicit ShaderMemory(std::span<const ShaderRecompiler::MemoryRegion> initial, std::vector<std::shared_ptr<const void>> owners = {});
-    // Reads the memory the request's resources come from; the resources it materialized stay
-    // available (Snapshot, Specialization) until the next capture.
     void Capture(const ShaderRecompiler::RecompileRequest& request);
     const ShaderRecompiler::ResourceSnapshot& Snapshot() const { return snapshot; }
     const ShaderRecompiler::ResourceSpecialization& Specialization() const { return specialization; }
@@ -23,9 +20,8 @@ public:
 
 private:
     static bool read(void* context, std::uint64_t address, std::uint32_t* value);
-    std::vector<ShaderRecompiler::MemoryRegion> initial;  // by address
+    std::vector<ShaderRecompiler::MemoryRegion> initial;
     std::vector<std::shared_ptr<const void>> owners;
-    // Guest memory the captures read, by address: spans into it stay valid once capturing ends.
     std::vector<std::pair<std::uint64_t, std::uint32_t>> dwords;
     std::vector<std::uint64_t> checkedPages;
     ShaderRecompiler::ResourceSnapshot snapshot;

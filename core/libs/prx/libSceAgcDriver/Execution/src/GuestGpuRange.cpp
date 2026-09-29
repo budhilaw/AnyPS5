@@ -34,13 +34,12 @@ void DescribeRegions(std::uint64_t address, std::size_t bytes) {
 }
 
 std::size_t MappedGpuBytes(const void* pointer, std::size_t bytes, bool writable) {
-    // Binary search over 16 KiB pages for the longest checkable prefix.
     constexpr std::size_t page = 16384;
     const auto ok = [&](std::size_t count) {
         try { CheckGpuRange(pointer, count, 1, writable); return true; } catch (const std::exception&) { return false; }
     };
     if (ok(bytes)) return bytes;
-    std::size_t low = 0, high = bytes / page; // pages known good / first page count known bad
+    std::size_t low = 0, high = bytes / page;
     while (high - low > 1) {
         const auto middle = low + (high - low) / 2;
         if (ok(middle * page)) low = middle; else high = middle;
@@ -51,8 +50,6 @@ std::size_t MappedGpuBytes(const void* pointer, std::size_t bytes, bool writable
 void CheckGpuRange(const void* pointer, std::size_t bytes, std::size_t alignment, bool writable) {
     const auto address = reinterpret_cast<std::uintptr_t>(pointer);
     if (alignment == 0 || address == 0 || address % alignment != 0 || bytes > std::numeric_limits<std::uintptr_t>::max() - address) throw std::invalid_argument("invalid guest GPU memory range");
-    // Render targets are validated every draw: a range this thread validated stays valid until a
-    // guest mapping changes (and the validation takes the memory tracking lock).
     struct Validated { std::uint64_t epoch; std::uintptr_t address; std::size_t bytes; bool writable; };
     thread_local std::array<Validated, 16> validated{};
     thread_local std::size_t nextValidated = 0;

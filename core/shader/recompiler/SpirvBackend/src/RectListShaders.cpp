@@ -19,8 +19,6 @@ struct Parameter {
     std::uint32_t inputLocation;
     std::uint32_t outputLocation;
     bool flat;
-    // The vertex shader exports nothing at inputLocation: the fragment shader reads zeros, as
-    // the hardware provides for an unexported parameter.
     bool missing = false;
 };
 
@@ -302,7 +300,7 @@ private:
         inputs.resize(parameters.size());
         std::array<std::uint32_t, 32> locations {};
         for (std::uint32_t i = 0; i < parameters.size(); i++) {
-            if (tessControl && parameters[i].missing) continue; // no vertex output to read
+            if (tessControl && parameters[i].missing) continue;
             const auto location = tessControl ? parameters[i].inputLocation : parameters[i].outputLocation;
             if (tessControl && locations[location] != 0) {
                 inputs[i] = locations[location];

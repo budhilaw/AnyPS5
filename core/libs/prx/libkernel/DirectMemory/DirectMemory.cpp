@@ -66,9 +66,6 @@ void ValidateRange(const void* addr, size_t len, size_t alignment) {
 }
 
 int LinuxProtFromSce(int prot) {
-    // CPU read/write/execute (0x7), GPU read/write (0x30) and AMPR read/write (0xc0). The AMPR
-    // bits only grant the DMA engine access, which the host has no equivalent for; libSceAmpr
-    // reports any attempt to use it.
     if ((prot & ~0xf7) != 0) {
         // return SCE_KERNEL_ERROR_EINVAL;
         throw std::invalid_argument("Unsupported memory protection bits 0x" + [](int value) { char text[16]; std::snprintf(text, sizeof(text), "%x", static_cast<unsigned>(value)); return std::string(text); }(prot));
@@ -95,9 +92,6 @@ void* MapAligned(void* addr, size_t len, int prot, int flags, size_t alignment) 
     return GuestMemoryBacking::GuestMemoryBackingMap_nid_postfix(addr, len, alignment, prot);
 }
 
-// A fixed mapping inside a range the title reserved (sceKernelReserveVirtualRange) commits that
-// part of the reservation in place: the reservation already owns zero-filled backing pages, so
-// only their protection and the registry change, as the console's kernel does for reserved ranges.
 bool CommitReserved(GuestAllocations::Mutation& mutation, void* addr, size_t len, int prot, int flags, size_t alignment) {
     constexpr int guestMapFixed = 0x10;
     if ((flags & guestMapFixed) == 0 || !mutation.IsReserved(addr, len)) return false;
@@ -158,8 +152,6 @@ int DoMapAnon(void** addr, size_t len, int prot, int flags) {
 int DoMprotect(const void* addr, size_t len, int prot) {
     const auto address = reinterpret_cast<std::uintptr_t>(addr);
 #if defined(__APPLE__)
-    // Host pages: guest modules are slid by dyld in 4 KiB steps, so 16 KiB rounding could reach
-    // outside the mapping the title means to protect.
     const auto pageMask = static_cast<std::uintptr_t>(sysconf(_SC_PAGESIZE) - 1);
 #else
     constexpr auto pageMask = static_cast<std::uintptr_t>(PS5_PAGE_SIZE - 1);
@@ -180,7 +172,7 @@ int DoMprotect(const void* addr, size_t len, int prot) {
         mutation.RegisterMainImage();
     }
 #elif defined(__APPLE__)
-    mutation.RegisterMainImage(); // guest image segments are registered lazily; titles protect their own data
+    mutation.RegisterMainImage();
 #endif
     mutation.Protect(pointer, bytes, (prot & 3) != 0, (prot & 2) != 0, [&] {
         if (mprotect(const_cast<void*>(pointer), bytes, nativeProtection) != 0) throw std::system_error(errno, std::generic_category(), "mprotect failed");

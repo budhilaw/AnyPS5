@@ -46,8 +46,6 @@ GuestBufferCache::Chunk& GuestBufferCache::chunk(std::uint64_t address) {
     return *it->second;
 }
 
-// Called by the tracking registry (under its mutex) when the CPU, or the driver on the CPU's
-// behalf, touches a watched chunk.
 void GuestBufferCache::resolve(void* owner, GuestMemoryTracking::Access access) {
     auto* self = static_cast<Owner*>(owner);
     auto& cache = *self->cache;
@@ -55,7 +53,7 @@ void GuestBufferCache::resolve(void* owner, GuestMemoryTracking::Access access) 
     const auto it = cache.chunks.find(self->address);
     if (it == cache.chunks.end()) return;
     auto& chunk = *it->second;
-    if (access == GuestMemoryTracking::Access::Read) return; // reads see what the mirror holds
+    if (access == GuestMemoryTracking::Access::Read) return;
     chunk.generation = ++cache.generation;
     chunk.protectedRead = false;
     if (chunk.watch) chunk.watch->Protect(GuestMemoryTracking::Protection::ReadWrite);
@@ -63,7 +61,6 @@ void GuestBufferCache::resolve(void* owner, GuestMemoryTracking::Access access) 
 }
 
 bool GuestBufferCache::current(const Mirror& mirror) {
-    // Chunks of a range are neighbours in the map: one lookup, then a walk.
     const auto protection = GuestAllocations::GuestAllocationsProtectionGeneration_nid_postfix();
     const auto first = mirror.begin - mirror.begin % chunkBytes;
     auto it = chunks.find(first);
@@ -76,13 +73,12 @@ bool GuestBufferCache::current(const Mirror& mirror) {
     return true;
 }
 
-// Watches every chunk of the mirror against CPU writes (creating the watches on first use).
 void GuestBufferCache::protect(const Mirror& mirror) {
     for (auto address = mirror.begin - mirror.begin % chunkBytes; address < mirror.end; address += chunkBytes) {
         auto& chunk = this->chunk(address);
         if (chunk.immutableSince != 0) {
             if (chunk.immutableSince == GuestAllocations::GuestAllocationsProtectionGeneration_nid_postfix()) continue;
-            chunk.immutableSince = 0; // protections moved: watch it like any other chunk
+            chunk.immutableSince = 0;
             chunk.untrackable = false;
             chunk.generation = ++generation;
         }
@@ -95,8 +91,6 @@ void GuestBufferCache::protect(const Mirror& mirror) {
             try {
                 chunk.watch = std::make_unique<GuestMemoryTracking::Watch>(chunk.address, chunkBytes, chunk.owner.get(), &GuestBufferCache::resolve);
             } catch (const std::exception& error) {
-                // Mapped read-only for the CPU: nothing writes it, so it counts as current until
-                // its protection changes.
                 bool readable = true, writable = true;
                 try {
                     GuestMemory::CheckRange(reinterpret_cast<const void*>(chunk.address), chunkBytes, 1, false);
@@ -112,7 +106,6 @@ void GuestBufferCache::protect(const Mirror& mirror) {
                     chunk.immutableSince = GuestAllocations::GuestAllocationsProtectionGeneration_nid_postfix();
                     continue;
                 }
-                // Pages shared with a render target, or not (fully) mapped: never trusted.
                 static int reported = 0;
                 if (reported++ < 8) APS5_LOG_OUT("guest buffer chunk 0x%llx is not watchable (%s); buffers there copy on every use", static_cast<unsigned long long>(chunk.address), error.what());
                 chunk.untrackable = true;
@@ -130,7 +123,6 @@ void GuestBufferCache::protect(const Mirror& mirror) {
 std::shared_ptr<GuestBufferCache::Mirror> GuestBufferCache::Acquire(std::uint64_t begin, std::uint64_t end, VkBufferUsageFlags usage) {
     PerformanceTimer timing("Graphics.GuestBufferCache");
     Require(begin < end && end - begin <= std::numeric_limits<std::size_t>::max(), "invalid guest buffer mirror range");
-    // Lock order: the tracking registry first (its fault handler holds it when it calls resolve).
     std::lock_guard registryLock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
     std::lock_guard lock(mutex);
     const auto bytes = static_cast<std::size_t>(end - begin);
@@ -142,7 +134,6 @@ std::shared_ptr<GuestBufferCache::Mirror> GuestBufferCache::Acquire(std::uint64_
         timing.Mark("hit");
         return slot;
     }
-    // Heap-sized ranges: the GPU reads and writes guest memory in place, as on the console.
     if (context.hostPointerImport && bytes >= ImportBytes) {
         if (slot && slot->imported && (slot->buffer->Usage() & usage) == usage) {
             slot->lastUse = ++uses;
@@ -157,11 +148,7 @@ std::shared_ptr<GuestBufferCache::Mirror> GuestBufferCache::Acquire(std::uint64_
             return slot;
         }
     }
-    // Large mirrors (a descriptor over a title's whole heap) follow the console's unified memory:
-    // the stale chunks are refreshed in place, even while a submission holds the mirror. The
-    // title only rewrites memory the GPU is done with (it waits on the GPU's labels), so the parts
-    // a pending draw reads do not change; recopying gigabytes per draw is what this avoids.
-    static const bool incremental = std::getenv("ANYPS5_NO_INCREMENTAL_MIRRORS") == nullptr; // diagnostics
+    static const bool incremental = std::getenv("ANYPS5_NO_INCREMENTAL_MIRRORS") == nullptr;
     if (incremental && slot && bytes >= IncrementalBytes) {
         std::vector<std::pair<std::uint64_t, std::uint64_t>> stale;
         for (auto address = begin - begin % chunkBytes; address < end; address += chunkBytes) {
@@ -193,20 +180,16 @@ std::shared_ptr<GuestBufferCache::Mirror> GuestBufferCache::Acquire(std::uint64_
         return mirror;
     }
     if (!slot || slot.use_count() > 1) {
-        // Absent, or still bound by a submission in flight: a fresh mirror leaves that one alone.
         if (slot) retainedBytes -= end - begin;
         slot = std::make_shared<Mirror>(Mirror{begin, end, std::make_shared<Buffer>(context, bytes, usage | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT), 0, 0});
         retainedBytes += bytes;
         timing.Mark("allocate");
     }
-    // Protect first, then copy: a write that lands during the copy faults and ages the chunk, so
-    // the mirror is not trusted next time.
     protect(*slot);
     slot->synced = generation;
     GuestMemory::Read(begin, slot->buffer->Bytes());
     copiedBytes += bytes;
     {
-        // Statistics every two seconds: how much is copied versus reused, and the largest copies.
         static auto lastReport = std::chrono::steady_clock::now();
         static std::uint64_t reportedCopied = 0, reportedReused = 0, copies = 0, largest = 0, largestBegin = 0;
         ++copies;
@@ -223,8 +206,6 @@ std::shared_ptr<GuestBufferCache::Mirror> GuestBufferCache::Acquire(std::uint64_
     }
     slot->lastUse = ++uses;
     timing.Mark("copy");
-    // trim() may erase map nodes, `slot` included when the budget is exceeded: hold the mirror
-    // first (a held mirror is never a candidate) and never touch the reference afterwards.
     auto mirror = slot;
     trim();
     return mirror;
@@ -234,10 +215,8 @@ std::shared_ptr<GuestBufferCache::Mirror> GuestBufferCache::import(std::uint64_t
     const auto alignment = static_cast<std::uint64_t>(context.hostPointerAlignment);
     const auto first = begin - begin % alignment;
     const auto last = (end + alignment - 1) / alignment * alignment;
-    // A range that failed to import once is mirrored from then on.
     static std::set<std::pair<std::uint64_t, std::uint64_t>> refused;
     if (refused.count({begin, end}) != 0) return nullptr;
-    // An import of a shared mapping keeps its alias alive (the guest may unmap it meanwhile).
     void* alias = nullptr;
     void* retained = nullptr;
     GuestMemoryBacking::GuestMemoryBackingExtentInfo extent{};
@@ -247,8 +226,6 @@ std::shared_ptr<GuestBufferCache::Mirror> GuestBufferCache::import(std::uint64_t
     }
     static int reported = 0;
     if (alias == nullptr) {
-        // Memory outside the shared guest mappings (the executable's own data and bss) is plain
-        // host memory at the guest address: import it where it is, when it is readable and writable.
         try {
             GuestMemory::CheckRange(reinterpret_cast<const void*>(first), static_cast<std::size_t>(last - first), 1, true);
             alias = reinterpret_cast<void*>(first);
@@ -282,23 +259,20 @@ std::shared_ptr<GuestBufferCache::Mirror> GuestBufferCache::import(std::uint64_t
 }
 
 GuestBufferCache::HostView GuestBufferCache::HostRange(std::uint64_t address, std::uint64_t bytes) {
-    static const bool disabled = std::getenv("ANYPS5_NO_HOST_VERTEX") != nullptr; // diagnostics
+    static const bool disabled = std::getenv("ANYPS5_NO_HOST_VERTEX") != nullptr;
     if (disabled || !context.hostPointerImport || bytes == 0) return {};
     GuestMemoryBacking::GuestMemoryBackingExtentInfo extent{};
     const bool found = GuestMemoryBacking::GuestMemoryBackingExtent_nid_postfix(address, static_cast<std::size_t>(bytes), &extent);
     const auto alignment = static_cast<std::uint64_t>(context.hostPointerAlignment);
-    // The import covers whole host pages of the mapping; a range in a partial tail page is copied.
     const auto importBytes = extent.bytes / alignment * alignment;
     if (!found || reinterpret_cast<std::uintptr_t>(extent.alias) % alignment != 0 || address + bytes > extent.address + importBytes) {
-        static const bool trace = std::getenv("ANYPS5_TRACE_WAITS") != nullptr; // diagnostics
+        static const bool trace = std::getenv("ANYPS5_TRACE_WAITS") != nullptr;
         static int reported = 0;
         if (trace && bytes >= (1u << 20) && reported++ < 20) APS5_LOG_OUT("host range 0x%llx+0x%llx unavailable: extent %d 0x%llx+0x%llx alias %p", static_cast<unsigned long long>(address), static_cast<unsigned long long>(bytes), found ? 1 : 0, static_cast<unsigned long long>(extent.address), static_cast<unsigned long long>(extent.bytes), extent.alias);
         return {};
     }
     std::lock_guard registryLock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
     std::lock_guard lock(mutex);
-    // Imports of mappings the guest unmapped go (their users keep the buffer until their work
-    // completes; the backing keeps the alias until every import is gone).
     if (const auto generation = GuestMemoryBacking::GuestMemoryBackingUnmapGeneration_nid_postfix(); generation != unmapGeneration) {
         unmapGeneration = generation;
         for (auto it = hostMappings.begin(); it != hostMappings.end();) {
@@ -352,7 +326,6 @@ std::shared_ptr<Buffer> GuestBufferCache::ImageCopy(const std::shared_ptr<const 
     auto buffer = std::make_shared<Buffer>(context, static_cast<std::size_t>(range->bytes + padding), usage);
     GuestMemory::Read(range->address - padding, buffer->Bytes());
     std::lock_guard lock(mutex);
-    // A protection change registers new ranges: copies of the old ones are dropped.
     if (imageCopies.size() >= 64) imageCopies.clear();
     imageCopies[range.get()] = {range, buffer};
     return buffer;
@@ -362,8 +335,6 @@ void GuestBufferCache::MarkSynced(const std::shared_ptr<Mirror>& mirror) {
     if (!mirror || mirror->imported) return;
     std::lock_guard registryLock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
     std::lock_guard lock(mutex);
-    // The write-back went through the tracking registry, which aged (and unprotected) the
-    // chunks; every other mirror there is stale now. This one matches guest memory again.
     protect(*mirror);
     mirror->synced = generation;
 }
@@ -430,10 +401,7 @@ void GuestBufferCache::Flush() {
 
 void GuestBufferCache::trim() {
     if (retainedBytes <= budget) return;
-    // Least recently used first, never a mirror a submission still holds.
     std::vector<decltype(mirrors)::iterator> candidates;
-    // Mirrors used by the last few hundred acquisitions stay: evicting a mirror that is about to
-    // be reused only turns into a full copy on the next draw.
     for (auto it = mirrors.begin(); it != mirrors.end(); ++it) if (it->second && !it->second->imported && it->second.use_count() == 1 && it->second->lastUse + 256 < uses) candidates.push_back(it);
     std::sort(candidates.begin(), candidates.end(), [](const auto& left, const auto& right) { return left->second->lastUse < right->second->lastUse; });
     for (const auto& it : candidates) {

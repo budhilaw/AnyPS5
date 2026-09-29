@@ -555,8 +555,6 @@ void ValidateShaders(std::span<const CompiledShader> shaders, const State& state
     Require(!state.rectList || (state.stages.path == ShaderPath::Vertex && state.topology == VK_PRIMITIVE_TOPOLOGY_PATCH_LIST && state.cullMode == VK_CULL_MODE_NONE), "invalid rect-list pipeline state");
     Require(shaders.size() == (tessellation || state.rectList ? 4u : 2u), "incorrect graphics stage count");
     const std::array<Stage, 4> tessStages{Stage::Local, Stage::TessellationControl, Stage::TessellationEvaluation, Stage::Fragment};
-    // Draws repeat a few combinations: one that passed before (same inputs as the inspection
-    // keys, plus the pass state) passes again.
     std::uint64_t hash = 0xcbf29ce484222325ull;
     const auto mix = [&hash](std::uint64_t value) { hash = (hash ^ value) * 0x100000001b3ull; hash ^= hash >> 29u; };
     mix(state.rectList); mix(static_cast<std::uint64_t>(state.stages.path)); mix(state.hasColorTarget); mix(shaders.size());
@@ -593,9 +591,6 @@ void ValidateShaders(std::span<const CompiledShader> shaders, const State& state
         }
         previous = current;
     }
-    // Color exports: one four-component vector per written target at locations 0..7 (a uint
-    // vector for integer targets); location zero must exist since targets are contiguous.
-    // A depth-only pass (shadow maps) may export nothing; with a color target, target zero is written.
     Require(!state.hasColorTarget || previous->outputs.contains(0), "fragment shader must export a color at location zero");
     for (const auto& [location, signature] : previous->outputs) {
         Require(location < 8, "fragment shader exports a color beyond location seven");

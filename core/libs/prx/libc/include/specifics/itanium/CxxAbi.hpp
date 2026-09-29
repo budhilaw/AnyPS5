@@ -5,13 +5,8 @@
 #include <typeinfo>
 
 #if defined(_LIBCPP_VERSION)
-// libc++abi implements the same Itanium C++ ABI RTTI layout as libstdc++ but keeps the class
-// definitions private. The guest runtime only needs the layout (and libstdc++'s member names),
-// so it is spelled out here for hosts whose C++ library is libc++.
 namespace __cxxabiv1 {
 
-// Every class declares its virtual destructor without defining it (the key function), so no
-// vtable or type_info object is emitted here and all references bind to libc++abi's exports.
 class __class_type_info : public std::type_info {
 public:
     ~__class_type_info() override;

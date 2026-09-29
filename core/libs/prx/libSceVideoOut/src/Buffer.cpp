@@ -11,8 +11,6 @@ AgcDriver::DisplayBuffer DescribeVideoOutBuffer(const VideoOutBuffer& buffer, co
     const auto& attribute = group.attribute;
     if (attribute.reserved0 != 0 || attribute.pad0 != 0 || attribute.reserved1[0] != 0 || attribute.reserved1[1] != 0 || attribute.reserved1[2] != 0) throw std::runtime_error("VideoOut: reserved buffer attribute bits are set");
     if (attribute.tiling_mode != 0 || attribute.pitch_in_pixel != 0 || attribute.aspect_ratio != 0 || attribute.option != 0) throw std::runtime_error("VideoOut: unsupported tiling, pitch, aspect ratio or buffer option");
-    // The driver renders every color target uncompressed (DCC metadata is never written), so a
-    // buffer registered for DCC presentation holds plain pixels: the metadata is ignored.
     if (group.category != VIDEO_OUT_BUFFER_ATTRIBUTE_CATEGORY_UNCOMPRESSED || buffer.metadataAddress != 0 || attribute.dcc_control != 0 || attribute.dcc_cb_register_clear_color != 0) {
         static std::once_flag once;
         std::call_once(once, [&] { APS5_LOG_OUT("VideoOut: DCC presentation requested (category %u, metadata 0x%llx, control 0x%x, clear color 0x%llx); presenting the uncompressed pixels", static_cast<unsigned>(group.category), static_cast<unsigned long long>(buffer.metadataAddress), static_cast<unsigned>(attribute.dcc_control), static_cast<unsigned long long>(attribute.dcc_cb_register_clear_color)); });

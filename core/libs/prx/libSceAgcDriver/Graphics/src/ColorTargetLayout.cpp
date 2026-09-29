@@ -19,7 +19,6 @@ std::uint32_t blockOffset(std::uint32_t x, std::uint32_t y) {
 }
 
 ColorTileMode DecodeColorTileMode(std::uint32_t attrib3) {
-    // RESOURCE_TYPE 0 (1D) or 1 (2D): both address a 2D-shaped surface here.
     if (!((attrib3 & 0x80002000u) == 0 && (attrib3 & 0x1fffu) == 0 && ((attrib3 >> 24u) & 3u) <= 1 && ((attrib3 >> 27u) & 7u) == 1)) {
         char message[160];
         std::snprintf(message, sizeof(message), "AGC graphics: unsupported color depth, dimension, resource level or metadata mode (CB_COLOR_ATTRIB3 0x%08x)", attrib3);
@@ -42,7 +41,6 @@ ColorTargetLayout::ColorTargetLayout(std::uint32_t width, std::uint32_t height, 
             break;
         case ColorTileMode::ZOrder64KB:
         case ColorTileMode::RenderTarget: {
-            // 64 KiB blocks: 128x128 texels at 32 bits, halving the height (then width) as texels grow.
             const std::uint32_t blockWidth = bytesPerPixel <= 2 ? 256u : bytesPerPixel <= 8 ? 128u : 64u;
             const std::uint32_t blockHeight = 65536u / bytesPerPixel / blockWidth;
             pitch = (width + blockWidth - 1u) / blockWidth * blockWidth;

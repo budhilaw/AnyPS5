@@ -63,9 +63,6 @@ void CheckRange(const void* pointer, std::size_t bytes, std::size_t alignment, b
         cursor = std::min(end, base + memory.RegionSize);
     }
 #elif defined(__APPLE__)
-    // The last regions this thread verified stay valid until a guest mapping changes (the
-    // epoch): shader memory is read a dword at a time, thousands per frame, from a few mappings
-    // (the executable's data, the heaps, command memory) in turn.
     struct VerifiedRegion { std::uint64_t epoch = 0; std::uintptr_t first = 0; std::uintptr_t end = 0; bool writable = false; };
     thread_local std::array<VerifiedRegion, 8> verified{};
     thread_local std::size_t nextVerified = 0;
@@ -123,11 +120,8 @@ void CheckRange(const void* pointer, std::size_t bytes, std::size_t alignment, b
 
 void Read(std::uint64_t address, std::span<std::byte> destination, std::size_t alignment) {
     if (destination.empty()) return;
-    // Shader setup reads descriptors a dword at a time, tens of thousands per frame: timing
-    // those would cost more than the reads.
     std::optional<PerformanceTimer> timing;
     if (destination.size() >= 4096) timing.emplace("GuestMemory.Read");
-    // ANYPS5_TRACE_READ_CALLERS: bytes read per call site, the largest printed every 3 seconds.
     static const bool traceCallers = std::getenv("ANYPS5_TRACE_READ_CALLERS") != nullptr;
     if (traceCallers) {
         static std::mutex callerMutex;

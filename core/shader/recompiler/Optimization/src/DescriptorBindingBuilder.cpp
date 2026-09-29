@@ -172,9 +172,6 @@ std::vector<std::uint32_t> ShaderDataDwordsFor(const IrBindingLayout& layout, st
         }
         result[i] = snapshot.userData[reg - userDataBase];
     }
-    // Per-buffer byte offsets: host storage buffer views need aligned offsets (up to 256 bytes on
-    // Vulkan), so the driver binds each guest buffer from its 256-byte aligned base and the shader
-    // adds the base address's low byte to every access.
     for (std::uint32_t i = 0; i < layout.memoryOffsetCount; i++) {
         if (i >= snapshot.buffers.size() || snapshot.buffers[i].dwordCount != 4u) {
             fail("DescriptorBindingBuilder::Populate memory offset buffer index is out of range");

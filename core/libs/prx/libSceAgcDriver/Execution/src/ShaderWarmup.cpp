@@ -29,7 +29,7 @@ std::uint64_t ShaderCodeHash(std::span<const std::uint32_t> code) {
 }
 
 ShaderWarmup::ShaderWarmup() {
-    static const bool disabled = std::getenv("ANYPS5_NO_SHADER_WARMUP") != nullptr; // diagnostics
+    static const bool disabled = std::getenv("ANYPS5_NO_SHADER_WARMUP") != nullptr;
     if (disabled) return;
     path = Graphics::CacheFilePath("shader-requests.cache");
     if (path.empty()) return;
@@ -88,7 +88,6 @@ void ShaderWarmup::replay(std::vector<std::string> requests) noexcept {
             request.shader.codeHash = ShaderCodeHash(request.shader.code);
             (void)ShaderRecompiler::Recompile(request);
         } catch (...) {
-            // A request this build cannot compile any more: the draw that needs it reports why.
         }
     }
 }

@@ -17,9 +17,7 @@ namespace AgcDriver::Graphics {
 class ShaderResources {
 public:
     const std::vector<std::shared_ptr<Texture>>& Textures() const { return textures; }
-    // The descriptor binding and array element each texture of Textures() is bound at.
     const std::vector<std::pair<std::uint32_t, std::uint32_t>>& TextureBindings() const { return textureBindings; }
-    // One line naming every bound texture (address, size, format, "store" for storage images).
     std::string DescribeTextures() const;
     ShaderResources(const Context& context, const ShaderRecompiler::RecompileResult& vertex, const ShaderRecompiler::RecompileResult& fragment, const ColorTarget& target, std::uint64_t indexAddress, std::size_t indexBytes);
     ShaderResources(const Context& context, std::span<const CompiledShader> shaders, const ColorTarget& target, std::uint64_t indexAddress, std::size_t indexBytes, std::span<const GuestMemorySnapshot> snapshots = {});
@@ -32,7 +30,6 @@ public:
     void WriteBack(std::uint64_t sequence = std::numeric_limits<std::uint64_t>::max());
     bool WritesOverlapCopied(std::uint64_t address, std::size_t bytes) const { return guestMemory.WritesOverlapCopied(address, bytes); }
     bool WritesOverlap(std::uint64_t address, std::size_t bytes) const { return guestMemory.WritesOverlap(address, bytes); }
-    // Whether the shaders may store to memory or images (later work then needs a barrier).
     const std::vector<std::pair<std::uint64_t, std::uint64_t>>& WriteRanges() const { return guestMemory.WriteRanges(); }
     bool HasGuestWrites() const { return guestMemory.HasWrites(); }
     bool Writes() const { return guestMemory.HasWrites() || storesImages || usesFaultBuffer; }

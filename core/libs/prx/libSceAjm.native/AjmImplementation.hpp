@@ -1,6 +1,4 @@
 #include <map>
-// The audio job manager, shared by libSceAjm, libSceAjm.native and libSceAjmi (the same API
-// under three module names). Batches run synchronously at start; ATRAC9 decodes with LibAtrac9.
 #include <array>
 #include <cstdint>
 #include <cstddef>
@@ -27,7 +25,6 @@ constexpr std::uint64_t SCE_AJM_FLAG_SIDEBAND_STREAM = 1ull << 47;
 constexpr std::uint64_t SCE_AJM_FLAG_SIDEBAND_FORMAT = 1ull << 46;
 constexpr std::uint64_t SCE_AJM_FLAG_SIDEBAND_GAPLESS_DECODE = 1ull << 45;
 
-// A job appended to a batch buffer by the sceAjmBatchJob* writers.
 struct Job {
     enum Kind : std::uint32_t { Control, Run, Initialize, Other, Clear, Gapless } kind;
     std::uint32_t instance;
@@ -43,29 +40,23 @@ struct Batch { std::vector<Job> jobs; };
 std::mutex mutex;
 std::set<std::uint32_t> contexts;
 std::set<std::uint32_t> instances;
-// Per decoder instance: the ATRAC9 decoder and the samples per channel decoded so far, which
-// stream sidebands report and titles track progress with.
 struct InstanceState {
     std::uint32_t channels = 1;
     std::uint64_t decoded = 0;
-    std::uint32_t format = 0;  // output encoding from the instance flags: 0 s16, 1 s32, 2 float
+    std::uint32_t format = 0;
     void* decoder = nullptr;
     Atrac9CodecInfo info{};
-    std::uint32_t skip = 0;  // gapless: samples per channel still to drop at the stream start
+    std::uint32_t skip = 0;
     std::uint32_t gaplessTotal = 0;
     std::uint16_t gaplessSkip = 0;
-    // Decoded samples waiting for output room (their input was reported consumed).
     std::vector<std::uint8_t> pendingPcm;
     std::uint32_t id = 0;
-    // The last jobs, printed when a superframe fails to decode (diagnostics).
     std::array<std::string, 8> recent;
     std::size_t nextRecent = 0;
 };
 std::map<std::uint32_t, InstanceState> instanceStates;
 std::uint32_t nextContext = 1, nextInstance = 1, nextBatch = 1;
 
-// Batches are keyed by their buffer: the job list lives on the host side and the guest buffer
-// only carries the key so that any batch buffer size works.
 std::map<void*, Batch>& batches() { static auto* value = new std::map<void*, Batch>; return *value; }
 
 int append(AjmBatchInfo* info, Job job) {
@@ -77,7 +68,6 @@ int append(AjmBatchInfo* info, Job job) {
     return 0;
 }
 
-// Restarts the stream with the configuration the decoder was initialized with.
 void resetDecoder(InstanceState& state) {
     state.pendingPcm.clear();
     if (state.decoder != nullptr) Atrac9InitDecoder(state.decoder, state.info.configData);
@@ -106,8 +96,6 @@ void initialize(InstanceState& state, const std::uint8_t* config, std::size_t by
     if (reported++ < 64) APS5_LOG_OUT("ajm: ATRAC9 %d channels %d Hz, superframe %d bytes of %d frames (config %02x%02x%02x%02x)", state.info.channels, state.info.samplingRate, state.info.superframeSize, state.info.framesInSuperframe, config[0], config[1], config[2], config[3]);
 }
 
-// Decodes the whole superframes at the start of `input` while their samples find room, as the
-// hardware does: the title keeps a cut superframe and sends it again with the bytes that follow.
 std::pair<std::size_t, std::size_t> decode(InstanceState& state, const std::vector<std::uint8_t>& input, std::size_t bytes, const std::vector<std::pair<std::uint8_t*, std::size_t>>& output) {
     const std::size_t sampleBytes = state.format == 0 ? 2 : 4;
     const auto& info = state.info;
@@ -118,7 +106,6 @@ std::pair<std::size_t, std::size_t> decode(InstanceState& state, const std::vect
         const auto superframeBytes = static_cast<std::size_t>(info.superframeSize);
         const auto frameBytes = static_cast<std::size_t>(info.frameSamples) * info.channels * sampleBytes;
         std::vector<std::uint8_t> frame(frameBytes);
-        // LibAtrac9's Huffman reader peeks a few bytes past the frame it decodes.
         std::vector<std::uint8_t> superframe(superframeBytes + 16, 0);
         while (bytes - consumed >= superframeBytes && state.pendingPcm.size() < room) {
             std::copy_n(input.begin() + static_cast<std::ptrdiff_t>(consumed), superframeBytes, superframe.begin());
@@ -174,7 +161,6 @@ void complete(const Job& job) {
             in != nullptr && job.inputSize >= 4 ? in[0] : 0, in != nullptr && job.inputSize >= 4 ? in[1] : 0, in != nullptr && job.inputSize >= 4 ? in[2] : 0, in != nullptr && job.inputSize >= 4 ? in[3] : 0, job.outputSize, state.pendingPcm.size());
         state.recent[state.nextRecent++ % state.recent.size()] = line;
     }
-    // ANYPS5_TRACE_AJM=1: every job but decodes, and decode sizes that are not whole superframes.
     static const bool trace = std::getenv("ANYPS5_TRACE_AJM") != nullptr;
     if (trace) {
         std::string bytes;
@@ -183,10 +169,9 @@ void complete(const Job& job) {
         APS5_LOG_OUT("ajm trace: instance %u kind %u flags 0x%llx input %zu [%s] split %zu/%zu output %zu superframe %d", job.instance, static_cast<unsigned>(job.kind), static_cast<unsigned long long>(job.flags), job.inputSize, bytes.c_str(), job.inputs.size(), job.outputs.size(), job.outputSize, state.info.superframeSize);
     }
     if (job.kind == Job::Initialize) initialize(state, static_cast<const std::uint8_t*>(job.input), job.inputSize);
-    if (job.kind == Job::Clear) restart(state); // a new stream starts
-    if (job.kind == Job::Control && (job.flags & 0x1ull) != 0) restart(state); // control reset
+    if (job.kind == Job::Clear) restart(state);
+    if (job.kind == Job::Control && (job.flags & 0x1ull) != 0) restart(state);
     if (job.kind == Job::Gapless && job.input != nullptr && job.inputSize >= 8) {
-        // AjmSidebandGaplessDecode {uint32 total_samples; uint16 skip_samples; uint16 skipped_samples}
         std::uint16_t skip = 0, skipped = 0;
         std::memcpy(&skip, static_cast<const std::uint8_t*>(job.input) + 4, 2);
         std::memcpy(&skipped, static_cast<const std::uint8_t*>(job.input) + 6, 2);
@@ -198,7 +183,6 @@ void complete(const Job& job) {
     for (const auto& buffer : job.inputs) inputTotal += buffer.size;
     std::pair<std::size_t, std::size_t> progress{0, 0};
     if (job.kind == Job::Run) {
-        // LibAtrac9's Huffman reader peeks a few bytes past the frame it decodes.
         std::vector<std::uint8_t> input;
         input.reserve(inputTotal + 16);
         if (job.input != nullptr) input.insert(input.end(), static_cast<const std::uint8_t*>(job.input), static_cast<const std::uint8_t*>(job.input) + job.inputSize);
@@ -209,7 +193,6 @@ void complete(const Job& job) {
         if (job.output != nullptr) output.emplace_back(static_cast<std::uint8_t*>(job.output), job.outputSize);
         for (const auto& buffer : job.outputs) output.emplace_back(static_cast<std::uint8_t*>(buffer.ptr), buffer.size);
         progress = decode(state, input, data, output);
-        // ANYPS5_DUMP_AUDIO=<directory>: each instance's decoded PCM, raw (diagnostics).
         if (static const char* directory = std::getenv("ANYPS5_DUMP_AUDIO"); directory != nullptr) {
             static std::map<std::uint32_t, FILE*> files, inputs;
             auto& file = files[job.instance];
@@ -230,14 +213,13 @@ void complete(const Job& job) {
         for (const auto& buffer : job.outputs) if (buffer.ptr != nullptr) std::memset(buffer.ptr, 0, buffer.size);
     }
     if (job.sideband == nullptr || job.sidebandSize == 0) return;
-    std::memset(job.sideband, 0, job.sidebandSize); // AjmSidebandResult {result, internal} = success
+    std::memset(job.sideband, 0, job.sidebandSize);
     auto* cursor = static_cast<std::uint8_t*>(job.sideband) + 8;
     const auto* end = static_cast<std::uint8_t*>(job.sideband) + job.sidebandSize;
     if (job.kind != Job::Run) return;
     const std::size_t sampleBytes = state.format == 0 ? 2 : 4;
     state.decoded += progress.second / (static_cast<std::size_t>(state.channels) * sampleBytes);
     if ((job.flags & SCE_AJM_FLAG_SIDEBAND_STREAM) && cursor + 16 <= end) {
-        // AjmSidebandStream {int32 input_consumed; int32 output_written; uint64 total_decoded_samples}
         const auto consumed = static_cast<std::int32_t>(progress.first), written = static_cast<std::int32_t>(progress.second);
         std::memcpy(cursor, &consumed, 4);
         std::memcpy(cursor + 4, &written, 4);
@@ -245,7 +227,6 @@ void complete(const Job& job) {
         cursor += 16;
     }
     if ((job.flags & SCE_AJM_FLAG_SIDEBAND_FORMAT) && cursor + 24 <= end) {
-        // AjmSidebandFormat {channels, channel_mask, sample_rate, sample_encoding, bitrate, reserved}
         const auto& info = state.info;
         const std::uint32_t mask = state.channels == 1 ? 0x4u : state.channels == 2 ? 0x3u : (1u << state.channels) - 1u;
         const std::uint32_t samples = static_cast<std::uint32_t>(info.frameSamples * info.framesInSuperframe);
@@ -255,7 +236,6 @@ void complete(const Job& job) {
         cursor += sizeof(fields);
     }
     if ((job.flags & SCE_AJM_FLAG_SIDEBAND_GAPLESS_DECODE) && cursor + 8 <= end) {
-        // AjmSidebandGaplessDecode {uint32 total_samples; uint16 skip_samples; uint16 skipped_samples}
         const std::uint16_t skipped = static_cast<std::uint16_t>(state.gaplessSkip - std::min<std::uint32_t>(state.skip, state.gaplessSkip));
         std::memcpy(cursor, &state.gaplessTotal, 4);
         std::memcpy(cursor + 4, &state.gaplessSkip, 2);
@@ -311,7 +291,6 @@ int APS5_VABI sceAjmInstanceCreate(uint32_t context, uint32_t codec, uint64_t fl
     if (contexts.count(context) == 0) return SCE_AJM_ERROR_INVALID_CONTEXT;
     *instance = nextInstance++;
     instances.insert(*instance);
-    // AjmInstanceFlags: version (3 bits), channels (4), output format (3), ...
     instanceStates[*instance].format = static_cast<std::uint32_t>((flags >> 7) & 0x7) <= 2 ? static_cast<std::uint32_t>((flags >> 7) & 0x7) : 0;
     static std::set<std::uint64_t> reportedFlags;
     if (reportedFlags.insert((static_cast<std::uint64_t>(codec) << 48) ^ flags).second) APS5_LOG_OUT("ajm: instance %u codec %u flags 0x%llx", *instance, codec, static_cast<unsigned long long>(flags));
@@ -408,7 +387,6 @@ int APS5_VABI sceAjmBatchStart(uint32_t context, const AjmBatchInfo* info, int p
     }
     if (error != nullptr) *error = AjmBatchError{};
     {
-        // Diagnostics: how busy the (silent) decoder is.
         static std::uint64_t started = 0, jobsRun = 0;
         ++started; jobsRun += jobs.size();
         if (started <= 4) for (const auto& job : jobs) {
@@ -427,7 +405,7 @@ int APS5_VABI sceAjmBatchWait(uint32_t context, uint32_t batch, uint32_t timeout
     std::lock_guard lock(mutex);
     if (contexts.count(context) == 0) return SCE_AJM_ERROR_INVALID_CONTEXT;
     if (error != nullptr) *error = AjmBatchError{};
-    return 0; // batches complete at start
+    return 0;
 }
 
 int APS5_VABI sceAjmBatchCancel(uint32_t context, uint32_t batch) {

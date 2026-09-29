@@ -96,8 +96,6 @@ void stateTests() {
     queue.context[0x91] = 0x30020;
     state = AgcDriver::Graphics::DecodeState(queue);
     Require(state.scissor.offset.x == 3 && state.scissor.offset.y == 1 && state.scissor.extent.width == 29 && state.scissor.extent.height == 2, "scissor intersection changed");
-    // Compression (DCC) and optimization hints describe the console's surface keeping; the host
-    // renders uncompressed and decodes the target as before. Endian swaps stay unsupported.
     queue.context[0x31c] |= 0x10000000;
     Require(AgcDriver::Graphics::DecodeState(queue).color.format == state.color.format, "compressed color target decode changed");
     queue.context[0x31c] |= 0x1;
@@ -112,15 +110,12 @@ void stateTests() {
     queue.context[0x3b0] = (62u << 14u) | 3u;
     expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "pitch");
     queue = makeState();
-    // Targets masked in or exporting nothing have no attachment; written ones must follow
-    // target zero without a gap.
     queue.context[0x8e] = 0xff;
     Require(AgcDriver::Graphics::DecodeState(queue).extraColors.empty(), "a target without exports gained an attachment");
     queue.context[0x8e] = 0xf0f;
     queue.context[0x1c5] |= (queue.context[0x1c5] & 0xfu) << 8u;
     expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "target zero");
     queue = makeState();
-    // Depth control without a depth surface (DB_Z_INFO.FORMAT 0) tests and writes nothing.
     queue.context[0x200] = 2;
     Require(!AgcDriver::Graphics::DecodeState(queue).hasDepthTarget, "depth control without a surface bound a depth target");
     queue = makeState();
@@ -238,7 +233,6 @@ void DepthClipTests() {
     queue.context[0x113] = std::bit_cast<std::uint32_t>(1.0f);
     queue.context[0x114] = 0;
     const auto unrestricted = AgcDriver::Graphics::DecodeState(queue);
-    // Depth outside [0, 1] maps affinely onto it: the host depth buffer only compares with itself.
     Require(unrestricted.viewport.minDepth == 0 && unrestricted.viewport.maxDepth == 1, "unrestricted viewport depth was not remapped");
     queue.context[0x113] = std::bit_cast<std::uint32_t>(-1.0f);
     const auto unrestrictedReversed = AgcDriver::Graphics::DecodeState(queue);

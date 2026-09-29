@@ -5,8 +5,6 @@
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 
-// HTTP/2 on the host follows the console without a network: contexts, templates and requests
-// are created and configured normally, and sending fails with a network error.
 namespace {
 
 constexpr int SCE_HTTP2_ERROR_INVALID_ID = static_cast<int>(0x80431100);
@@ -122,7 +120,6 @@ int APS5_VABI sceHttp2GetAllResponseHeaders(int req_id, char** header, size_t* h
     return requests.Has(req_id) ? SCE_HTTP2_ERROR_BEFORE_SEND : SCE_HTTP2_ERROR_INVALID_ID;
 }
 
-// Per-object settings: accepted and ignored, the objects never reach the network.
 int APS5_VABI sceHttp2SetAuthEnabled(int id, int is_enable) { (void)is_enable; return anyId(id) ? 0 : SCE_HTTP2_ERROR_INVALID_ID; }
 int APS5_VABI sceHttp2SetAutoRedirect(int id, int enable) { (void)enable; return anyId(id) ? 0 : SCE_HTTP2_ERROR_INVALID_ID; }
 int APS5_VABI sceHttp2SetConnectionWaitTimeOut(int id, uint32_t usec) { (void)usec; return anyId(id) ? 0 : SCE_HTTP2_ERROR_INVALID_ID; }

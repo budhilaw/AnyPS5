@@ -13,7 +13,7 @@ enum class TextureTileMode {
     kStandard4KB,
     kStandard64KB,
     RenderTarget64KB,
-    Depth64KB  // the swizzle of depth targets (64KB_Z_X); sampled through the resident depth image
+    Depth64KB
 };
 
 enum class TextureDimension {
@@ -30,12 +30,12 @@ struct GuestTextureResource {
     std::uint32_t height;
     std::uint32_t depthOrLastArray;
     std::uint32_t baseArray;
-    std::uint32_t mipCount;   // levels of the surface in memory
-    std::uint32_t baseLevel;  // first level the view exposes
-    std::uint32_t lastLevel;  // last level the view exposes (titles clamp streamed textures)
+    std::uint32_t mipCount;
+    std::uint32_t baseLevel;
+    std::uint32_t lastLevel;
     TextureTileMode tileMode;
-    TextureDimension dimension;      // layout of the surface in memory
-    TextureDimension viewDimension;  // shape the shader samples it with (normally the same)
+    TextureDimension dimension;
+    TextureDimension viewDimension;
     std::uint32_t format;
     std::uint8_t dstSelX;
     std::uint8_t dstSelY;

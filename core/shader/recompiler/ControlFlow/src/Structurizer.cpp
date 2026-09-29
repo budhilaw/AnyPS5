@@ -630,8 +630,6 @@ void Structurizer::Structurize(ControlFlowGraph& graph) const {
     }
 }
 
-// Cooper-Harvey-Kennedy from a virtual root before the entry and every block without predecessors;
-// a block's set is its chain to that root. Blocks it never reaches keep every block.
 void Structurizer::computeDominatorTree(ControlFlowGraph& graph) const {
     const auto count = static_cast<std::uint32_t>(graph.blocks.size());
     const auto root = count;
@@ -737,8 +735,6 @@ void Structurizer::detectNaturalLoops(ControlFlowGraph& graph) const {
     }
 }
 
-// Cooper-Harvey-Kennedy on the reversed graph with a virtual exit; a block's set is its chain to
-// that exit. Blocks that reach no exit keep every block, as the set-intersection fixpoint does.
 void Structurizer::computePostDominators(ControlFlowGraph& graph) const {
     const auto count = static_cast<std::uint32_t>(graph.blocks.size());
     const auto exit = count;

@@ -32,8 +32,6 @@ const std::type_info* APS5_VABI _ZNKSt15__exception_ptr13exception_ptr20__cxa_ex
 }
 
 #if defined(_LIBCPP_VERSION)
-// The guest's exception_ptr follows the libstdc++ ABI: one pointer to the exception object with
-// non-trivial copy and destruction, so it is passed and returned by invisible reference.
 struct GuestExceptionPointer {
     void* object = nullptr;
     GuestExceptionPointer() noexcept = default;

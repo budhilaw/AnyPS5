@@ -29,7 +29,6 @@ struct Destructor { void (*function)(void*); void* argument; void* dso; };
 std::vector<Destructor>& destructors() { static auto* list = new std::vector<Destructor>; return *list; }
 std::mutex destructorsMutex;
 
-// Runs (in reverse order) and drops the destructors registered for `dso`, or all of them for null.
 void runDestructors(void* dso) {
     for (;;) {
         Destructor next{};

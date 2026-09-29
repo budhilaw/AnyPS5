@@ -5,7 +5,6 @@
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 
-// Network control on the host reports a console that is not connected to any network.
 namespace {
 
 constexpr int SCE_NET_CTL_ERROR_ID_NOT_FOUND = static_cast<int>(0x80412104);
@@ -23,7 +22,7 @@ extern "C" {
 
 int APS5_VABI sceNetCtlInit(void) { return 0; }
 void APS5_VABI sceNetCtlTerm(void) { std::lock_guard lock(mutex); callbacks.clear(); }
-int APS5_VABI sceNetCtlCheckCallback(void) { return 0; } // no state changes ever happen
+int APS5_VABI sceNetCtlCheckCallback(void) { return 0; }
 
 int APS5_VABI sceNetCtlGetState(int* state) {
     if (state == nullptr) return SCE_NET_CTL_ERROR_INVALID_ADDR;

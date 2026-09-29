@@ -11,9 +11,6 @@
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 
-// HTTP on the host follows the console without a network: contexts, templates, connections and
-// requests are created and configured normally, sending fails with a network error, and the URI
-// helpers (pure string functions) work fully.
 namespace {
 
 constexpr int SCE_HTTP_ERROR_INVALID_ID = static_cast<int>(0x80431100);
@@ -142,7 +139,6 @@ int APS5_VABI sceHttpReadData(int request_id, void* data, size_t size) {
     return requests.Has(request_id) ? SCE_HTTP_ERROR_BEFORE_SEND : SCE_HTTP_ERROR_INVALID_ID;
 }
 
-// Per-object settings: accepted and ignored, the objects never reach the network.
 int APS5_VABI sceHttpSetAuthEnabled(int id, int enable) { (void)enable; return anyId(id) ? 0 : SCE_HTTP_ERROR_INVALID_ID; }
 int APS5_VABI sceHttpSetAutoRedirect(int id, int enable) { (void)enable; return anyId(id) ? 0 : SCE_HTTP_ERROR_INVALID_ID; }
 int APS5_VABI sceHttpSetConnectTimeOut(int id, uint32_t usec) { (void)usec; return anyId(id) ? 0 : SCE_HTTP_ERROR_INVALID_ID; }
@@ -179,7 +175,7 @@ int APS5_VABI sceHttpUnsetEpoll(int id) { return requests.Has(id) ? 0 : SCE_HTTP
 int APS5_VABI sceHttpWaitRequest(HttpEpollHandle eh, HttpNBEvent* nbev, int maxevents, int timeout) {
     (void)nbev; (void)timeout;
     if (!epolls.Has(static_cast<int>(reinterpret_cast<std::uintptr_t>(eh))) || maxevents <= 0) return SCE_HTTP_ERROR_INVALID_VALUE;
-    return 0; // nothing is ever in flight
+    return 0;
 }
 
 int APS5_VABI sceHttpUriParse(SceHttpUriElement* out, const char* src_url, void* pool, size_t* require, size_t prepare) {
@@ -232,7 +228,6 @@ int APS5_VABI sceHttpUriBuild(char* out, size_t* require, size_t prepare, const 
     if (src_element == nullptr) return SCE_HTTP_ERROR_INVALID_VALUE;
     const auto text = [](const char* value) { return value != nullptr ? std::string(value) : std::string(); };
     std::string result;
-    // Option bits select the components; all of them are emitted when no bits are set.
     const bool all = option == 0;
     if ((all || (option & 0x1u)) && src_element->scheme != nullptr) result += text(src_element->scheme) + "://";
     if ((all || (option & 0x2u)) && src_element->username != nullptr && *src_element->username != '\0') {

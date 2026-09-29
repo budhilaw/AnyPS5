@@ -6,8 +6,6 @@
 #include <stdexcept>
 #include <vector>
 
-// Guest thread-specific data keys map onto host pthread keys (key 0 stays invalid, as on the
-// console). Destructors are guest functions that the host runs at thread exit.
 namespace {
 
 constexpr int SCE_OK = 0;
@@ -16,7 +14,7 @@ constexpr int SCE_KERNEL_ERROR_EAGAIN = 0x80020023;
 constexpr int SCE_KERNEL_ERROR_ENOMEM = 0x8002000C;
 
 std::mutex keysMutex;
-std::vector<std::pair<pthread_key_t, bool>> keys; // (host key, allocated)
+std::vector<std::pair<pthread_key_t, bool>> keys;
 
 bool lookup(PthreadKey key, pthread_key_t& host) {
     std::lock_guard lock(keysMutex);

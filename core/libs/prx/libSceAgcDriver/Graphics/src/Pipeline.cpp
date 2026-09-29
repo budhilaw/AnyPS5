@@ -73,8 +73,6 @@ Pipeline::Pipeline(const Context& context, const State& state, const RenderTarge
         const std::uint32_t colorCount = state.hasColorTarget ? 1u + static_cast<std::uint32_t>(state.extraColors.size()) : 0u;
         std::vector<VkAttachmentReference> references;
         for (std::uint32_t i = 0; i < colorCount; ++i) references.push_back({i, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL});
-        // The depth attachment follows the color one; a depth clear requested through
-        // DB_RENDER_CONTROL clears the whole surface at render pass start.
         VkAttachmentDescription depthAttachment{};
         const auto& ds = state.depthState;
         depthAttachment.format = state.depth.format;

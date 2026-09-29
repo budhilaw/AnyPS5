@@ -9,8 +9,6 @@
 extern "C" {
 
 std::uint32_t* APS5_VABI sceAgcCbDispatch(CommandBuffer* buf, std::uint32_t threadGroupX, std::uint32_t threadGroupY, std::uint32_t threadGroupZ, std::uint32_t modifier) {
-    // Bits 0 and 6 (compute shader enable, force start at 0) are always set in the initiator, so
-    // a modifier carrying them is accepted; other unknown bits stay rejected.
     Agc::Command::CheckBits(modifier, 0xa079u, __func__);
     return Agc::Command::Emit(buf, 0x15u, {threadGroupX, threadGroupY, threadGroupZ, (modifier & 0xa038u) | 0x41u}, __func__);
 }

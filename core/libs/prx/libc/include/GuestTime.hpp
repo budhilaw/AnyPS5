@@ -3,9 +3,6 @@
 
 #include <ctime>
 
-// The guest's struct tm: the nine standard fields only (36 bytes). The host's struct tm adds
-// tm_gmtoff and tm_zone, so host calls must never write through a guest pointer directly: titles
-// keep it in 40-48 byte stack slots and the extra fields overwrite what follows (stack canaries).
 struct GuestTm {
     int sec, min, hour, mday, mon, year, wday, yday, isdst;
 };

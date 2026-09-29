@@ -29,7 +29,6 @@ namespace {
 struct DrawStorage {
     std::unique_ptr<Buffer> indices;
     std::vector<std::unique_ptr<Buffer>> vertices;
-    // Imported guest mappings the draw reads its indices or vertices from in place.
     std::vector<std::shared_ptr<Buffer>> hostViews;
     std::shared_ptr<ResidentColor> color;
     std::vector<std::shared_ptr<ResidentColor>> extraColors;
@@ -41,7 +40,6 @@ struct DrawStorage {
 
 void Draw(const Context& context, const State& state, const Pm4::DrawParameters& draw, std::span<const CompiledShader> shaders, std::span<const GuestMemorySnapshot> snapshots) {
     PerformanceTimer timing("Graphics.Draw");
-    // ANYPS5_DEBUG_SKIP_DRAW="count:blend,count:blend": diagnostics, skips draws with that index count and blend enable.
     {
         static const char* skipList = std::getenv("ANYPS5_DEBUG_SKIP_DRAW");
         if (skipList != nullptr) {
@@ -60,7 +58,6 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
     Require(draw.indexed ? draw.flags == 0 : (draw.flags & ~0x20u) == 0, "draw modifiers are unsupported");
     if (draw.indexed) {
         Require(draw.indexSize == 2 || draw.indexSize == 4, "only uint16 and uint32 index buffers are supported");
-        // firstVertex is the base vertex (a signed offset added to every index), firstInstance the base instance.
         Require(!state.stages.mesh || (draw.firstVertex == 0 && draw.firstInstance == 0), "indexed mesh draw offsets are unsupported");
     } else {
         Require(draw.indexAddress == 0 && draw.indexSize == 0, "auto draw must not reference an index buffer");
@@ -75,8 +72,6 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
     Require(!draw.indexed || !state.hasColorTarget || draw.indexAddress + indexBytes <= state.color.address || state.color.address + state.color.bytes <= draw.indexAddress, "index buffer aliases the render target");
     if (state.rectList) Require(draw.indexCount % 3 == 0, "incomplete rect-list primitive");
     {
-        // The hardware clips against a guard band; Vulkan rejects viewports outside the device
-        // bounds. A viewport that cannot cover the render extent produces no fragments: skip it.
         const auto& viewport = state.viewport;
         const float left = std::min(viewport.x, viewport.x + viewport.width), right = std::max(viewport.x, viewport.x + viewport.width);
         const float top = std::min(viewport.y, viewport.y + viewport.height), bottom = std::max(viewport.y, viewport.y + viewport.height);
@@ -111,7 +106,6 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
     VkBuffer indexHandle = VK_NULL_HANDLE;
     VkDeviceSize indexOffset = 0;
     if (draw.indexed) {
-        // Indices straight from the imported guest mapping when possible, else a copy.
         std::span<const std::byte> indexData;
         auto view = context.guestBufferCache != nullptr ? context.guestBufferCache->HostRange(draw.indexAddress, indexBytes) : GuestBufferCache::HostView{};
         if (view.buffer && view.offset % 4u == 0) {
@@ -137,7 +131,6 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
             Require(index <= context.limits.maxDrawIndexedIndexValue, "index exceeds the device's indexed draw limit");
             maxIndex = std::max(maxIndex, index);
         }
-        // The base vertex moves every fetch: the vertex buffers must cover the highest index plus it.
         const auto baseVertex = static_cast<std::int64_t>(static_cast<std::int32_t>(draw.firstVertex));
         const auto highest = static_cast<std::int64_t>(maxIndex) + baseVertex;
         Require(highest >= 0 && highest <= static_cast<std::int64_t>(std::numeric_limits<std::uint32_t>::max()), "indexed draw base vertex moves the fetch range outside the vertex domain");
@@ -171,7 +164,6 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
         auto buffer = std::make_unique<Buffer>(context, bytes, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
         GuestMemory::Read(address, buffer->Bytes(), 1);
         {
-            // ANYPS5_DUMP_FRAME diagnostics: the first vertices of small indexed draws (UI quads).
             static const bool dumpVertices = std::getenv("ANYPS5_DUMP_FRAME") != nullptr;
             static int reported = 0;
             if (dumpVertices && draw.indexed && draw.indexCount <= 12 && reported < 12) {
@@ -195,7 +187,6 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
     auto resources = std::make_shared<ShaderResources>(context, shaders, state.color, draw.indexAddress, static_cast<std::size_t>(indexBytes), snapshots);
     timing.Mark("shader_resources");
     {
-        // ANYPS5_DUMP_FRAME diagnostics: the textures a small indexed draw (a UI quad) samples.
         static const bool journalTextures = std::getenv("ANYPS5_DUMP_FRAME") != nullptr;
         static const bool journalAllTextures = std::getenv("ANYPS5_JOURNAL_TEXTURES") != nullptr;
         if (journalAllTextures || (journalTextures && draw.indexed && draw.indexCount <= 12)) {
@@ -203,7 +194,6 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
             std::snprintf(head, sizeof(head), "draw %u%s -> 0x%llx %ux%u vk%u+%zu blend %u(%u,%u) depth %s mask 0x%x; textures:", draw.indexCount, draw.indexed ? "i" : "a", state.hasColorTarget ? static_cast<unsigned long long>(state.color.address) : 0ull, state.renderExtent.width, state.renderExtent.height, state.hasColorTarget ? static_cast<unsigned>(state.color.format) : 0u, state.extraColors.size(), state.blend.blendEnable, static_cast<unsigned>(state.blend.srcColorBlendFactor), static_cast<unsigned>(state.blend.dstColorBlendFactor), state.hasDepthTarget ? (state.depthState.write ? "rw" : "r") : "-", state.blend.colorWriteMask);
             GpuJournal::Record(head + resources->DescribeTextures());
         }
-        // ANYPS5_DEBUG_GDS_INPUTS: the small textures (exposure, parameters) a large draw reads.
         static const char* debugInputsValue = std::getenv("ANYPS5_DEBUG_GDS_INPUTS");
         static const auto debugStart = std::chrono::steady_clock::now();
         const bool debugInputs = debugInputsValue != nullptr && std::chrono::duration<double>(std::chrono::steady_clock::now() - debugStart).count() >= std::atof(debugInputsValue);
@@ -211,7 +201,6 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
         if (debugInputs && ((draw.indexed && draw.indexCount >= 80000) || finalBlit || state.extraColors.size() >= 3)) {
             if (context.drawQueue) { context.drawQueue->Flush(); context.drawQueue->Wait(); }
             APS5_LOG_OUT("[draw-input] draw of %u indices%s (target vk%u +%zu extra, blend %u)", draw.indexCount, finalBlit ? " (final blit)" : "", state.hasColorTarget ? static_cast<unsigned>(state.color.format) : 0u, state.extraColors.size(), state.blend.blendEnable);
-            // The fragment shader (ANYPS5_DUMP_GDS_SHADERS) with its raw image descriptors.
             for (const auto& shader : shaders) {
                 if (shader.program == nullptr) continue;
                 std::string dumped;
@@ -242,8 +231,6 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
         const ColorTargetLayout colorLayout(state.color.extent.width, state.color.extent.height, state.color.tileMode, state.color.bytesPerPixel);
         Require(state.color.gpuOnly || state.color.bytes == colorLayout.Bytes(), "color target transfer size mismatch");
         storage->color = context.renderCache->Get(state.color, state.blend.blendEnable != 0);
-        // ANYPS5_DEBUG_GDS_INPUTS: draws into the 3840x2160 packed-float targets show the target's
-        // contents before the draw and every texture they read.
         {
             static const char* debugValue = std::getenv("ANYPS5_DEBUG_GDS_INPUTS");
             static const auto debugStart = std::chrono::steady_clock::now();
@@ -269,7 +256,6 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
                     if (texture->Extent().width * texture->Extent().height < 64 * 64) continue;
                     APS5_LOG_OUT("[draw-target]   reads 0x%llx %ux%u vk%u%s:%s", static_cast<unsigned long long>(texture->GuestAddress()), texture->Extent().width, texture->Extent().height, static_cast<unsigned>(texture->GuestFormat()), texture->IsDirectView() ? " direct" : "", context.textureCache->DescribeContents(*texture).c_str());
                 }
-                // The vertex data of small draws (quads): the first words of every attribute buffer.
                 if (draw.indexed && draw.indexCount <= 6) {
                     for (std::size_t v = 0; v < vertexBuffers.size(); ++v) {
                         const auto bytes = vertexBuffers[v]->Bytes();
@@ -282,7 +268,6 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
                         APS5_LOG_OUT("[draw-target]   vertex buffer %zu (%zu bytes):%s", v, bytes.size(), text.c_str());
                     }
                 }
-                // The shaders of the draw (ANYPS5_DUMP_GDS_SHADERS) and their buffer descriptors with the first dwords.
                 for (const auto& shader : shaders) {
                     if (shader.program == nullptr) continue;
                     std::string buffers;
@@ -319,8 +304,6 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
                 }
             }
         }
-        // ANYPS5_DEBUG_DRAW_TARGETS=<seconds>[:<draws>]: from that time on, the RGBA8 color target
-        // before each of the next draws (40 by default) and the larger textures each draw reads.
         {
             static const char* traceValue = std::getenv("ANYPS5_DEBUG_DRAW_TARGETS");
             static const auto traceStart = std::chrono::steady_clock::now();
@@ -360,7 +343,6 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
                         text += item;
                     }
                     APS5_LOG_OUT("[draw-trace]   attributes (cache hit %d):%s", shaders.front().program->cacheHit ? 1 : 0, text.c_str());
-                    // The vertex bytes now (after the flush) against what the draw captured.
                     const auto& attributes0 = shaders.front().program->vertexAttributes;
                     if (!attributes0.empty() && !vertexBuffers.empty()) {
                         const auto& fields = attributes0.front().resource.fields;
@@ -398,8 +380,6 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
                         char item[16]; std::snprintf(item, sizeof(item), " %08x", word); text += item;
                     }
                     APS5_LOG_OUT("[draw-trace]   push constants:%s", text.c_str());
-                    // Pointers among the push constants (pairs with a small high word): what they
-                    // point to, and one level further for the first two qwords.
                     const auto dumpAt = [&](std::uint64_t address, const char* label) {
                         std::array<std::uint32_t, 48> words{};
                         try { GuestMemory::Read(address, std::as_writable_bytes(std::span(words)), 4); } catch (...) { APS5_LOG_OUT("[draw-trace]     %s 0x%llx unreadable", label, static_cast<unsigned long long>(address)); return words; }
@@ -470,12 +450,6 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
     storage->pipeline = context.graphicsPipelines->Get(state, storage->color, storage->extraColors, storage->depth, *resources, shaders);
     auto& pipeline = *storage->pipeline;
     timing.Mark("pipeline_cache");
-    // Consecutive draws into the same attachments share one render pass instance: on a tiling
-    // GPU every pass loads and stores its attachments, and MoltenVK encodes each as a Metal pass.
-    // A draw starts a new pass when anything was recorded since the last one, when its targets
-    // need an upload or layout change, when it clears depth or stencil at the pass start, and
-    // when it may store to memory (it then ends the pass too, so later work sees the stores
-    // after the pass's barrier).
     RenderPassKey passKey;
     if (storage->color) passKey.views[passKey.viewCount++] = storage->color->Target().View();
     for (const auto& extra : storage->extraColors) passKey.views[passKey.viewCount++] = extra->Target().View();
@@ -497,7 +471,7 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
             std::fprintf(stderr, "[draw-writes] %u %s indices, target 0x%llx %ux%u vk%u, shaders %016llx, writes%s\n", draw.indexCount, draw.indexed ? "indexed" : "auto", state.hasColorTarget ? static_cast<unsigned long long>(state.color.address) : 0ull, state.renderExtent.width, state.renderExtent.height, state.hasColorTarget ? static_cast<unsigned>(state.color.format) : 0u, static_cast<unsigned long long>(hash), ranges.c_str());
         }
     }
-    static const bool mergePasses = std::getenv("ANYPS5_NO_PASS_MERGE") == nullptr; // diagnostics
+    static const bool mergePasses = std::getenv("ANYPS5_NO_PASS_MERGE") == nullptr;
     const bool attached = (!storage->color || storage->color->Attached()) && std::all_of(storage->extraColors.begin(), storage->extraColors.end(), [](const auto& extra) { return extra->Attached(); }) && (!storage->depth || storage->depth->Attached());
     VkCommandBuffer commands = mergePasses && !clears && !writes && attached ? context.drawQueue->ContinuePass(passKey) : VK_NULL_HANDLE;
     if (commands != VK_NULL_HANDLE) {

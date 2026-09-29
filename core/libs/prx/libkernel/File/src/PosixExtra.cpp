@@ -7,7 +7,6 @@
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 
-// Further libScePosix file functions and sceKernelFtruncate over host descriptors and paths.
 extern "C" int* __error_nid_postfix();
 extern "C" int APS5_VABI sceKernelUnlink(const char* path);
 extern "C" int APS5_VABI sceKernelRmdir(const char* path);

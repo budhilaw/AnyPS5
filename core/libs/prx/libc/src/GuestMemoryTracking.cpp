@@ -29,7 +29,6 @@ struct Entry {
     bool active = false;
 };
 
-// A watch whose protection a CPU access may have to resolve.
 struct ProtectedRange {
     std::uint64_t begin;
     std::uint64_t end;
@@ -40,14 +39,8 @@ struct Registry {
     std::recursive_mutex mutex;
     std::map<std::uint64_t, std::shared_ptr<Entry>> entries;
     bool installed = false;
-    // The protected watches, republished (under `mutex`) whenever a protection changes: threads
-    // that do not hold `mutex` (the GPU driver preparing draws while its worker records others)
-    // check their accesses against it without the lock. An access that misses a protection set
-    // meanwhile faults and resolves in the handler.
     std::mutex publishedMutex;
     std::shared_ptr<const std::vector<ProtectedRange>> published = std::make_shared<const std::vector<ProtectedRange>>();
-    // Set when a protection changes; the next locked resolve republishes (rebuilding the list on
-    // every change would cost more than it saves when protections churn).
     std::atomic<bool> stale{true};
 };
 
@@ -56,8 +49,6 @@ Registry& registry() {
     return *value;
 }
 
-// Requires the registry mutex. Only inaccessible watches are published: host reads are what
-// runs without the lock, and they only have to resolve those.
 void publish() {
     registry().stale.store(false, std::memory_order_release);
     auto ranges = std::make_shared<std::vector<ProtectedRange>>();
@@ -114,7 +105,7 @@ std::vector<std::shared_ptr<Entry>> overlapping(std::uint64_t address, std::size
 }
 
 bool fault(std::uint64_t address, bool writable) {
-    if (address == 0) return false; // a null dereference is never a tracked page
+    if (address == 0) return false;
     std::lock_guard lock(registry().mutex);
     const auto entries = overlapping(address, 1);
     if (entries.empty()) return false;
@@ -201,8 +192,6 @@ void GuestMemoryTrackingResolve_nid_postfix(std::uint64_t address, std::size_t b
     std::lock_guard lock(registry().mutex);
     if (registry().stale.load(std::memory_order_acquire)) publish();
     {
-        // Most checks touch no protected watch: find that out without building a list (the GPU
-        // driver checks every descriptor dword it reads).
         const auto end = checkedEnd(address, bytes);
         const auto& entries = registry().entries;
         auto it = entries.upper_bound(address);

@@ -3,7 +3,6 @@
 #include <cstddef>
 #include <stdexcept>
 
-// Guest operator new/delete on the application heap, so guest malloc/free interoperate.
 extern "C" {
 
 void* APS5_VABI _Znwm_nid_postfix(std::size_t size) {
@@ -18,5 +17,4 @@ void APS5_VABI _ZdaPv_nid_postfix(void* pointer) { _ZdlPv_nid_postfix(pointer); 
 
 }
 
-// std::get_new_handler: no guest handler can be installed yet, so none is ever set.
 extern "C" void* APS5_VABI _ZSt15get_new_handlerv_nid_postfix() { return nullptr; }

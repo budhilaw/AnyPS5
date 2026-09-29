@@ -5,8 +5,6 @@
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 
-// The share service (screenshots, video clips, the share menu) has no host counterpart: the
-// library initializes, accepts its configuration, and reports that no capture is ever running.
 namespace {
 
 constexpr int SCE_SHARE_ERROR_INVALID_ARGUMENT = static_cast<int>(0x80A50002);
@@ -65,7 +63,7 @@ int APS5_VABI sceShareGetCurrentStatus(uint32_t feature_flag, ShareCurrentStatus
     if (status == nullptr) return SCE_SHARE_ERROR_INVALID_ARGUMENT;
     std::lock_guard lock(mutex);
     if (!initialized) return SCE_SHARE_ERROR_NOT_INITIALIZED;
-    std::memset(status, 0, sizeof(*status)); // nothing is being captured or shared
+    std::memset(status, 0, sizeof(*status));
     return 0;
 }
 
@@ -115,7 +113,6 @@ int APS5_VABI sceShareSetScreenshotOverlayImage(const char* file_path, int32_t m
     return initialized ? 0 : SCE_SHARE_ERROR_NOT_INITIALIZED;
 }
 
-// Captures and the share menu are system features the host does not provide.
 int APS5_VABI sceShareCaptureScreenshot(const void* param, int32_t* req_id) {
     Aps5TraceCall_nid_no_patch(__func__);
     if (param == nullptr || req_id == nullptr) return SCE_SHARE_ERROR_INVALID_ARGUMENT;

@@ -181,8 +181,6 @@ RelinkResult RelinkerPipeline::Relink(const std::vector<std::uint8_t>& sourceElf
                     throw RelinkerException("RELATIVE relocation has a nonzero symbol index", pos);
                 continue;
             }
-            // Module-local thread storage (R_X86_64_DTPMOD64 / DTPOFF64): the target resolves the
-            // module id and offset; a symbol reference would need another module's TLS.
             if (relType == 16 || relType == 17) {
                 if (symIdx != 0)
                     throw RelinkerException("TLS module relocation against a symbol is not supported", pos);

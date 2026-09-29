@@ -214,7 +214,7 @@ int APS5_VABI sceSaveDataMount3(const SaveDataMount3* mount, SaveDataMountResult
     }
     const std::string dirName(mount->dir_name->data, static_cast<std::size_t>(nameEnd - mount->dir_name->data));
     if (dirName.empty() || dirName == "." || dirName == ".." || dirName.find_first_of("/\\:") != std::string::npos) {
-        return SAVE_DATA_ERROR_PARAMETER; // the console rejects the name; titles report it and go on
+        return SAVE_DATA_ERROR_PARAMETER;
     }
     const std::string real_path = save_root() + "/" + dirName;
     for (const auto& mounted : g_slots) {
@@ -234,9 +234,6 @@ int APS5_VABI sceSaveDataMount3(const SaveDataMount3* mount, SaveDataMountResult
     if (create || create2) {
         std::filesystem::create_directories(real_path);
     }
-    // Console-style mount points (/savedata0, ...) fit the 16-byte mount point field whatever the
-    // directory name; guest paths resolve under the working directory, where a link names the
-    // save directory.
     const std::string mountPoint = "/savedata" + std::to_string(slot);
     const std::filesystem::path link = mountPoint.substr(1);
     std::error_code linkError;

@@ -37,7 +37,6 @@ void APS5_VABI exit_nid_postfix(int code) {
 }
 
 int APS5_VABI sceKernelGetCurrentCpu(void) {
-    // The host does not expose the executing core; spread callers over the console's seven cores.
     return static_cast<int>(std::hash<std::thread::id>{}(std::this_thread::get_id()) % 7);
 }
 
@@ -63,7 +62,6 @@ void* APS5_VABI sceKernelGetProcParam(void) {
 
 int APS5_VABI sceKernelUuidCreate(uint32_t* uuid) {
     if (uuid == nullptr) return SCE_KERNEL_ERROR_EINVAL;
-    // Version 4 (random) UUID in the console's 16-byte layout.
     std::random_device device;
     std::uint32_t words[4];
     for (auto& word : words) word = device();
@@ -80,12 +78,12 @@ void APS5_VABI sceKernelSync(void) {
 
 int APS5_VABI sched_get_priority_max_nid_postfix(int policy) {
     if (policy < 0 || policy > 3) return -1;
-    return 767; // SCE_KERNEL_PRIO_FIFO_LOWEST
+    return 767;
 }
 
 int APS5_VABI sched_get_priority_min_nid_postfix(int policy) {
     if (policy < 0 || policy > 3) return -1;
-    return 256; // SCE_KERNEL_PRIO_FIFO_HIGHEST
+    return 256;
 }
 
 }

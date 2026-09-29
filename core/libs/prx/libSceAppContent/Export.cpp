@@ -11,8 +11,6 @@
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 
-// libSceAppContent: application parameters come from the title's sce_sys/param.json, temporary
-// data is a directory under the run root mounted as /temp0, and no additional content is present.
 namespace {
 
 constexpr int SCE_APP_CONTENT_ERROR_PARAMETER = static_cast<int>(0x80D90002);
@@ -29,7 +27,6 @@ std::mutex appMutex;
 bool initialized = false;
 bool temporaryMounted = false;
 
-// Reads an integer field of the title's param.json (no library dependency; the file is small).
 bool ParamInteger(const char* key, std::int32_t& value) {
     std::ifstream file(ResolvePath_nid_no_patch("/app0/sce_sys/param.json"));
     if (!file) throw std::runtime_error("sceAppContent: /app0/sce_sys/param.json is unavailable");
@@ -50,7 +47,7 @@ int APS5_VABI sceAppContentInitialize(const AppContentInitParam* init_param, App
     if (init_param == nullptr || boot_param == nullptr) return SCE_APP_CONTENT_ERROR_PARAMETER;
     std::lock_guard lock(appMutex);
     std::memset(boot_param, 0, sizeof(*boot_param));
-    boot_param->attr = 0; // an ordinary boot from the home screen
+    boot_param->attr = 0;
     initialized = true;
     return 0;
 }
@@ -75,7 +72,7 @@ int APS5_VABI sceAppContentAppParamGetInt(uint32_t param_id, int32_t* value) {
 
 int APS5_VABI sceAppContentTemporaryDataMount2(uint32_t option, AppContentMountPoint* mount_point) {
     Aps5TraceCall_nid_no_patch(__func__);
-    if (mount_point == nullptr || option > 1) return SCE_APP_CONTENT_ERROR_PARAMETER; // SCE_APP_CONTENT_TEMPORARY_DATA_OPTION_NONE / FORMAT
+    if (mount_point == nullptr || option > 1) return SCE_APP_CONTENT_ERROR_PARAMETER;
     std::lock_guard lock(appMutex);
     if (!initialized) return SCE_APP_CONTENT_ERROR_NOT_INITIALIZED;
     if (temporaryMounted) return SCE_APP_CONTENT_ERROR_BUSY;
@@ -117,14 +114,14 @@ int APS5_VABI sceAppContentTemporaryDataGetAvailableSpaceKb(const AppContentMoun
 int APS5_VABI sceAppContentDownloadDataGetAvailableSpaceKb(const AppContentMountPoint* mount_point, size_t* available_space_kb) {
     Aps5TraceCall_nid_no_patch(__func__);
     if (mount_point == nullptr || available_space_kb == nullptr) return SCE_APP_CONTENT_ERROR_PARAMETER;
-    return SCE_APP_CONTENT_ERROR_NOT_MOUNTED; // no download data area is mounted on the host
+    return SCE_APP_CONTENT_ERROR_NOT_MOUNTED;
 }
 
 int APS5_VABI sceAppContentAddcontMount(uint32_t service_label, const NpUnifiedEntitlementLabel* entitlement_label, AppContentMountPoint* mount_point) {
     Aps5TraceCall_nid_no_patch(__func__);
     (void)service_label;
     if (entitlement_label == nullptr || mount_point == nullptr) return SCE_APP_CONTENT_ERROR_PARAMETER;
-    return SCE_APP_CONTENT_ERROR_NOT_FOUND; // no additional content is installed
+    return SCE_APP_CONTENT_ERROR_NOT_FOUND;
 }
 
 int APS5_VABI sceAppContentAddcontUnmount(const AppContentMountPoint* mount_point) {

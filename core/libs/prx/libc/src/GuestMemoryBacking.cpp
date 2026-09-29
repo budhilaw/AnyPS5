@@ -17,16 +17,14 @@ namespace {
 struct Allocation {
     Platform::Mapping mapping;
     std::map<std::uint64_t, std::uint64_t> ranges;
-    std::uint64_t serial = 0;  // distinguishes a mapping from a later one at the same address
-    std::size_t imports = 0;   // GPU buffers made of the alias (GuestMemoryBackingRetainAlias)
-    std::chrono::steady_clock::time_point released{};  // when the last import went
+    std::uint64_t serial = 0;
+    std::size_t imports = 0;
+    std::chrono::steady_clock::time_point released{};
 };
 
 std::uint64_t nextSerial = 1;
 std::atomic<std::uint64_t> unmapGeneration{0};
 
-// Aliases of unmapped allocations the GPU still imports. Command buffers that made an import
-// resident may run after its release, so the memory stays two seconds longer.
 struct RetiredAlias {
     Platform::Mapping mapping;
     std::size_t imports;
@@ -56,7 +54,6 @@ std::map<std::uint64_t, Allocation>& allocations() {
     return *value;
 }
 
-// Null when the range has no active shared backing (lookups on the GPU path must not throw).
 Allocation* lookup(std::uint64_t address, std::size_t bytes) {
     if (address == 0 || bytes == 0 || bytes > std::numeric_limits<std::uint64_t>::max() - address) return nullptr;
     auto found = allocations().upper_bound(address);

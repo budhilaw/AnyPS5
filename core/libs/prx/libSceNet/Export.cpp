@@ -10,9 +10,6 @@
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 
-// The host behaves like a console whose network cable is unplugged: memory pools, resolvers and
-// epoll sets are bookkeeping only, address helpers work, and everything that would reach the
-// network fails with the errors the console reports while disconnected.
 namespace {
 
 constexpr int SCE_NET_ERROR_EBADF = static_cast<int>(0x80410009);
@@ -96,7 +93,7 @@ int APS5_VABI sceNetEpollDestroy(int eid) { return epolls.Destroy(eid) ? 0 : SCE
 int APS5_VABI sceNetEpollControl(int eid, int op, int id, const NetEpollEvent* event) {
     (void)op; (void)id; (void)event;
     if (!epolls.Has(eid)) return SCE_NET_ERROR_EBADF;
-    return SCE_NET_ERROR_EBADF; // no socket ever exists
+    return SCE_NET_ERROR_EBADF;
 }
 
 int APS5_VABI sceNetEpollWait(int eid, NetEpollEvent* events, int maxevents, int timeout) {
@@ -130,7 +127,7 @@ int APS5_VABI sceNetGetSockInfo(int s, void* info, int n, int flags) { (void)s; 
 int APS5_VABI sceNetGetMacAddress(NetEtherAddr* addr, int flags) {
     (void)flags;
     if (addr == nullptr) return SCE_NET_ERROR_EINVAL;
-    static constexpr std::uint8_t local[6] = {0x02, 0x00, 0x00, 0x00, 0x00, 0x01}; // locally administered
+    static constexpr std::uint8_t local[6] = {0x02, 0x00, 0x00, 0x00, 0x00, 0x01};
     std::memcpy(addr->data, local, sizeof(local));
     return 0;
 }

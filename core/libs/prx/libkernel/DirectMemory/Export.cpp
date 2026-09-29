@@ -116,9 +116,6 @@ int APS5_VABI sceKernelReserveVirtualRange(void** addr, size_t len, int flags, s
  return DoReserveVirtual(addr, len, alignment);
 }
 
-// Describes the mapping containing `addr`, or with SCE_KERNEL_VQ_FIND_NEXT (flags bit 0) the
-// first mapping at or after it; SCE_KERNEL_ERROR_EACCES when there is none, which ends a title's
-// address-space walk. Mappings are those the title made through libkernel.
 int APS5_VABI sceKernelVirtualQuery(const void* addr, int flags, VirtualQueryInfo* info, uint64_t info_size) {
     if (!info || info_size < sizeof(VirtualQueryInfo)) return SCE_KERNEL_ERROR_EINVAL;
     if ((flags & ~1) != 0) return SCE_KERNEL_ERROR_EINVAL;
@@ -134,7 +131,7 @@ int APS5_VABI sceKernelVirtualQuery(const void* addr, int flags, VirtualQueryInf
     info->protection = (range.readable ? 1 : 0) | (range.writable ? 2 : 0);
     info->memory_type = 0;
     info->is_committed = range.readable || range.writable;
-    info->is_flexible = 1; // libkernel backs every guest mapping the same way
+    info->is_flexible = 1;
     const auto name = rangeName(range.address, range.address + range.bytes);
     std::memcpy(info->name, name.c_str(), name.size());
     return 0;
@@ -146,8 +143,6 @@ int APS5_VABI sceKernelVirtualQuery(const void* addr, int flags, VirtualQueryInf
 
 int APS5_VABI sceKernelCheckedReleaseDirectMemory(int64_t start, size_t len) {
     APS5_LOG_OUT("checked release direct phys 0x%llx+0x%zx", static_cast<unsigned long long>(start), len);
-    // The checked variant refuses ranges that are still mapped; mappings are unmapped separately
-    // through sceKernelMunmap here, so it behaves like the plain release.
     if (start < 0 || len == 0 || (start & (PS5_PAGE_SIZE - 1)) != 0 || (len & (PS5_PAGE_SIZE - 1)) != 0) return SCE_KERNEL_ERROR_EINVAL;
     DirectMemoryFree(start, len);
     return 0;
@@ -173,7 +168,6 @@ int APS5_VABI sceKernelQueryMemoryProtection(void* addr, void** start, void** en
 }
 
 int APS5_VABI sceKernelIsStack(void* addr, void** start, void** end) {
-    // Reports whether the address lies in the calling thread's stack and, if so, its bounds.
     const auto self = scePthreadSelf();
     if (self == nullptr || self->stackAddress == nullptr || self->stackSize == 0) return 0;
     const auto low = reinterpret_cast<std::uintptr_t>(self->stackAddress);
@@ -185,8 +179,6 @@ int APS5_VABI sceKernelIsStack(void* addr, void** start, void** end) {
     return 1;
 }
 
-// Flexible memory is host memory without a fixed pool: titles only budget with these numbers, so
-// the console's default flexible budget is reported as configured and fully available.
 constexpr size_t FlexibleMemoryBudget = 448ull << 20;
 
 int APS5_VABI sceKernelAvailableFlexibleMemorySize(size_t* size) {
@@ -201,7 +193,6 @@ int APS5_VABI sceKernelConfiguredFlexibleMemorySize(size_t* size) {
  return 0;
 }
 
-// Names a mapped range for the console's memory tools; sceKernelVirtualQuery reports them.
 int APS5_VABI sceKernelSetVirtualRangeName(const void* addr, uint64_t len, const char* name) {
     if (addr == nullptr || name == nullptr) return SCE_KERNEL_ERROR_EINVAL;
     const auto start = reinterpret_cast<std::uintptr_t>(addr);

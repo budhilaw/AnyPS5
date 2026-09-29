@@ -16,14 +16,12 @@ std::atomic<std::uint32_t> nextResource{1};
 extern "C" {
 
 int APS5_VABI sceAgcDriverRegisterOwner(void) {
-    // Owners and resources exist for GPU debugging tools; the handles only need to be distinct.
     return static_cast<int>(nextOwner.fetch_add(1) & 0x7fffffffu);
 }
 
 int APS5_VABI sceAgcDriverRegisterResource(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5) {
     static const bool trace = std::getenv("ANYPS5_TRACE_RESOURCES") != nullptr;
     if (trace) {
-        // Diagnostics: the raw arguments, with any that point at printable text shown as strings.
         const auto text = [](uint64_t value) -> std::string {
             if (value < 0x100000000ull || value > 0x7fffffffffffull) return {};
             const auto* chars = reinterpret_cast<const char*>(value);

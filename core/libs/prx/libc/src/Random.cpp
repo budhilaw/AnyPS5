@@ -3,8 +3,6 @@
 #include <mutex>
 #include "prx/libc/include/General.hpp"
 
-// The C pseudo-random generators of the console's libc: rand/srand (31-bit linear congruential,
-// as in FreeBSD) and the 48-bit drand48 family.
 namespace {
 
 std::mutex mutex;
@@ -22,7 +20,6 @@ extern "C" {
 
 int APS5_VABI rand_nid_postfix(void) {
     std::lock_guard lock(mutex);
-    // FreeBSD's rand: Park-Miller minimal standard generator.
     std::uint64_t product = static_cast<std::uint64_t>(randState) * 16807u;
     randState = static_cast<std::uint32_t>((product >> 31) + (product & 0x7fffffffu));
     if (randState & 0x80000000u) randState = (randState & 0x7fffffffu) + 1u;

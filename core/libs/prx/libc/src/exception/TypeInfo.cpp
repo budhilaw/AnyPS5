@@ -62,9 +62,6 @@ static_assert(sizeof(TypeInfoVtable) == 11 * sizeof(void*));
 }
 
 #if defined(_LIBCPP_VERSION)
-// libc++abi does not export the type_info objects of its RTTI classes. The guest vtables only need
-// objects whose name() yields the mangled class name (see Kind()), so equivalent objects are laid
-// out here in libc++'s type_info shape: a vtable pointer followed by the name pointer.
 namespace {
 struct HostTypeInfo { const void* vtable; const char* name; };
 static_assert(sizeof(HostTypeInfo) == sizeof(std::type_info));
@@ -98,8 +95,6 @@ LibcException::TypeInfoVtable _ZTVN10__cxxabiv116__enum_type_infoE_nid_postfix {
 }
 #endif
 
-// Guest type_info objects of the fundamental types (a vtable pointer and the mangled name, the
-// Itanium layout) and of const char* (a __pointer_type_info with the const qualifier flag).
 namespace {
 struct GuestFundamentalTypeInfo { const void* vtable; const char* name; };
 struct GuestPointerTypeInfo { const void* vtable; const char* name; unsigned flags; const void* pointee; };

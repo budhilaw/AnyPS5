@@ -3,7 +3,6 @@
 
 #include <cstdint>
 namespace AgcDriver::Eq {
-// Wakes every registered GPU event with the given release context id.
 void Trigger(std::uint32_t contextId);
 }
 

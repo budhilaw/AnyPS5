@@ -88,8 +88,6 @@ void ValidateValueReferences(const IrProgram& program, ShaderStageInputInfo inpu
                         (channel->ImmediateU32() >= 4u || attribute->ImmediateU32() >= static_cast<std::uint32_t>(inputInfo.vertex->resourcesNum))) {
                         return Fail("vertex input reference is out of range");
                     }
-                    // Pixel attributes past SPI_PS_IN_CONTROL.NUM_INTERP read zero (the hardware
-                    // reads undefined values there when a vertex shader exports fewer parameters).
                     if (stage == IrShaderStage::Pixel && (channel->ImmediateU32() >= 4u || attribute->ImmediateU32() >= 32u)) {
                         return Fail("pixel input reference is out of range");
                     }

@@ -14,14 +14,13 @@
 namespace GuestTls {
 namespace {
 
-// Slots below this belong to the system and libSystem; dynamic keys grow upward from there.
 constexpr std::uint32_t FirstDynamicSlot = 256;
 constexpr std::uint32_t SlotCount = 768;
 
 struct Layout {
     GuestImage::ThreadStorage storage;
-    std::size_t blockSize;   // static TLS rounded up to its alignment; the TCB follows it
-    pthread_key_t cleanup;   // dynamic key whose destructor frees the block at thread exit
+    std::size_t blockSize;
+    pthread_key_t cleanup;
 };
 
 std::optional<Layout> layout;
@@ -44,7 +43,7 @@ void InstallCurrentThread() {
     std::call_once(once, resolve);
     if (!layout) return;
     const auto alignment = std::max<std::size_t>(layout->storage.alignment, 16);
-    const auto total = layout->blockSize + 16; // TCB: self pointer and (unused) dynamic thread vector
+    const auto total = layout->blockSize + 16;
     void* block = nullptr;
     if (posix_memalign(&block, alignment, total) != 0 || block == nullptr) throw std::runtime_error("guest TLS: cannot allocate the thread block");
     std::memset(block, 0, total);
@@ -53,26 +52,20 @@ void InstallCurrentThread() {
     tcb[0] = tcb;
     tcb[1] = nullptr;
     if (pthread_setspecific(layout->cleanup, block) != 0) throw std::runtime_error("guest TLS: cannot register the thread block");
-    // Guest code was relinked to read %gs:slot*8 where it used to read %fs:0.
     const auto offset = static_cast<std::uint64_t>(layout->storage.slot) * sizeof(void*);
 #if defined(__x86_64__)
     __asm__ volatile("movq %0, %%gs:(%1)" : : "r"(tcb), "r"(offset) : "memory");
 #else
-    (void)offset; // guest x86-64 code cannot run on this host; the block only keeps the layout valid
+    (void)offset;
 #endif
 }
 
 }
 
-// The main thread runs guest code from the entry stub before any libkernel call.
 __attribute__((constructor)) static void InstallMainThread() { GuestTls::InstallCurrentThread(); }
 
-// Installs guest thread storage on a host thread libkernel did not create (the guest main
-// thread that libc starts on macOS).
 extern "C" void KernelInstallGuestThread_nid_no_patch() { GuestTls::InstallCurrentThread(); }
 
-// Dynamic thread storage of guest modules: __tls_get_addr({module, offset}) returns the calling
-// thread's block for that module, created from the module's template on first use.
 namespace {
 
 struct ModuleStorage { GuestImage::ModuleThreadStorage storage; };

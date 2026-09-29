@@ -150,7 +150,7 @@ std::shared_ptr<const IrResourcePlan> makeResourcePlan(const RecompileRequest& r
 struct SourceEntry {
     std::mutex mutex;
     std::shared_ptr<const IrResourcePlan> plan;
-    std::unique_ptr<IrProgram> spare;  // prepared with the plan for the first variant compile
+    std::unique_ptr<IrProgram> spare;
     std::vector<std::shared_ptr<const CompiledVariant>> variants;
 };
 
@@ -170,7 +170,6 @@ std::shared_ptr<SourceEntry> getSource(const RecompileRequest& request) {
     static std::unordered_map<std::vector<std::uint64_t>, std::shared_ptr<SourceEntry>, SourceKeyHash> sources;
     thread_local std::vector<std::uint64_t> key;
     RecompileCacheKey::Build(request, key);
-    // A draw asks for each stage's plan and then its compile: recent sources skip the shared map.
     struct Recent {
         std::vector<std::uint64_t> key;
         std::shared_ptr<SourceEntry> source;
@@ -187,7 +186,6 @@ std::shared_ptr<SourceEntry> getSource(const RecompileRequest& request) {
         if (found != sources.end()) source = found->second;
     }
     if (source == nullptr) {
-        // The key covers every input the stage input info reads: one check per source.
         static_cast<void>(BuildShaderStageInputInfo(toShaderStageKind(request.shader.stage), request.context, request.target.subgroupSize));
         std::unique_lock lock(mutex);
         const auto found = sources.find(key);
@@ -200,7 +198,6 @@ std::shared_ptr<SourceEntry> getSource(const RecompileRequest& request) {
     {
         std::lock_guard lock(source->mutex);
         if (source->plan == nullptr) {
-            // Preparing is the costly part of a new shader: the compile's copy comes alongside.
             auto spare = std::async(std::launch::async, [&request] { return PrepareResourceProgram(request); });
             source->plan = makeResourcePlan(request);
             source->spare = std::make_unique<IrProgram>(spare.get());

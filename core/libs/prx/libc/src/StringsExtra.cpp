@@ -7,7 +7,6 @@
 #include <cwchar>
 #include <stdexcept>
 
-// Bounds-checked (Annex K) and wide-string functions. Guest wchar_t is 32-bit like the host's.
 namespace {
 constexpr int InvalidArgument = 22, OutOfRange = 34;
 }
@@ -23,7 +22,6 @@ int APS5_VABI strcpy_s_nid_postfix(char* destination, size_t size, const char* s
     return 0;
 }
 
-// Returns the length written, or -1 when the buffer would overflow (the buffer is emptied).
 int APS5_VABI snprintf_s_nid_postfix(char* buffer, size_t size, const char* format, ...) {
     if (buffer == nullptr || format == nullptr || size == 0) throw std::invalid_argument("snprintf_s: invalid argument");
     std::va_list arguments;

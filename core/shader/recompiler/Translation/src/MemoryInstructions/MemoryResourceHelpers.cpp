@@ -143,9 +143,6 @@ void TranslationContext::writeImageComponents(const RdnaOperand& dst, IrValue* v
 }
 
 TranslationContext::BufferAddress TranslationContext::readBufferAddress(const RdnaInstruction& inst) {
-    // MUBUF/MTBUF operands (loads, stores and atomics alike): source0 is VADDR, one VGPR for the
-    // index (IDXEN) or the offset (OFFEN) and two when both are enabled, source1 is the resource
-    // descriptor and source2 is SOFFSET.
     const RdnaOperand& vaddr = sourceAt(inst, 0u);
     std::uint32_t component = 0u;
     const IrU32 index = inst.idxen ? readU32(offsetOperand(vaddr, component++)) : IrU32(ir.Constant(0u));

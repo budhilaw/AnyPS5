@@ -15,7 +15,6 @@ void FileWriter::Write(const std::string& path, const std::vector<std::uint8_t>&
         throw Domain::RelinkerException("Failed to write file: " + path);
     f.close();
 #if !defined(_WIN32)
-    // Relinked executables are run directly on Linux and macOS.
     std::error_code error;
     std::filesystem::permissions(path, std::filesystem::perms::owner_exec | std::filesystem::perms::group_exec | std::filesystem::perms::others_exec, std::filesystem::perm_options::add, error);
     if (error)

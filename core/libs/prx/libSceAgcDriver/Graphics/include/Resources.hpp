@@ -9,9 +9,6 @@ namespace AgcDriver::Graphics {
 class Buffer {
 public:
     Buffer(const Context& context, std::size_t size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-    // A buffer over imported host memory (VK_EXT_external_memory_host): `importBytes` bytes at
-    // `host` (both aligned to Context::hostPointerAlignment) back it; the buffer covers `size`
-    // bytes from `offset` into them. Bytes() is that host memory itself.
     struct HostImport {};
     Buffer(const Context& context, HostImport, void* host, std::size_t importBytes, std::size_t offset, std::size_t size, VkBufferUsageFlags usage);
     ~Buffer();
@@ -40,7 +37,6 @@ private:
     std::shared_ptr<BufferPool> cache;
 };
 
-// The linear (non-sRGB) counterpart of a color format.
 VkFormat StorageFormat(VkFormat format);
 
 class RenderTarget {
@@ -51,7 +47,6 @@ public:
     RenderTarget& operator=(const RenderTarget&) = delete;
     VkImage Image() const;
     VkImageView View() const;
-    // Shader stores through a storage view are possible (the format supports storage images).
     bool StorageCapable() const { return storageCapable; }
 
 private:
@@ -63,7 +58,6 @@ private:
     bool storageCapable = false;
 };
 
-// A GPU-only depth/stencil attachment image.
 class DepthImage {
 public:
     DepthImage(const Context& context, const DepthTarget& target);
@@ -74,14 +68,9 @@ public:
     VkImageView View() const { return view; }
     VkImageAspectFlags Aspects() const { return aspects; }
     const DepthTarget& Description() const { return target; }
-    // Moves the image into the attachment layout (first use starts undefined); every draw
-    // prepares it, so this also counts the generations that sampled copies compare against.
     void Prepare(VkCommandBuffer commands);
-    // Whether a draw in the open render pass can use it as is (Prepare would record nothing but
-    // the barrier the pass makes redundant); Continue then counts the draw's generation.
     bool Attached() const { return layout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL; }
     void Continue() { ++generation; }
-    // Moves the image into another layout (copies for sampling).
     void Transition(VkCommandBuffer commands, VkImageLayout newLayout);
     std::uint64_t Generation() const { return generation; }
 
@@ -118,7 +107,6 @@ private:
     bool pending = false;
     bool submitted = false;
 public:
-    // When the batch was submitted and when the host saw it complete (a GPU time estimate).
     std::chrono::nanoseconds submittedAt{};
     std::chrono::nanoseconds completedAt{};
 private:

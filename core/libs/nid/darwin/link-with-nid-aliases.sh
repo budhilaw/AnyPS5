@@ -1,11 +1,4 @@
 #!/bin/sh
-# Link wrapper for AnyPS5 shared libraries on macOS.
-#
-# nid_patcher rewrites ELF and PE export tables after linking; Mach-O export tries are not
-# patched in place. Instead this wrapper computes the NID names from the object files' exported
-# symbols and links with an ld64 alias list, so each library exports both spellings.
-#
-# Usage: link-with-nid-aliases.sh <nid_patcher> <compiler and link arguments...>
 set -e
 patcher="$1"; shift
 output=""; objects=""; previous=""

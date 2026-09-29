@@ -5,8 +5,6 @@
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 
-// PSN authentication on the host behaves like a console whose user is signed out: requests are
-// created and complete immediately with the signed-out error.
 namespace {
 
 constexpr int SCE_NP_ERROR_INVALID_ARGUMENT = static_cast<int>(0x80550003);
@@ -46,7 +44,7 @@ int APS5_VABI sceNpAuthPollAsync(int req_id, int* result) {
     if (result == nullptr) return SCE_NP_ERROR_INVALID_ARGUMENT;
     if (!validRequest(req_id)) return SCE_NP_ERROR_REQUEST_NOT_FOUND;
     *result = SCE_NP_ERROR_SIGNED_OUT;
-    return 0; // completed
+    return 0;
 }
 
 int APS5_VABI sceNpAuthWaitAsync(int req_id, int* result) { return sceNpAuthPollAsync(req_id, result); }

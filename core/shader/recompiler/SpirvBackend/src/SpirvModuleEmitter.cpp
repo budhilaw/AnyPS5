@@ -150,7 +150,7 @@ std::uint32_t EmitAttributeValue(SpirvEmitterState& state, std::uint32_t attr, s
 std::uint32_t EmitInterpolationParameterValue(SpirvEmitterState& state, std::uint32_t attr, std::uint32_t chan, std::uint32_t mode) {
     const auto* input = SpirvInputBindingForParameter(state, attr);
     if (input == nullptr) {
-        return ConstantU32(state, 0u); // an attribute past the exported parameters reads zero
+        return ConstantU32(state, 0u);
     }
     if (!input->perVertex) {
         return EmitAttributeValue(state, attr, chan);

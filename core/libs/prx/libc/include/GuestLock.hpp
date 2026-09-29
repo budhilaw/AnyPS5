@@ -7,16 +7,12 @@
 #include <cstdint>
 #include <thread>
 
-// The standard timed mutexes wrap every call in an internal mutex and condition variable, which
-// title threads contend on. Timed acquisition is rare, so it polls.
 class GuestLock {
 public:
-    // Not os_unfair_lock: titles may release a plain mutex from another thread, which it aborts on.
     bool try_lock() noexcept {
         std::uint32_t expected = 0;
         return word.compare_exchange_strong(expected, 1, std::memory_order_acquire, std::memory_order_relaxed);
     }
-    // 0 free, 1 held, 2 held with sleepers waiting on the word.
     void lock() noexcept {
         if (try_lock()) return;
         while (word.exchange(2, std::memory_order_acquire) != 0) word.wait(2, std::memory_order_relaxed);
@@ -46,7 +42,6 @@ private:
     std::atomic<std::uint32_t> word{0};
 };
 
-// A GuestLock its owner may take again, as a recursive guest mutex needs.
 class RecursiveGuestLock {
 public:
     bool try_lock() noexcept {

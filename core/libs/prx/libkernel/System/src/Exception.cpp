@@ -22,11 +22,6 @@
 
 extern "C" Pthread KernelCurrentThreadRecord();
 
-// Guest signals. Titles register handlers with sceKernelInstallExceptionHandler and raise them
-// in other threads with sceKernelRaiseException; the il2cpp garbage collector stops the world
-// this way (SIGUSR1 suspends, SIGUSR2 resumes). Delivery uses one host signal: the guest signal
-// number is queued on the target's record, the host handler runs on that thread, converts the
-// host context into the console's ucontext layout and calls the guest handler with it.
 namespace {
 
 constexpr int SCE_KERNEL_ERROR_EINVAL = static_cast<int>(0x80020016);
@@ -34,7 +29,6 @@ constexpr int SCE_KERNEL_ERROR_ESRCH = static_cast<int>(0x80020003);
 constexpr int SCE_KERNEL_ERROR_EAGAIN = static_cast<int>(0x80020023);
 constexpr int SignalCount = 32;
 
-// FreeBSD amd64 mcontext as the console exposes it (rip at 0xa0, rsp at 0xf8).
 struct GuestMcontext {
     std::uint64_t onstack, rdi, rsi, rdx, rcx, r8, r9, rax, rbx, rbp, r10, r11, r12, r13, r14, r15;
     std::int32_t trapno;
@@ -134,9 +128,6 @@ void installHostHandler() {
     if (sigaction(HostDeliverySignal, &action, nullptr) != 0) throw std::runtime_error("sceKernelRaiseException: cannot install the host signal handler");
 }
 
-// A hardware fault (null dereference, bus error) goes to the title's handler for the signal the
-// console would raise, with the faulting context; the handler may redirect execution (il2cpp
-// points rip at its managed-exception thrower), which the host context then follows.
 bool deliverFault(int signal, siginfo_t* info, void* opaque) {
     const int signum = signal == SIGBUS ? 10 : signal == SIGSEGV ? 11 : signal == SIGFPE ? 8 : signal == SIGILL ? 4 : 0;
     if (signum == 0) return false;
@@ -145,15 +136,14 @@ bool deliverFault(int signal, siginfo_t* info, void* opaque) {
     auto* host = static_cast<ucontext_t*>(opaque);
     GuestUcontext context = fromHost(host);
     context.mcontext.addr = reinterpret_cast<std::uint64_t>(info->si_addr);
-    context.mcontext.trapno = signal == SIGSEGV || signal == SIGBUS ? 12 : 0; // T_PAGEFLT
+    context.mcontext.trapno = signal == SIGSEGV || signal == SIGBUS ? 12 : 0;
     const GuestMcontext before = context.mcontext;
     handler(signum, &context);
-    if (std::memcmp(&before, &context.mcontext, offsetof(GuestMcontext, reserved)) == 0 && before.rsp == context.mcontext.rsp) return false; // the handler did not resume elsewhere: the fault stands
+    if (std::memcmp(&before, &context.mcontext, offsetof(GuestMcontext, reserved)) == 0 && before.rsp == context.mcontext.rsp) return false;
     toHost(host, context);
     return true;
 }
 
-// Runs a guest handler on the calling thread with a context describing the call site.
 void deliverToSelf(int signum, GuestHandler handler) {
     GuestUcontext context{};
     auto& m = context.mcontext;
@@ -209,8 +199,6 @@ int APS5_VABI sceKernelRaiseException(Pthread thread, int signum) {
         thread->pendingSignals.fetch_and(~(1u << signum), std::memory_order_acq_rel);
         return SCE_KERNEL_ERROR_ESRCH;
     }
-    // A stop-the-world collector expects the handler to have started before it waits on its own
-    // acknowledgement, so give the target a bounded chance to take the signal.
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2);
     while ((thread->pendingSignals.load(std::memory_order_acquire) & (1u << signum)) != 0 && std::chrono::steady_clock::now() < deadline) std::this_thread::sleep_for(std::chrono::microseconds(50));
     return 0;

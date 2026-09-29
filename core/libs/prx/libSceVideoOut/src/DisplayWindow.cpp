@@ -112,7 +112,6 @@ void DisplayWindow::UpdateTitle() {
         fpsStart = now;
         fpsFrames = 0;
     }
-    // Setting the title is a round trip to the main thread: twice a second is plenty.
     static std::uint64_t lastUpdate = 0;
     if (lastUpdate != 0 && now - lastUpdate < frequency / 2) return;
     lastUpdate = now;

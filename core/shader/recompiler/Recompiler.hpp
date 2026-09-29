@@ -37,8 +37,6 @@ struct ShaderBinary {
     std::span<const std::uint32_t> code;
     std::uint64_t headerAddress;
     std::span<const std::byte> header;
-    // Nonzero: a hash of `code` the caller computed once, which cache keys use in place of the
-    // code itself (it runs to the end of the registered binary: kilobytes per lookup otherwise).
     std::uint64_t codeHash = 0;
 };
 
@@ -71,7 +69,7 @@ struct ShaderPixelStageInfo {
     bool executeOnNoop;
     std::array<std::uint8_t, 8> targetOutputMode;
     std::array<std::uint8_t, 8> targetExportMapping;
-    bool dualSourceBlend = false;  // DB_SHADER_CONTROL.DUAL_EXPORT_ENABLE: MRT1 is blend source 1
+    bool dualSourceBlend = false;
 };
 
 struct ShaderVertexBufferResource {
@@ -140,8 +138,6 @@ struct SpirvTarget {
     std::uint32_t maxWorkgroupSharedMemoryBytes;
     std::optional<MeshTargetLimits> mesh;
     std::optional<TessellationTargetLimits> tessellation;
-    // Bit (1 << ShaderStage) set for each stage the device supports subgroup operations in; a
-    // stage without them is emitted as single-lane waves (no cross-lane communication).
     std::uint32_t subgroupStageMask = 0xffffffffu;
 };
 
@@ -210,11 +206,8 @@ struct RecompileRequest {
     BindingLayout layout;
     std::optional<GraphicsCompileContext> graphics;
     bool useCache = true;
-    // The request's resources as the caller materialized them from the same memory (reading
-    // them is how it captured that memory): a cached compile skips evaluating its plan again.
     const ResourceSnapshot* materializedSnapshot = nullptr;
     const ResourceSpecialization* materializedSpecialization = nullptr;
-    // The cache entry GetResourcePlan found for this request: the compile skips looking it up.
     std::shared_ptr<void> source;
 };
 
@@ -255,9 +248,7 @@ struct DescriptorBinding {
     std::uint32_t count;
     std::vector<std::uint32_t> guestDescriptor;
     bool readOnly = false;
-    // GuestBuffers: whether the shader stores to (or atomically updates) each element.
     std::vector<bool> elementWritten;
-    // GuestBuffers: whether the shader loads from (or atomically updates) each element.
     std::vector<bool> elementRead;
     std::optional<DescriptorImageShape> imageShape;
     std::vector<bool> samplerDepthCompare;
@@ -277,7 +268,6 @@ struct FragmentParameter {
     bool perVertex;
 };
 
-// SPIR-V words shared by the copies of a compiled result: a cache hit copies one per draw.
 class SpirvCode {
 public:
     SpirvCode() = default;
@@ -287,7 +277,6 @@ public:
         return words ? *words : none;
     }
     operator const std::vector<std::uint32_t>&() const { return Words(); }
-    // Words of this copy alone, to change.
     std::vector<std::uint32_t>& Edit() {
         if (!words) words = std::make_shared<std::vector<std::uint32_t>>();
         else if (words.use_count() > 1) words = std::make_shared<std::vector<std::uint32_t>>(*words);
@@ -307,8 +296,6 @@ private:
 
 struct RecompileResult {
     SpirvCode spirv;
-    // Nonzero: identifies `spirv` (with its size) for host caches, computed once per compiled
-    // variant so draws need not hash the module again.
     std::uint64_t spirvHash = 0;
     std::vector<DescriptorBinding> bindings;
     std::vector<std::byte> pushConstants;

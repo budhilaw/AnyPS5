@@ -86,7 +86,6 @@ std::uint32_t SpirvValueEmitContext::HalfArg(const IrValue& inst, std::size_t in
 std::uint32_t SpirvValueEmitContext::Ballot(const IrValue* predicate) {
     const auto ballotType = TypeU32Vector(state, 4u);
     if (state.singleLane) {
-        // Lane 0 is the only lane: the ballot is bit 0 of the predicate.
         const auto bit = state.module.AllocateId();
         const auto ballot = state.module.AllocateId();
         state.module.AddFunction(spv::OpSelect, TypeU32(state), bit, Def(predicate), ConstantU32(state, 1u), ConstantU32(state, 0u));
@@ -133,7 +132,7 @@ std::uint32_t SpirvValueEmitContext::FirstLane(std::uint32_t ballot) {
 }
 
 std::uint32_t SpirvValueEmitContext::Shuffle(const IrValue& inst, std::size_t index, std::uint32_t lane) {
-    if (state.singleLane) return Arg(inst, index); // only the caller's own lane exists
+    if (state.singleLane) return Arg(inst, index);
     const auto type = TypeId(state, inst.Argument(index)->Type());
     const auto scope = ConstantU32(state, spv::ScopeSubgroup);
     const auto low = state.module.AllocateId();

@@ -26,7 +26,6 @@ TextureCache::TextureCache(const Context& context) : context(context), budget(40
 
 void TextureCache::trim() {
     for (auto it = entries.begin(); it != entries.end() && (retainedBytes > budget || entries.size() > maxEntries);) {
-        // An image owner stays while views of it exist (they hold it).
         if (it->texture.use_count() != 1) {
             ++it;
             continue;
@@ -60,7 +59,6 @@ void TextureCache::addEntry(Entry entry) {
 }
 
 std::list<TextureCache::Entry>::iterator TextureCache::findEntry(const std::array<std::uint32_t, 8>& descriptor, TextureDimension viewDimension) {
-    // Entries of surfaces the guest rewrote go when met; a periodic sweep collects the others.
     if (++lookupsSinceSweep >= 1024) {
         lookupsSinceSweep = 0;
         for (auto it = entries.begin(); it != entries.end();) it = it->surface && it->surface->stale ? eraseEntry(it) : std::next(it);
@@ -90,8 +88,6 @@ std::shared_ptr<Texture> TextureCache::Get(std::span<const std::uint32_t> words,
     std::copy(words.begin(), words.end(), key.begin());
     std::shared_ptr<DepthImage> depthSource;
     if (resource.tileMode == TextureTileMode::Depth64KB) {
-        // Depth swizzled textures only exist as resident depth images: the host never keeps
-        // depth in guest memory.
         bool stencil = false;
         depthSource = context.renderCache ? context.renderCache->FindDepth(resource.baseAddress, &stencil) : nullptr;
         if (depthSource == nullptr) {
@@ -116,12 +112,9 @@ std::shared_ptr<Texture> TextureCache::Get(std::span<const std::uint32_t> words,
         return texture;
     }
     auto source = context.renderCache ? context.renderCache->Find(resource.baseAddress) : nullptr;
-    // A 1D descriptor of a one-row target samples a copy of the row (no 1D view of a 2D image).
     bool rowCopy = false;
     if (source) {
         const auto& color = source->Description();
-        // Shader access happens in the general layout; the transition joins the pending batch so
-        // it follows the draws and dispatches recorded before it.
         if (source->Layout() != VK_IMAGE_LAYOUT_GENERAL && context.drawQueue != nullptr) source->Transition(context.drawQueue->BeginBarrier(context), VK_IMAGE_LAYOUT_GENERAL);
         const auto compatibleTiling = (color.tileMode == ColorTileMode::RenderTarget && resource.tileMode == TextureTileMode::RenderTarget64KB) || (color.tileMode == ColorTileMode::Linear && resource.tileMode == TextureTileMode::kLinear) || (color.tileMode == ColorTileMode::ZOrder64KB && resource.tileMode == TextureTileMode::Depth64KB);
         const bool singleSlice = resource.dimension == TextureDimension::k2D || (resource.dimension == TextureDimension::k2DArray && resource.depthOrLastArray == 0);
@@ -135,15 +128,12 @@ std::shared_ptr<Texture> TextureCache::Get(std::span<const std::uint32_t> words,
     static const bool traceTextures = std::getenv("ANYPS5_TRACE_TEXTURES") != nullptr;
     if (auto it = findEntry(key, resource.viewDimension); it != entries.end()) do {
         if (source || it->generation != 0) {
-            // A direct view stays valid while the target keeps its image (draws in between do not
-            // matter: the view reads the image itself).
             if (source && it->source.lock() == source && it->texture->IsDirectView() && it->texture->Image() == source->Target().Image()) {
                 auto result = it->texture;
                 entries.splice(entries.end(), entries, it);
                 timing.Mark("resident_hit");
                 return result;
             }
-            // A copy is current until the target is drawn to again.
             if (source && rowCopy && it->source.lock() == source && !it->texture->IsDirectView() && it->generation == source->Generation()) {
                 auto result = it->texture;
                 entries.splice(entries.end(), entries, it);
@@ -155,8 +145,6 @@ std::shared_ptr<Texture> TextureCache::Get(std::span<const std::uint32_t> words,
         }
         Require(it->surface != nullptr, "texture cache entry has no surface");
         auto& surface = *it->surface;
-        // Unchanged guest memory (no CPU write reached its pages since the snapshot) needs no
-        // comparison; otherwise the bytes decide, and a matching surface is stamped again.
         const auto end = resource.baseAddress + surface.snapshot.size();
         if (context.guestBufferCache != nullptr && surface.stamp != 0 && context.guestBufferCache->Current(resource.baseAddress, end, surface.stamp)) {
             auto result = it->texture;
@@ -176,7 +164,6 @@ std::shared_ptr<Texture> TextureCache::Get(std::span<const std::uint32_t> words,
             timing.Mark("memcmp_hit");
             return result;
         }
-        // The guest rewrote the surface: this view and every other one of it are stale.
         surface.stale = true;
         eraseEntry(it);
         break;
@@ -196,9 +183,6 @@ std::shared_ptr<Texture> TextureCache::Get(std::span<const std::uint32_t> words,
         timing.Mark("resident_view");
         return texture;
     }
-    // Another descriptor already brought this surface onto the device: view its image, so shader
-    // stores through either descriptor (mip chains written level by level, for instance) are seen
-    // through the other.
     for (auto it = entries.begin(); it != entries.end();) {
         if (it->surface && it->surface->stale) {
             it = eraseEntry(it);
@@ -237,7 +221,6 @@ std::shared_ptr<Texture> TextureCache::Get(std::span<const std::uint32_t> words,
         }
         if (reported++ < 6000) APS5_LOG_OUT("texture 0x%llx (%llu bytes, format 0x%x %ux%u mips %u layers %u) detiled", static_cast<unsigned long long>(resource.baseAddress), static_cast<unsigned long long>(bytes), resource.format, resource.width, resource.height, resource.mipCount, layers);
     }
-    // Track before reading: a write during the read ages the pages, so the stamp is not trusted.
     const auto stamp = context.guestBufferCache != nullptr ? context.guestBufferCache->Track(resource.baseAddress, resource.baseAddress + bytes) : 0;
     GuestMemory::Read(resource.baseAddress, snapshot, 1);
     auto texture = std::make_shared<Texture>(context, *context.detiler, resource, components, snapshot);
@@ -256,7 +239,6 @@ std::shared_ptr<Texture> TextureCache::Get(std::span<const std::uint32_t> words,
 }
 
 namespace {
-// The base level, layer 0 of a texture as tightly packed texels.
 std::vector<unsigned char> ReadbackTexture(const Context& context, const Texture& texture) {
     const auto texel = texture.GuestTexelBytes();
     const auto extent = texture.Extent();
@@ -305,7 +287,6 @@ std::string TextureCache::DescribeContents(const Texture& texture) {
         for (std::uint32_t b = 0; b < texel; ++b) any = any || data[at + b] != 0;
         nonzero += any;
     }
-    // Texels at spread positions (start, quarter, centre, three quarters, last).
     std::string samples;
     const auto extent = texture.Extent();
     for (const auto [fx, fy] : {std::pair{0.0, 0.0}, std::pair{0.25, 0.25}, std::pair{0.5, 0.5}, std::pair{0.33, 0.66}, std::pair{0.75, 0.75}}) {
@@ -316,7 +297,6 @@ std::string TextureCache::DescribeContents(const Texture& texture) {
         for (std::uint32_t b = texel; b-- > 0;) { char h[4]; std::snprintf(h, sizeof(h), "%02x", data[at + b]); samples += h; }
         char where[40]; std::snprintf(where, sizeof(where), "@%zu,%zu", x, y); samples += where;
     }
-    // Packed float formats: per-channel maxima and non-finite counts.
     std::string stats;
     const auto format = texture.GuestFormat();
     if (format == VK_FORMAT_B10G11R11_UFLOAT_PACK32 || format == VK_FORMAT_R16G16B16A16_SFLOAT || format == VK_FORMAT_R16_SFLOAT) {
@@ -346,7 +326,6 @@ std::string TextureCache::DescribeContents(const Texture& texture) {
         std::snprintf(item, sizeof(item), " max(%.4g %.4g %.4g %.4g) nonfinite %zu;", maxima[0], maxima[1], maxima[2], maxima[3], nonFinite);
         stats = item;
     }
-    // Small half-float textures: the first texels of the first rows, decoded.
     std::string rows;
     if (format == VK_FORMAT_R16G16B16A16_SFLOAT && extent.width <= 64 && extent.height <= 64) {
         const auto miniFloat = [](std::uint32_t bits, std::uint32_t mantissaBits) -> double {
@@ -381,7 +360,6 @@ void TextureCache::DumpTextures(const std::string& prefix) {
         if (texture.Image() == VK_NULL_HANDLE) continue;
         if (texel == 0) {
             ++compressed;
-            // Block-compressed: report whether the image and its guest bytes hold anything.
             const auto blockExtent = texture.Extent();
             const std::size_t blockBytes = static_cast<std::size_t>((blockExtent.width + 3) / 4) * ((blockExtent.height + 3) / 4) * 16;
             const std::vector<int> blocks(blockBytes);
@@ -418,10 +396,8 @@ void TextureCache::DumpTextures(const std::string& prefix) {
             const auto* line = data + static_cast<std::size_t>(y) * width * texel;
             for (std::uint32_t x = 0; x < width; ++x) {
                 if (texel == 8) {
-                    // 16-bit channels (float or normalized): take the high byte as an approximation.
                     row[x * 4] = line[x * 8 + 5]; row[x * 4 + 1] = line[x * 8 + 3]; row[x * 4 + 2] = line[x * 8 + 1]; row[x * 4 + 3] = 255;
                 } else if (texel == 2) {
-                    // One 16-bit channel as grey (the high byte).
                     row[x * 4] = row[x * 4 + 1] = row[x * 4 + 2] = line[x * 2 + 1]; row[x * 4 + 3] = 255;
                 } else if (texel == 1) {
                     row[x * 4] = row[x * 4 + 1] = row[x * 4 + 2] = line[x]; row[x * 4 + 3] = 255;

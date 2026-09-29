@@ -9,9 +9,6 @@
 #include "prx/libc/include/General.hpp"
 #include "prx/libkernel/Equeue/Equeue.hpp"
 
-// GPU interrupt events: a title registers (queue, id) pairs, and an end-of-pipe release that
-// requests an interrupt wakes every registered pair with the release's context id as the
-// event data (see Pm4 RELEASE_MEM execution in the driver).
 namespace {
 
 struct Registration {
@@ -58,7 +55,7 @@ int APS5_VABI sceAgcDriverAddEqEvent(KernelEqueue eq, int id, void* udata) {
     event.event.data = id;
     event.filter.triggerFunc = [](KernelEqueueEvent* e, void* data) {
         e->triggered = true;
-        e->event.data = static_cast<intptr_t>(reinterpret_cast<std::uintptr_t>(data)); // the release's context id
+        e->event.data = static_cast<intptr_t>(reinterpret_cast<std::uintptr_t>(data));
     };
     const auto result = EqueueAddEvent_nid_postfix(eq, event);
     if (result != EQUEUE_OK) return result;

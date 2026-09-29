@@ -5,8 +5,6 @@
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 
-// SSL contexts are bookkeeping only: no connection is ever made on the host, so certificate
-// queries report that there is nothing to inspect.
 namespace {
 
 constexpr int SCE_SSL_ERROR_INVALID_ID = static_cast<int>(0x80435003);
@@ -38,7 +36,6 @@ int APS5_VABI sceSslGetMemoryPoolStats_nid_postfix(int ssl_ctx_id, void* stats) 
     if (stats == nullptr) return SCE_SSL_ERROR_INVALID_VALUE;
     std::lock_guard lock(mutex);
     if (contexts.count(ssl_ctx_id) == 0) return SCE_SSL_ERROR_INVALID_ID;
-    // {pool size, current in use, max in use} as reported by the console.
     auto* words = static_cast<std::uint64_t*>(stats);
     words[0] = 0; words[1] = 0; words[2] = 0;
     return 0;

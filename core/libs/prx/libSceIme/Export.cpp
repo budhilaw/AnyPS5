@@ -6,9 +6,6 @@
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 
-// The input method editor: the physical keyboard part opens and reports one connected keyboard;
-// the on-screen keyboard has no host dialog, so opening it succeeds and the title sees no text
-// events until it closes the panel. Events are delivered from sceImeUpdate on the caller's thread.
 namespace {
 
 constexpr int SCE_IME_ERROR_BUSY = static_cast<int>(0x80BC0001);

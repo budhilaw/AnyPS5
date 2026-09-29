@@ -43,9 +43,6 @@ inline void FillRegSaveArea(
     regs.fp[7] = fp7;
 }
 
-// The console's printf prints "(null)" for a null %s argument; the host's would fault. Walks the
-// conversions of `format` the way va_arg would and replaces every null string argument in the
-// register save area or the overflow area (the caller's own outgoing argument slots).
 inline void ReplaceNullStrings(const char* format, VaListLayout& layout) {
     if (format == nullptr) return;
     static const char* const placeholder = "(null)";
@@ -73,7 +70,7 @@ inline void ReplaceNullStrings(const char* format, VaListLayout& layout) {
         case 'd': case 'i': case 'o': case 'u': case 'x': case 'X': case 'c': case 'p': case 'n': gpSlot(); break;
         case 's': { auto* slot = gpSlot(); if (*slot == 0) *slot = reinterpret_cast<std::uint64_t>(placeholder); break; }
         case 'e': case 'E': case 'f': case 'F': case 'g': case 'G': case 'a': case 'A': fpSlot(longDouble); break;
-        default: return; // unknown conversion: the layout past it is unknowable
+        default: return;
         }
     }
 }

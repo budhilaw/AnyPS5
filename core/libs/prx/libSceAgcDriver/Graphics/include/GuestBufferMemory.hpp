@@ -18,23 +18,16 @@ struct GuestMemorySnapshot {
 
 class GuestBufferMemory {
 public:
-    // Guest buffer views start at addresses aligned to this, which covers every Vulkan device's
-    // storage buffer offset alignment (at most 256); the shader adds the residue itself.
     static constexpr std::uint64_t ViewAlignment = 256;
     explicit GuestBufferMemory(const Context& context);
     void AcquireRegistered();
-    // `checked`: the caller already range-checked it the same way.
     void AddWritable(std::uint64_t address, std::size_t bytes, bool checked = false);
-    // A buffer the shader only reads: uploaded from guest memory, never written back.
     void AddReadOnly(std::uint64_t address, std::size_t bytes, bool checked = false);
     void AddSnapshot(const GuestMemorySnapshot& snapshot);
     void Upload(bool addressable);
     VkDescriptorBufferInfo Descriptor(std::uint64_t address, std::size_t bytes) const;
     std::vector<ShaderRecompiler::BdaAbi::Range> AddressRanges() const;
-    // `sequence` orders the work in the draw queue: resident render targets the GPU refreshed
-    // from guest memory after it already hold what it wrote in place (their watch is skipped).
     void WriteBack(std::uint64_t sequence = std::numeric_limits<std::uint64_t>::max());
-    // Whether writes the host copies back after completion (not in place) overlap the range.
     bool WritesOverlapCopied(std::uint64_t address, std::size_t bytes) const;
     bool WritesOverlap(std::uint64_t address, std::size_t bytes) const;
     bool HasWrites() const { return !writes.empty(); }
@@ -45,17 +38,14 @@ private:
         std::uint64_t begin;
         std::uint64_t end;
         bool writable;
-        bool fromGuest = false;  // read-only contents come from guest memory (no snapshot)
+        bool fromGuest = false;
         std::vector<std::byte> snapshot;
         std::shared_ptr<Buffer> buffer;
-        std::shared_ptr<GuestBufferCache::Mirror> mirror;  // set when the buffer is a cached mirror
-        // The buffer starts `padding` bytes before `begin` so that views taken from 256-byte
-        // aligned guest addresses satisfy any storage buffer offset alignment.
+        std::shared_ptr<GuestBufferCache::Mirror> mirror;
         std::uint64_t padding = 0;
-        // Where `begin - padding` lies in `buffer` (a whole imported guest mapping is shared).
         std::uint64_t bufferOffset = 0;
-        bool inPlace = false;  // the buffer is guest memory itself (no copy in either direction)
-        std::shared_ptr<const GuestAllocations::Range> image;  // read-only image data, copied once per registration
+        bool inPlace = false;
+        std::shared_ptr<const GuestAllocations::Range> image;
     };
 
     void validate(std::uint64_t address, std::size_t bytes) const;
@@ -68,7 +58,7 @@ private:
         std::size_t bytes;
         bool writable;
     };
-    std::vector<Access> accesses;  // guest ranges added, resolved for the device at upload
+    std::vector<Access> accesses;
     bool uploaded = false;
     bool committed = false;
 };

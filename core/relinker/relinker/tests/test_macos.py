@@ -15,9 +15,9 @@ def fixture():
     image = bytearray(0x2000)
     image[:16] = b"\x7fELF\x02\x01\x01" + bytes(9)
     struct.pack_into("<HHIQQQIHHHHHH", image, 16, 3, 62, 1, 0x200, 64, 0, 0, 64, 56, 3, 64, 0, 0)
-    image[0x200:0x206] = b"\xff\x25" + struct.pack("<i", 0x1300 - 0x206)  # jmp *pointer(%rip)
-    image[0x210:0x216] = b"\xb8\x2a\x00\x00\x00\xc3"                 # mov $42, %eax; ret
-    struct.pack_into("<QQq", image, 0x1700, 0x1300, 8, 0x210)             # R_X86_64_RELATIVE at 0x1300
+    image[0x200:0x206] = b"\xff\x25" + struct.pack("<i", 0x1300 - 0x206)
+    image[0x210:0x216] = b"\xb8\x2a\x00\x00\x00\xc3"
+    struct.pack_into("<QQq", image, 0x1700, 0x1300, 8, 0x210)
     tags = [(5, 0x1600), (10, 1), (6, 0x1620), (11, 24), (7, 0x1700), (8, 24), (9, 24), (0, 0)]
     struct.pack_into("<IIQQQQQQ", image, 64, 1, 5, 0, 0, 0, 0x1000, 0x1000, 0x1000)
     struct.pack_into("<IIQQQQQQ", image, 120, 1, 6, 0x1000, 0x1000, 0x1000, 0x1000, 0x1000, 0x1000)
@@ -52,7 +52,6 @@ def main():
             print("macOS target tests passed (executed under the x86-64 runtime)")
         else:
             print("macOS target tests passed (conversion only)")
-        # Guest TLS access without a PT_TLS is refused, as on Windows.
         data = fixture()
         data[0x210:0x21a] = bytes.fromhex("64 48 8b 04 25 00 00 00 00 c3")
         struct.pack_into("<i", data, 0x202, 0x1300 - 0x206)

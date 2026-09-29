@@ -28,14 +28,10 @@ function(configure_windows_unwind target)
 endfunction()
 
 if(APPLE AND ANYPS5_HOST_X86_64)
-    # The guest unwinder (libc exceptions/Unwind.cpp) reads DWARF frame descriptions; ld64 would
-    # otherwise drop them for every function that compact unwind can describe. Only the x86-64
-    # build runs guest code; arm64 libunwind needs the compact tables.
     add_link_options(-Wl,-no_compact_unwind)
 endif()
 
 if(APPLE)
-    # Mach-O libraries get their NID exports at link time through an alias list (see nid/darwin).
     set(CMAKE_CXX_CREATE_SHARED_LIBRARY "${CMAKE_CURRENT_SOURCE_DIR}/nid/darwin/link-with-nid-aliases.sh ${CMAKE_CURRENT_BINARY_DIR}/nid_patcher ${CMAKE_CXX_CREATE_SHARED_LIBRARY}")
     set(CMAKE_C_CREATE_SHARED_LIBRARY "${CMAKE_CURRENT_SOURCE_DIR}/nid/darwin/link-with-nid-aliases.sh ${CMAKE_CURRENT_BINARY_DIR}/nid_patcher ${CMAKE_C_CREATE_SHARED_LIBRARY}")
 endif()
@@ -63,9 +59,6 @@ set_target_properties(libc PROPERTIES
 set(LIBC_UNPATCHED ${UNPATCHED_DIR}/libc.prx)
 set(LIBC_PATCHED ${PATCHED_DIR}/libc.prx)
 
-# nid_patcher rewrites ELF and PE export tables. Mach-O export tries are not supported yet, so on
-# macOS the libraries keep their source symbol names (see docs/TechnicalDebt.md); only a relinked
-# guest would notice, and no Mach-O relinker output exists either.
 if(APPLE)
     set(NID_PATCH_LIBC_COMMAND ${CMAKE_COMMAND} -E echo "NID patching skipped for libc: Mach-O export patching is not implemented")
     set(NID_PATCH_COMMENT_PREFIX "Copying (unpatched) ")
@@ -261,7 +254,6 @@ if(BUILD_TESTING)
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
     if(ANYPS5_GUEST_ABI)
-        # Exercises the guest printf family, which marshals the SysV x86-64 va_list.
         add_executable(guest_standard_stream_tests tests/GuestStandardStreams.cpp)
         target_include_directories(guest_standard_stream_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
         target_link_libraries(guest_standard_stream_tests PRIVATE libc)

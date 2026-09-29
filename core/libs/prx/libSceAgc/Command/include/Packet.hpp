@@ -10,7 +10,6 @@ namespace Agc::Command {
 void Require(bool condition, const char* function, const char* reason);
 void CheckBits(std::uint64_t value, std::uint64_t mask, const char* function);
 void CheckAddress(std::uint64_t address, std::uint32_t alignment, const char* function);
-// Like CheckAddress, but a null address is accepted: the title patches it in later.
 void CheckPatchableAddress(std::uint64_t address, std::uint32_t alignment, const char* function);
 std::uint32_t Header(std::uint32_t opcode, std::uint32_t count, std::uint32_t flags = 0);
 void Reserve(CommandBuffer* buffer, std::uint32_t count, const char* function);

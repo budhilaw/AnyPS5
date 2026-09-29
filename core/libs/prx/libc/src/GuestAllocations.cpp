@@ -26,7 +26,7 @@ struct Registry {
     std::recursive_mutex& mutex = GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix();
     std::map<std::uint64_t, std::shared_ptr<const Range>> ranges;
     bool mainImageRegistered = false;
-    std::uint32_t registeredImageCount = 0; // Apple: dyld image count at the last guest image scan
+    std::uint32_t registeredImageCount = 0;
 };
 
 Registry& registry() {
@@ -87,9 +87,6 @@ void GuestAllocationsRegisterMainImage_nid_postfix(void*) {
     state.mainImageRegistered = true;
 }
 #elif defined(__APPLE__)
-// Registers the segments of every loaded guest image (the relinked executable and its modules,
-// recognised by their __ANYPS5 segment) so titles can change the protection of their own data.
-// Rescans when dyld has loaded more images since the last call.
 void GuestAllocationsRegisterMainImage_nid_postfix(void*) {
     auto& state = registry();
     const auto count = _dyld_image_count();
@@ -116,7 +113,7 @@ void GuestAllocationsRegisterMainImage_nid_postfix(void*) {
             const auto bytes = static_cast<std::size_t>(segment->vmsize);
             if (bytes == 0) continue;
             const auto next = replacement.lower_bound(address);
-            if (next != replacement.end() && next->first < address + bytes) continue; // already registered (possibly split by protections)
+            if (next != replacement.end() && next->first < address + bytes) continue;
             if (next != replacement.begin()) {
                 const auto& previous = *std::prev(next)->second;
                 if (previous.address + previous.bytes > address) continue;
@@ -173,7 +170,7 @@ bool GuestAllocationsIsReserved_nid_postfix(void*, const void* pointer, std::siz
     auto cursor = address;
     for (const auto& [base, range] : registry().ranges) {
         if (base + range->bytes <= cursor) continue;
-        if (base > cursor) return false; // hole
+        if (base > cursor) return false;
         if (range->readable || range->writable || !range->releasable) return false;
         cursor = std::min(end, base + range->bytes);
         if (cursor == end) return true;

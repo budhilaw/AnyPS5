@@ -3,9 +3,6 @@
 
 namespace AgcDriver {
 
-// Locates the Vulkan loader (or a standalone ICD such as MoltenVK) the host can load,
-// tells SDL to use the same library for SDL_WINDOW_VULKAN windows and returns its name.
-// The result is cached; throws std::runtime_error when no usable library exists.
 const char* ResolveVulkanLibrary();
 
 }

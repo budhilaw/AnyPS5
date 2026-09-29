@@ -9,7 +9,7 @@
 namespace AgcDriver::Graphics {
 
 ResidentColor::ResidentColor(const Context& context, const ColorTarget& color) : context(context), color(color), transfer(context) {
-    if (color.gpuOnly) return; // never exchanged with guest memory
+    if (color.gpuOnly) return;
     if (context.guestBufferCache != nullptr) context.guestBufferCache->ReleaseTracking(color.address, color.bytes);
     memoryWatch = std::make_unique<GuestMemoryTracking::Watch>(color.address, color.bytes, this, [](void* owner, GuestMemoryTracking::Access access) {
         static_cast<ResidentColor*>(owner)->resolveCpuAccess(access);
@@ -19,11 +19,8 @@ ResidentColor::ResidentColor(const Context& context, const ColorTarget& color) :
 ResidentColor::~ResidentColor() = default;
 
 void ResidentColor::Invalidate() {
-    if (color.gpuOnly) { dirty = false; return; } // nothing to hand back: the image keeps its contents
+    if (color.gpuOnly) { dirty = false; return; }
     Require(!dirty, "cannot discard GPU-owned render target contents");
-    // The pages keep their protection until the CPU touches them (resolveCpuAccess): a target a
-    // compute fill clears every frame would change its protection several times a frame, each
-    // an mprotect of megabytes that every core has to see.
     valid = false;
 }
 
@@ -34,7 +31,7 @@ void ResidentColor::ReleaseMemory() {
         throw std::runtime_error(message);
     }
     Invalidate();
-    memoryWatch.reset();  // restores the pages' own protection
+    memoryWatch.reset();
 }
 
 bool ResidentColor::SharesPages(const ColorTarget& other) const {
@@ -67,7 +64,6 @@ void ResidentColor::resolveCpuAccess(GuestMemoryTracking::Access access) {
         Invalidate();
         memoryWatch->Protect(GuestMemoryTracking::Protection::ReadWrite);
     } else {
-        // Guest memory holds the contents (saved above, or the target is invalid): reads may go on.
         memoryWatch->Protect(valid ? GuestMemoryTracking::Protection::Read : GuestMemoryTracking::Protection::ReadWrite);
     }
     if (access == GuestMemoryTracking::Access::Invalidate) context.drawQueue->Wait();

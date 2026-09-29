@@ -13,10 +13,6 @@
 namespace GuestMemoryBacking::Platform {
 namespace {
 
-// Guest memory is one anonymous Mach allocation (the host-side alias, always readable and
-// writable) plus a second, shared mapping of the same pages at the guest address whose
-// protection follows the guest's requests. mach_vm_remap gives the alias without a file
-// descriptor, honours an alignment mask and refuses (rather than replaces) an occupied fixed range.
 
 void check(kern_return_t result, const char* operation) {
     if (result != KERN_SUCCESS) throw std::runtime_error(std::string(operation) + ": " + mach_error_string(result));

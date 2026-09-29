@@ -13,7 +13,6 @@ std::uint32_t* APS5_VABI sceAgcDcbAcquireMem(CommandBuffer* buf, std::uint8_t en
     Agc::Command::CheckBits(engine, 1, __func__);
     Agc::Command::CheckBits(cbDbOp, 0x7fffffffu, __func__);
     Agc::Command::CheckBits(gcrControl, 0x7ffffu, __func__);
-    // The packet addresses 256-byte blocks: the range is widened to the blocks that contain it.
     const auto requested = reinterpret_cast<std::uintptr_t>(base);
     const auto wholeAddressSpace = sizeBytes == 0xffffffffffffffffull;
     const auto address = requested & ~std::uintptr_t{0xffu};

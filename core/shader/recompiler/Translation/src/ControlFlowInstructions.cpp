@@ -65,8 +65,6 @@ void TranslationContext::addU32(const RdnaInstruction& inst, bool vector, bool u
         ir.SetScc(carryOut.Value());
         return;
     }
-    // The VOP3B form names its carry-in lane mask in src2 (the VOP2 form reads VCC, which the
-    // decoder records there too): it is not the carry-out of the previous instruction.
     const IrU1 carryIn = vector ? carryInMask(inst) : IrU1(ir.GetScc());
     const IrU32 carryInU32(ir.Select(carryIn.Value(), ir.Constant(1u), ir.Constant(0u)));
     IrValue& secondAdd = ir.Emit(IrOpcode::IAddCarry32, IrType::U32x2, {&sum.Value(), &carryInU32.Value()});
@@ -227,9 +225,6 @@ void TranslationContext::sWqm(const RdnaInstruction& inst, bool wide) {
     writeRawU32(inst.destination, extractU64(result)[0]);
 }
 
-// M0-relative vector register moves: M0 is a uniform index, so every candidate register inside
-// the shader's vector allocation is visited and the one M0 addresses is selected (a read) or
-// replaced (a write). Registers beyond the allocation are never addressed by valid shaders.
 void TranslationContext::vMovrelsB32(const RdnaInstruction& inst) {
     const RdnaOperand& source = sourceAt(inst, 0u);
     if (source.kind != RdnaOperandKind::VectorRegister) {

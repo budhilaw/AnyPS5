@@ -8,18 +8,17 @@ namespace Relinker {
 
 namespace {
 
-constexpr std::uint32_t SelfMagic = 0x1D3D154Fu;       // "O.=." little-endian
-constexpr std::uint32_t SelfMagicAlternate = 0xEEF51454u; // "T..." variant used by some system modules
+constexpr std::uint32_t SelfMagic = 0x1D3D154Fu;
+constexpr std::uint32_t SelfMagicAlternate = 0xEEF51454u;
 constexpr std::size_t SelfHeaderSize = 0x20;
 constexpr std::size_t SelfEntrySize = 0x20;
 constexpr std::size_t ElfHeaderSize = 0x40;
 
-// SELF segment table entry property bits.
 constexpr std::uint64_t PropertyOrdered = 0x1;
 constexpr std::uint64_t PropertyEncrypted = 0x2;
 constexpr std::uint64_t PropertySigned = 0x4;
 constexpr std::uint64_t PropertyCompressed = 0x8;
-constexpr std::uint64_t PropertyHasBlocks = 0x800; // entry carries segment data (else it is a digest table)
+constexpr std::uint64_t PropertyHasBlocks = 0x800;
 constexpr unsigned PropertyProgramHeaderShift = 20;
 constexpr std::uint64_t PropertyProgramHeaderMask = 0xFFF;
 
@@ -69,7 +68,7 @@ SelfUnwrapResult UnwrapSelf(const std::vector<std::uint8_t>& self) {
     for (std::uint16_t index = 0; index < entryCount; ++index) {
         const std::size_t entry = SelfHeaderSize + static_cast<std::size_t>(index) * SelfEntrySize;
         const auto properties = Io::ReadU64(self, entry);
-        if ((properties & PropertyHasBlocks) == 0) continue; // digest table for another entry
+        if ((properties & PropertyHasBlocks) == 0) continue;
         if ((properties & PropertyEncrypted) != 0) throw Domain::RelinkerException("SELF segment is encrypted; only fake-signed (plaintext) SELF files can be unwrapped", entry);
         if ((properties & PropertyCompressed) != 0) throw Domain::RelinkerException("SELF segment is compressed; unsupported", entry);
         (void)PropertyOrdered;
@@ -87,8 +86,6 @@ SelfUnwrapResult UnwrapSelf(const std::vector<std::uint8_t>& self) {
     }
     if (result.CopiedSegments == 0) throw Domain::RelinkerException("SELF supplies no segment data");
 
-    // A program header is satisfied when its own entry copied it or when it lies inside a copied one
-    // (PT_DYNAMIC, PT_NOTE, GNU_EH_FRAME and the like alias a PT_LOAD range).
     for (std::uint16_t index = 0; index < programHeaderCount; ++index) {
         if (supplied[index] || programHeaders[index].FileSize == 0) continue;
         const auto first = programHeaders[index].Offset;

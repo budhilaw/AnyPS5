@@ -13,11 +13,7 @@ namespace AgcDriver::Graphics {
 
 Texture::Texture(const Context& context, const std::shared_ptr<ResidentColor>& source, const GuestTextureResource& descriptor, VkComponentMapping components) : context(context), source(source) {
     try {
-        // A single-slice 2D array descriptor (titles bind render targets that way for stereo-capable
-        // shaders) views the same one-layer image as an array.
         const bool singleSliceArray = descriptor.dimension == TextureDimension::k2DArray && descriptor.depthOrLastArray == 0;
-        // A 1D descriptor of a one-row target (a lookup table rendered each frame) reads the row
-        // the target holds: the swizzle maps the single row alike for both shapes.
         const bool oneRow = descriptor.dimension == TextureDimension::k1D && source != nullptr && source->Description().extent.height == 1 && descriptor.height <= 1;
         Require(source != nullptr && (descriptor.dimension == TextureDimension::k2D || singleSliceArray || oneRow) && descriptor.mipCount == 1 && descriptor.baseLevel == 0 && descriptor.baseArray == 0, "invalid resident texture view");
         const auto format = ResolveTextureFormat(descriptor.format);
@@ -74,7 +70,6 @@ Texture::Texture(const Context& context, const std::shared_ptr<ResidentColor>& s
         const auto pipelineBarrier = context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier");
         pipelineBarrier(commands, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
         if (oneRow) {
-            // Images of different types do not copy into each other: the row goes through a buffer.
             const VkDeviceSize rowBytes = static_cast<VkDeviceSize>(descriptor.width) * source->Description().bytesPerPixel;
             staging = std::make_unique<Buffer>(context, static_cast<std::size_t>(rowBytes), VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
             VkBufferImageCopy row{};
@@ -113,8 +108,6 @@ Texture::Texture(const Context& context, const std::shared_ptr<ResidentColor>& s
 
 void Texture::MarkStored() {
     stored = true;
-    // A direct view stores into the target itself: it is dirty from now on (a CPU read of its
-    // memory must wait for the GPU and download it) and copies of it are out of date.
     if (directView && source) source->MarkWritten();
 }
 
@@ -164,20 +157,14 @@ Texture::Texture(const Context& context, const std::shared_ptr<ResidentColor>& s
 void Texture::FlushStores() {
     if (!stored) return;
     stored = false;
-    if (directView) return; // the stores are already in the target
+    if (directView) return;
     if (!source) {
-        // A detiled texture the shaders stored to: a 2D single-level color-sized surface becomes
-        // a resident render target holding those stores (presentation and later draws find it
-        // there, CPU reads download it); other shapes keep their stores on the device.
         if (!promotable || context.renderCache == nullptr) {
             static int reportedKept = 0;
             if (reportedKept++ < 60) APS5_LOG_OUT("shader stores into texture 0x%llx (%ux%u, %u bpp, tile %u, %u mips, dimension %u, %u layers) stay on the device", static_cast<unsigned long long>(guestAddress), extent.width, extent.height, guestTexelBytes, static_cast<unsigned>(guestTileMode), guestMipCount, guestDimension, guestLayers);
             return;
         }
         const ColorTileMode mode = guestTileMode == TextureTileMode::RenderTarget64KB ? ColorTileMode::RenderTarget : ColorTileMode::Linear;
-        // The target matches what DecodeState derives for a draw into the same surface (size,
-        // GPU-only for texels the host tiling code does not handle, mapped prefix), so a later
-        // draw reuses this entry instead of replacing it.
         const ColorTargetLayout layoutInfo(extent.width, extent.height, mode, guestTexelBytes);
         ColorTarget target{guestAddress, extent, guestFormat, layoutInfo.Bytes(), 0xe4u, mode, guestTexelBytes, guestTexelBytes != 4};
         if (target.gpuOnly) {

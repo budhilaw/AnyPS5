@@ -8,7 +8,6 @@
 
 extern "C" {
 
-// A single register is one SET_*_REG packet of three dwords: header, offset, value.
 uint32_t* APS5_VABI sceAgcDcbSetCxRegisterDirect(CommandBuffer* buf, ShaderRegister reg) {
     return Agc::Command::WriteRegisterRange(buf, 0x69u, reg.offset, &reg.value, 1, __func__);
 }

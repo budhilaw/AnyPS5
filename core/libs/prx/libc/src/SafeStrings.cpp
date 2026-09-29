@@ -4,9 +4,6 @@
 #include <cerrno>
 #include "prx/libc/include/General.hpp"
 
-// The bounds-checked string functions of C11 Annex K that the console's libc exports. They
-// return errno values, and on a constraint violation the destination is cleared the way the
-// standard requires (memcpy_s zeroes it, string copies terminate it) instead of invoking a handler.
 namespace {
 
 constexpr std::size_t RSIZE_MAX_VALUE = static_cast<std::size_t>(1) << 63;

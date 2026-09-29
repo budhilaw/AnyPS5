@@ -12,9 +12,6 @@
 
 namespace ShaderRecompiler::Detail {
 
-// The values an evaluation computed, by instruction. The driver evaluates every draw's
-// resource plan: an open-addressing table with inline slots inserts without allocating, where
-// a node-based map allocated for every instruction of every draw.
 class EvaluatedValues {
 public:
     const std::uint64_t* Find(const IrValue* key) const {

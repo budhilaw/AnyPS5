@@ -24,7 +24,6 @@
 #endif
 
 
-// POSIX file entry points of libScePosix over host descriptors: -1 with errno on failure.
 extern "C" int* __error_nid_postfix();
 extern "C" int APS5_VABI sceKernelOpen(const char* path, int flags, std::uint16_t mode);
 extern "C" int APS5_VABI sceKernelFstat(int d, FileStat* sb);
@@ -37,7 +36,6 @@ int PosixFromSce(int result) { return result < 0 ? PosixFailure(result & 0xff) :
 int PosixFromHost(long long result) { return result < 0 ? PosixFailure(errno) : static_cast<int>(result); }
 }
 
-// Directory streams of descriptors the title reads with getdents; released when it closes them.
 namespace {
 constexpr int SCE_KERNEL_ERROR_EBADF_ = static_cast<int>(0x80020009);
 constexpr int SCE_KERNEL_ERROR_ENOENT_ = static_cast<int>(0x80020002);
@@ -46,7 +44,6 @@ constexpr int SCE_KERNEL_ERROR_ENOTEMPTY_ = static_cast<int>(0x80020042);
 constexpr int SCE_KERNEL_ERROR_EINVAL_ = static_cast<int>(0x80020016);
 std::mutex directoriesMutex;
 std::map<int, DIR*> directories;
-// FreeBSD dirent as the console's guest sees it.
 struct GuestDirent { std::uint32_t fileno; std::uint16_t reclen; std::uint8_t type; std::uint8_t namlen; char name[256]; };
 int MapPathError(int error, const char* what, const std::filesystem::path& native) {
     if (error == ENOENT || error == ENOTDIR) return SCE_KERNEL_ERROR_ENOENT_;

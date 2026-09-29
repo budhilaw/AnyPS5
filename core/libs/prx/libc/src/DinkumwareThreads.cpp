@@ -10,9 +10,6 @@
 #include <thread>
 #include "prx/libc/include/GuestLock.hpp"
 
-// Sony's libc is Dinkumware-based: std::mutex, std::condition_variable and this_thread in guest
-// code call these `_Mtx_*`, `_Cnd_*`, `_Thrd_*` and `_Xtime_*` entry points. Handles are pointers
-// to objects allocated here; result codes follow <xthreads.h>.
 namespace {
 
 enum ThreadResult : int { Success = 0, NoMemory = 1, TimedOut = 2, Busy = 3, Error = 4 };
@@ -38,8 +35,6 @@ std::chrono::system_clock::time_point deadline(const Xtime* time) {
     return std::chrono::system_clock::time_point(std::chrono::duration_cast<std::chrono::system_clock::duration>(std::chrono::seconds(time->seconds) + std::chrono::nanoseconds(time->nanoseconds)));
 }
 
-// Sony's <xthreads.h> passes the address of the handle (`_Mtx_t*`, `_Cnd_t*`) to every call, as
-// _Mtx_init/_Cnd_init do: guest objects embed the handle and pass its address.
 Mutex& mutexOf(void* handle) {
     if (handle == nullptr || *static_cast<void**>(handle) == nullptr) throw std::invalid_argument("_Mtx: null mutex");
     return **static_cast<Mutex**>(handle);
@@ -70,7 +65,6 @@ int APS5_VABI _Mtx_unlock_nid_postfix(void* mutex) { mutexOf(mutex).unlock(); re
 int APS5_VABI _Mtx_trylock_nid_postfix(void* mutex) { return mutexOf(mutex).try_lock() ? Success : Busy; }
 int APS5_VABI _Mtx_timedlock_nid_postfix(void* mutex, const Xtime* time) { return mutexOf(mutex).try_lock_until(deadline(time)) ? Success : TimedOut; }
 int APS5_VABI _Mtx_current_owns_nid_postfix(void* mutex) {
-    // Dinkumware answers from its own owner field; a standard mutex cannot report it.
     (void)mutex;
     throw std::runtime_error("_Mtx_current_owns is not supported");
 }
@@ -91,7 +85,6 @@ int APS5_VABI _Cnd_signal_nid_postfix(void* condition) { conditionOf(condition).
 int APS5_VABI _Cnd_broadcast_nid_postfix(void* condition) { conditionOf(condition).variable.notify_all(); return Success; }
 
 int APS5_VABI _Cnd_wait_nid_postfix(void* condition, void* mutex) {
-    // The caller holds the mutex through _Mtx_lock; adopt it for the wait and hand it back locked.
     std::unique_lock<Mutex> lock(mutexOf(mutex), std::adopt_lock);
     conditionOf(condition).variable.wait(lock);
     lock.release();
@@ -105,11 +98,9 @@ int APS5_VABI _Cnd_timedwait_nid_postfix(void* condition, void* mutex, const Xti
     return status == std::cv_status::timeout ? TimedOut : Success;
 }
 
-// Sleeps until the absolute time (std::this_thread::sleep_for converts durations before calling).
 int APS5_VABI _Thrd_sleep_nid_postfix(const Xtime* time) { std::this_thread::sleep_until(deadline(time)); return Success; }
 int APS5_VABI _Thrd_yield_nid_postfix() { std::this_thread::yield(); return Success; }
 
-// Current time in 100 ns ticks since the Unix epoch.
 std::int64_t APS5_VABI _Xtime_get_ticks_nid_postfix() {
     return std::chrono::duration_cast<std::chrono::duration<std::int64_t, std::ratio<1, 10000000>>>(std::chrono::system_clock::now().time_since_epoch()).count();
 }

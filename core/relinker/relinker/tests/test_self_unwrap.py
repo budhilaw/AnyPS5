@@ -39,7 +39,6 @@ def wrap(elf, entries, encrypted=False, compressed=False):
 def main():
     relinker = Path(sys.argv[1]).resolve()
     elf = fixture()
-    # Loadable segments of the fixture: text at 0x200 and data at 0x300 (see test_optional_plt).
     phs = [struct.unpack_from("<IIQQQQQQ", elf, 0x40 + i * 0x38) for i in range(struct.unpack_from("<H", elf, 0x38)[0])]
     loads = [(i, p[2], p[5]) for i, p in enumerate(phs) if p[0] == 1]
     assert loads, phs
@@ -54,7 +53,6 @@ def main():
         assert unwrapped[:4] == b"\x7fELF" and unwrapped[:0x40 + len(phs) * 0x38] == bytes(elf[:0x40 + len(phs) * 0x38])
         for _, offset, size in loads:
             assert unwrapped[offset:offset + size] == bytes(elf[offset:offset + size]), offset
-        # The unwrapped ELF goes through the normal pipeline too.
         relinked = Path(directory) / "eboot.exe"
         result = subprocess.run([str(relinker), "--windows", str(source), str(relinked)], capture_output=True, text=True, timeout=20)
         assert result.returncode == 0 and relinked.exists(), (result.stdout, result.stderr)

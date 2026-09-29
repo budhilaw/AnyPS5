@@ -23,7 +23,7 @@ enum class MutexType : std::uint32_t {
 
 struct PthreadMutexattrPrivate {
     MutexType type;
-    int protocol = 0; // PTHREAD_PRIO_NONE; priority inheritance is a scheduling hint the host cannot honour
+    int protocol = 0;
 };
 
 struct PthreadPrivate;
@@ -32,8 +32,8 @@ struct PthreadMutexPrivate {
     GuestLock _lock;
     MutexType _type;
     std::atomic<std::thread::id> _owner;
-    std::atomic<PthreadPrivate*> _ownerThread{nullptr}; // for the ANYPS5_TRACE_LOCKS stall report only
-    int _count;  // recursive mutexes: how often the owner holds it
+    std::atomic<PthreadPrivate*> _ownerThread{nullptr};
+    int _count;
 
     PthreadMutexPrivate() : _type(MutexType::Normal), _count(0) {}
 };
@@ -44,7 +44,7 @@ struct PthreadCondattrPrivate {
 
 struct PthreadCondPrivate {
     std::condition_variable_any _cv;
-    int _clockid = 0; // CLOCK_REALTIME; pthread_condattr_setclock may select CLOCK_MONOTONIC (4)
+    int _clockid = 0;
 };
 
 struct PthreadAttrPrivate {
@@ -65,7 +65,7 @@ struct PthreadPrivate {
     std::thread::id threadId;
     std::atomic<unsigned> references{2};
 #else
-    pthread_t native{};     // host thread; valid until joined or detached
+    pthread_t native{};
     bool joinable = false;
 #endif
     void* stackAddress = nullptr;
@@ -76,18 +76,17 @@ struct PthreadPrivate {
     std::mutex _join_mtx;
     std::condition_variable _join_cv;
     std::string name;
-    int schedPolicy = 2;      // SCHED_OTHER on the console's FreeBSD numbering
-    int schedPriority = 700;  // SCE_KERNEL_PRIO_FIFO_DEFAULT
-    int cancelState = 0;      // PTHREAD_CANCEL_ENABLE; cancellation itself is not supported
+    int schedPolicy = 2;
+    int schedPriority = 700;
+    int cancelState = 0;
     int cancelType = 0;
-    std::uint64_t affinity = 0x7f; // all seven title cores; a placement hint the host scheduler does not take
+    std::uint64_t affinity = 0x7f;
     std::uint64_t threadId = 0;
-    std::atomic<std::uint32_t> pendingSignals{0}; // guest signals raised at this thread, not yet delivered
+    std::atomic<std::uint32_t> pendingSignals{0};
 
     PthreadPrivate() : _finished(false), _retval(nullptr), _detached(false) {}
 };
 
-// Ownership bookkeeping for the ANYPS5_TRACE_LOCKS stall report (no-ops when tracing is off).
 void MutexNoteOwner(PthreadMutexPrivate* mutex);
 void MutexClearOwner(PthreadMutexPrivate* mutex);
 

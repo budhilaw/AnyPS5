@@ -37,8 +37,6 @@ bool OwnPersonality(Word personality) {
     if (personality == reinterpret_cast<Word>(__gxx_personality_v0)) return true;
 #endif
 #ifdef __APPLE__
-    // Host frames (libc++abi) use the same Itanium LSDA layout, so guest exceptions can run their
-    // cleanups and handlers through this personality as well.
     static const auto host = reinterpret_cast<Word>(dlsym(RTLD_DEFAULT, "__gxx_personality_v0"));
     if (host != 0 && personality == host) return true;
 #endif
@@ -83,7 +81,6 @@ int FindFrame(dl_phdr_info* info, std::size_t, void* argument) {
 #endif
 
 #ifdef __APPLE__
-// Binary search of a PT_GNU_EH_FRAME-style header (the relinker keeps the guest's table).
 bool LookupHeader(const Byte* header, Lookup& query) {
     if (header[0] != 1 || header[3] == 255) return false;
     const Byte* p = header + 4;
@@ -104,7 +101,6 @@ bool LookupHeader(const Byte* header, Lookup& query) {
     return true;
 }
 
-// Finds the loaded image containing query.pc and its text/data bases; returns its header.
 const mach_header_64* FindImage(Lookup& query, std::uint32_t& index) {
     const auto count = _dyld_image_count();
     for (std::uint32_t image = 0; image < count; ++image) {
@@ -216,11 +212,9 @@ bool DecodeFrame(_Unwind_Context& context, Frame& frame) {
     const auto* header = FindImage(query, image);
     if (header == nullptr) return false;
     if (image == 0) {
-        // The relinked guest executable: its PT_GNU_EH_FRAME table is published as metadata.
         const auto guest = GuestImage::FindExceptionHeader();
         if (guest) return LookupHeader(guest->header, query) && DecodeCandidate(context, frame, query);
     } else {
-        // A relinked guest module (dylib) publishes the same table; the slot is not rebased.
         unsigned long metadataSize = 0;
         const Byte* metadata = getsectiondata(header, "__ANYPS5", "__ehframehdr", &metadataSize);
         if (metadata != nullptr) {
@@ -231,7 +225,6 @@ bool DecodeFrame(_Unwind_Context& context, Frame& frame) {
             return LookupHeader(table, query) && DecodeCandidate(context, frame, query);
         }
     }
-    // Host libraries: linear scan of the DWARF __eh_frame section that Apple Clang emits.
     unsigned long size = 0;
     const Byte* p = getsectiondata(header, "__TEXT", "__eh_frame", &size);
     if (p == nullptr) return false;
@@ -481,7 +474,6 @@ bool Step(_Unwind_Context& context) {
     return true;
 }
 
-// ANYPS5_TRACE_UNWIND=1 prints every frame the unwinder visits and every context it installs.
 bool TraceUnwind() {
     static const bool enabled = std::getenv("ANYPS5_TRACE_UNWIND") != nullptr;
     return enabled;
@@ -559,7 +551,6 @@ _Unwind_Reason_Code PhaseTwo(_Unwind_Context context, _Unwind_Exception* excepti
 
 extern "C" {
 namespace {
-// A raise that finds no handler ends in terminate: the frames walked are worth naming.
 void ReportSearchFailure(const char* reason, const std::uint64_t* frames, unsigned count) {
     std::fprintf(stderr, "guest exception: %s after %u frame(s)\n", reason, count);
     for (unsigned index = 0; index < count; ++index) {

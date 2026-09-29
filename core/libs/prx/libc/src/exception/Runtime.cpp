@@ -17,8 +17,6 @@ namespace LibcException {
         Header* primary = Primary(globals.caught);
         const char* typeName = primary->type ? primary->type->name() : nullptr;
         const char* what = nullptr;
-        // what() exists only on std::exception and its descendants; other class types have no
-        // such vtable slot and non-class types have no vtable at all.
         const bool standard = primary->type && primary->adjusted && std::strncmp(Kind(primary->type), "N10__cxxabiv1", 13) == 0 && std::strstr(Kind(primary->type), "class_type_info") != nullptr
             && __dynamic_cast_nid_postfix(primary->adjusted, static_cast<const __cxxabiv1::__class_type_info*>(primary->type), static_cast<const __cxxabiv1::__class_type_info*>(&typeid(std::exception)), -1) != nullptr;
         if (standard) {

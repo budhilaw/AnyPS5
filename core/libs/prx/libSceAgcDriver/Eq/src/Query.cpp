@@ -14,8 +14,6 @@ uint32_t APS5_VABI sceAgcDriverGetEqContextId(const KernelEvent* ev) {
     if (ev == nullptr || reinterpret_cast<std::uintptr_t>(ev) % alignof(KernelEvent) != 0) {
         throw std::runtime_error(std::string(__func__) + ": null or misaligned event");
     }
-    // A GPU interrupt event carries the release's context id as its data; other events identify
-    // themselves by ident.
     return ev->filter == -14 ? static_cast<uint32_t>(ev->data) : static_cast<uint32_t>(ev->ident);
 }
 

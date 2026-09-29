@@ -20,8 +20,6 @@ namespace {
 using AgcDriver::Graphics::Require;
 constexpr std::uint32_t Width = 640;
 constexpr std::uint32_t Height = 480;
-// The driver reads and writes back render memory through the shared guest backing, so the
-// pixel buffer is mapped like guest memory instead of living in a static array.
 std::span<std::byte> Pixels;
 
 std::span<std::byte> MapPixels() {
@@ -47,7 +45,6 @@ ShaderRecompiler::RecompileResult LoadShader(const std::filesystem::path& path) 
     return result;
 }
 
-// Writes the verified GPU readback as a binary PPM so a headless run leaves visual evidence.
 void DumpPixels(const std::filesystem::path& path) {
     std::ofstream file(path, std::ios::binary);
     Require(file.is_open(), "cannot write readback image: " + path.string());

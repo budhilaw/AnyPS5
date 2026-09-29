@@ -32,8 +32,6 @@ extern "C" {
 
 int APS5_VABI sceVideoOutOpen(int userId, int busType, int index, const void* param) {
     if (param != nullptr) {
-        // PS5 titles pass an open-parameter block; its layout is undocumented and every field seen
-        // so far is zero, so it is reported once for diagnosis and otherwise ignored.
         const auto* bytes = static_cast<const unsigned char*>(param);
         char text[3 * 32 + 1] = {};
         for (int i = 0; i < 32; ++i) std::snprintf(text + 3 * i, 4, "%02x ", bytes[i]);

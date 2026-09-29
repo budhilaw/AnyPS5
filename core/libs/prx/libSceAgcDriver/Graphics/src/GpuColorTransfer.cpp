@@ -99,12 +99,10 @@ void GpuColorTransfer::prepare(std::uint32_t newWidth, std::uint32_t newHeight, 
 }
 
 bool GpuColorTransfer::UploadView(std::uint64_t address, std::uint32_t newWidth, std::uint32_t newHeight, ColorTileMode newMode) {
-    static const bool viewsEnabled = std::getenv("ANYPS5_NO_TARGET_GUEST_VIEW") == nullptr; // diagnostics
+    static const bool viewsEnabled = std::getenv("ANYPS5_NO_TARGET_GUEST_VIEW") == nullptr;
     if (!viewsEnabled || context.guestBufferCache == nullptr) return false;
     PerformanceTimer timing("ColorTransfer.UploadView");
     const ColorTargetLayout layout(newWidth, newHeight, newMode);
-    // The import covers active guest mappings only, read through their alias: no CPU access to
-    // resolve (a check would unprotect the target's own pages, and its next use protect them).
     auto view = context.guestBufferCache->HostRange(address, layout.Bytes());
     if (!view.buffer) return false;
     prepare(newWidth, newHeight, newMode);

@@ -248,8 +248,6 @@ int APS5_VABI ioctl_nid_postfix(int descriptor, std::uint64_t request, void* arg
 #else
     int nativeValue = static_cast<int>(value);
 #ifdef __APPLE__
-    // XNU's FIONREAD on a datagram socket counts the queued sockaddr headers as well; SO_NREAD
-    // reports the payload size of the next datagram, matching the FreeBSD semantics the guest expects.
     socklen_t nativeSize = sizeof(nativeValue);
     const auto result = request == 0x8004667e ? ::ioctl(socket->value, FIONBIO, &nativeValue) : ::getsockopt(socket->value, SOL_SOCKET, SO_NREAD, &nativeValue, &nativeSize);
 #else

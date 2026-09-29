@@ -27,7 +27,6 @@ std::uint64_t address(std::uint32_t low, std::uint32_t high) {
 
 std::uint32_t registerOffset(std::uint32_t value) {
     require(value != 0xffffffffu, "indirect register sentinel semantics are not implemented");
-    // Bits 28-31 carry the index/bank selection of the SET_*_REG_INDEX forms (no host meaning).
     const auto offset = value & ~0xf0000000u;
     if (offset > 0xffffu) {
         char message[96];
@@ -174,8 +173,6 @@ void Validate(std::span<const std::uint32_t> packet, std::uint32_t queue) {
         }
         return;
     }
-    // SET_UCONFIG_REG with header flag 1 on register 0x342 is the AGC library's internal tag packet
-    // that brackets waits and indirect draw groups; it carries no register state.
     const bool tagPacket = opcode == 0x79 && (header & 0xffu) == 1 && (packet.size() == 3 || packet.size() == 4) && packet[1] == 0x342u;
     require((header & 0xffu) == 0 || (opcode == 0x11 && (header & 0xffu) == 2) || tagPacket, "PM4 header flags are not implemented");
     if (tagPacket) return;
@@ -286,7 +283,7 @@ void Validate(std::span<const std::uint32_t> packet, std::uint32_t queue) {
             break;
         case 0x37: {
             require(packet.size() >= 5, "WRITE_DATA has no data");
-            require((packet[1] & ~0x06110f00u) == 0, "WRITE_DATA engine or reserved fields are not implemented"); // bits 25-26: cache policy, no host meaning
+            require((packet[1] & ~0x06110f00u) == 0, "WRITE_DATA engine or reserved fields are not implemented");
             const auto destination = (packet[1] >> 8u) & 0xfu;
             require(destination == 1 || destination == 2 || (queue != 0 && destination == 5), "WRITE_DATA register or GDS destination is not implemented");
             require((packet[2] & 3u) == 0, "misaligned WRITE_DATA destination");
@@ -294,7 +291,7 @@ void Validate(std::span<const std::uint32_t> packet, std::uint32_t queue) {
         }
         case 0x40: {
             size(6);
-            require((packet[1] & ~0x46116f0fu) == 0, "COPY_DATA engine or reserved fields are not implemented"); // bits 13-14 and 25-26: cache policies
+            require((packet[1] & ~0x46116f0fu) == 0, "COPY_DATA engine or reserved fields are not implemented");
             const auto source = ((packet[1] & 0xfu) << 1u) | ((packet[1] >> 30u) & 1u);
             const auto destination = ((packet[1] >> 8u) & 0xfu) << 1u;
             require(destination == 2 || destination == 4, "COPY_DATA register or GDS destination is not implemented");
@@ -304,9 +301,8 @@ void Validate(std::span<const std::uint32_t> packet, std::uint32_t queue) {
         }
         case 0x50:
             size(7);
-            require((packet[1] & ~0xe6306001u) == 0, "DMA_DATA reserved fields are not implemented"); // bits 13-14 and 25-26: cache policies, no host meaning
+            require((packet[1] & ~0xe6306001u) == 0, "DMA_DATA reserved fields are not implemented");
             if (dmaDestination(packet) == 1 || dmaSource(packet) == 1) {
-                // GDS: offsets address the 64 KiB share, sizes stay inside it.
                 const auto bytes = packet[6] & 0x3ffffffu;
                 if (dmaDestination(packet) == 1) require(packet[4] <= 0x10000u && bytes <= 0x10000u - packet[4], "DMA_DATA GDS destination exceeds the GDS size");
                 if (dmaSource(packet) == 1) require(packet[2] <= 0x10000u && bytes <= 0x10000u - packet[2], "DMA_DATA GDS source exceeds the GDS size");
@@ -325,10 +321,6 @@ void Validate(std::span<const std::uint32_t> packet, std::uint32_t queue) {
     }
 }
 
-// Polls a guest label until the packet's comparison holds. The stream executes in order, so a
-// label released earlier in the same queue already holds its value; other writers are the title's
-// threads. A wait that never completes is a title-side deadlock and is reported instead of hung.
-// One evaluation of a WAIT_REG_MEM condition against guest memory.
 bool TryWait(std::span<const std::uint32_t> packet) {
     return TryWait(packet, [](std::uint64_t, std::uint32_t, std::uint64_t&) { return false; });
 }
@@ -382,13 +374,13 @@ bool DeferrableWrite(std::span<const std::uint32_t> packet, std::uint64_t& addre
     const auto opcode = (packet[0] >> 8u) & 0xffu;
     known = true;
     switch (opcode) {
-        case 0x37: // WRITE_DATA: immediate dwords to memory
+        case 0x37:
             if (packet.size() < 5 || packet.size() > 6 || (packet[1] & 0x10000u) != 0) return false;
             address_ = address(packet[2], packet[3]);
             bytes = static_cast<std::uint32_t>(std::min<std::size_t>(packet.size() - 4, 2) * 4);
             value = packet.size() > 5 ? address(packet[4], packet[5]) : packet[4];
             return true;
-        case 0x40: { // COPY_DATA with an immediate source
+        case 0x40: {
             const auto source = ((packet[1] & 0xfu) << 1u) | ((packet[1] >> 30u) & 1u);
             if (source < 10) return false;
             address_ = address(packet[4], packet[5]);
@@ -396,7 +388,7 @@ bool DeferrableWrite(std::span<const std::uint32_t> packet, std::uint64_t& addre
             value = bytes == 8 ? address(packet[2], packet[3]) : packet[2];
             return true;
         }
-        case 0x50: { // DMA_DATA with an immediate source, label sized
+        case 0x50: {
             const auto size = packet[6] & 0x3ffffffu;
             if (dmaSource(packet) != 2 || dmaDestination(packet) == 1 || (size != 4 && size != 8)) return false;
             address_ = address(packet[4], packet[5]);
@@ -404,7 +396,7 @@ bool DeferrableWrite(std::span<const std::uint32_t> packet, std::uint64_t& addre
             value = size == 8 ? address(packet[2], packet[3]) : packet[2];
             return true;
         }
-        case 0x49: { // RELEASE_MEM with data
+        case 0x49: {
             const auto dataSelect = (packet[2] >> 29u) & 7u;
             const auto interrupt = (packet[2] >> 24u) & 7u;
             if (dataSelect == 0 || interrupt == 4) return false;
@@ -479,18 +471,16 @@ DrawParameters ResolveDraw(std::span<const std::uint32_t> packet, const QueueSta
         return address;
     };
     if (opcode == 0x24 || opcode == 0x25) {
-        // Indirect draws read their arguments from the draw indirect base; the vertex and instance
-        // offsets the CP would patch into user SGPRs are applied by the draw path instead.
         require(queue.drawIndirectBase != 0, "indirect draw base has not been set");
         require(packet[1] <= std::numeric_limits<std::uint64_t>::max() - queue.drawIndirectBase, "indirect draw address overflow");
         const auto source = queue.drawIndirectBase + packet[1];
         if (opcode == 0x25) {
-            std::array<std::uint32_t, 5> arguments{}; // indexCount, instanceCount, firstIndex, vertexOffset, firstInstance
+            std::array<std::uint32_t, 5> arguments{};
             GuestMemory::Read(source, std::as_writable_bytes(std::span(arguments)), 4);
             const auto indirectAddress = indexRange(queue.indexBase, arguments[2], arguments[0]);
             return {indirectAddress, arguments[0], indexSize, arguments[1], packet[4], true, arguments[3], arguments[4]};
         }
-        std::array<std::uint32_t, 4> arguments{}; // vertexCount, instanceCount, firstVertex, firstInstance
+        std::array<std::uint32_t, 4> arguments{};
         GuestMemory::Read(source, std::as_writable_bytes(std::span(arguments)), 4);
         return {0, arguments[0], 0, arguments[1], packet[4] & 0x20u, false, arguments[2], arguments[3]};
     }
@@ -505,24 +495,18 @@ DrawParameters ResolveDraw(std::span<const std::uint32_t> packet, const QueueSta
 
 void Execute(std::span<const std::uint32_t> packet, QueueState& queue) {
     const auto opcode = (packet[0] >> 8u) & 0xffu;
-    if (opcode == 0x79 && (packet[0] & 0xffu) == 1) return; // AGC internal tag packet
+    if (opcode == 0x79 && (packet[0] & 0xffu) == 1) return;
     switch (opcode) {
         case 0x10:
             switch ((packet[0] >> 2u) & 0x3fu) {
                 case 0: return;
-                // A NOP changes nothing on the GPU: a reset command buffer keeps the registers
-                // its earlier submissions wrote (titles rely on that across frames).
                 case 0x09: queue.markers.clear(); return;
                 case 0x0b: queue.markers.emplace_back(reinterpret_cast<const char*>(packet.data() + 1)); return;
                 case 0x0c:
-                    // Marker stacks are per command buffer on the console; the shared register state pops
-                    // markers pushed on another queue, so an empty stack is not an error.
                     if (!queue.markers.empty()) queue.markers.pop_back();
                     return;
                 case 0x1a:
                     switch (packet[1]) {
-                        // Operation 0 is a NOP hint: the GPU keeps its context registers
-                        // (titles draw afterwards relying on earlier register writes).
                         case 0: break;
                         case 1: case 3:
                             require(!queue.savedContext.has_value(), "context state is already pushed");
@@ -550,8 +534,6 @@ void Execute(std::span<const std::uint32_t> packet, QueueState& queue) {
         case 0x63: case 0x64: case 0x9f: {
             std::vector<std::uint32_t> pairs(static_cast<std::size_t>(packet[4]) * 2);
             GuestMemory::Read(address(packet[1], packet[2]), std::as_writable_bytes(std::span(pairs)), 4);
-            // A pair whose offset word is not a register offset (titles pad their lists with
-            // unrelated data) addresses no register on the hardware either: it is skipped.
             const auto malformed = [](std::uint32_t word) { return word != 0xffffffffu && (word & 0x0fff0000u) != 0; };
             for (std::size_t i = 0; i < pairs.size(); i += 2) {
                 if (malformed(pairs[i])) {
@@ -611,8 +593,6 @@ void Execute(std::span<const std::uint32_t> packet, QueueState& queue) {
             return;
         }
         case 0x49: {
-            // End-of-pipe release: the caller has already waited for the GPU. Data selectors:
-            // 1 = 32-bit immediate, 2 = 64-bit immediate, 3 = 64-bit GPU timestamp.
             const auto dataSelect = (packet[2] >> 29u) & 7u;
             const auto interrupt = (packet[2] >> 24u) & 7u;
             if (dataSelect == 0 || interrupt == 4) return;

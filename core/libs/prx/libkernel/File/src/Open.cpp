@@ -105,8 +105,6 @@ int APS5_VABI sceKernelOpen(const char* path, int flags, std::uint16_t mode) {
         if (error == ENOENT) {
             return SCE_KERNEL_ERROR_ENOENT;
         }
-        // The console reports every open failure as an error code (EEXIST for exclusive creates,
-        // EACCES, EISDIR, ...); titles handle them.
         APS5_LOG_OUT("open of %s failed: errno=%d", native.string().c_str(), error);
         return static_cast<int>(0x80020000u | static_cast<unsigned>(error & 0xff));
     }
@@ -128,7 +126,6 @@ std::int64_t APS5_VABI sceKernelRead(int d, void* buf, std::size_t nbytes) {
     PrepareGuestBuffer(buf, nbytes, true);
     auto n = NativeRead(d, buf, nbytes);
     {
-        // ANYPS5_TRACE_IO: every 2^k-th read with its size and result.
         static const bool trace = std::getenv("ANYPS5_TRACE_IO") != nullptr;
         static std::atomic<std::uint64_t> reads{0};
         const auto count = ++reads;

@@ -43,7 +43,6 @@ int APS5_VABI scePthreadCondDestroy(PthreadCond* cond) {
     return SCE_OK;
 }
 
-// PTHREAD_COND_INITIALIZER is a null handle; the first use creates the condition variable.
 static PthreadCondPrivate* EnsureCond(PthreadCond* cond, const char* caller) {
     if (!cond) throw std::runtime_error(std::string(caller) + ": null cond");
     if (*cond) return *cond;
@@ -67,8 +66,6 @@ int APS5_VABI scePthreadCondBroadcast(PthreadCond* cond) {
     return SCE_OK;
 }
 
-// The wait releases the mutex entirely (a recursive one at every depth) and takes it back for
-// this thread with its depth.
 namespace {
 struct HeldMutex {
     PthreadMutexPrivate* mutex;

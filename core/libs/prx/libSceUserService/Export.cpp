@@ -11,7 +11,7 @@ int APS5_VABI sceUserServiceGetAccessibilityChatTranscription(int user_id, int32
     Aps5TraceCall_nid_no_patch(__func__);
     if (user_id != USER_SERVICE_INITIAL_USER_ID) return USER_SERVICE_ERROR_INVALID_ARGUMENT;
     if (chat_transcription == nullptr) return USER_SERVICE_ERROR_INVALID_ARGUMENT;
-    *chat_transcription = 0; // the console default for this accessibility setting
+    *chat_transcription = 0;
     return USER_SERVICE_OK;
 }
 
@@ -19,7 +19,7 @@ int APS5_VABI sceUserServiceGetAccessibilityPressAndHoldDelay(int user_id, int32
     Aps5TraceCall_nid_no_patch(__func__);
     if (user_id != USER_SERVICE_INITIAL_USER_ID) return USER_SERVICE_ERROR_INVALID_ARGUMENT;
     if (press_and_hold_delay == nullptr) return USER_SERVICE_ERROR_INVALID_ARGUMENT;
-    *press_and_hold_delay = 0; // the console default for this accessibility setting
+    *press_and_hold_delay = 0;
     return USER_SERVICE_OK;
 }
 
@@ -27,7 +27,7 @@ int APS5_VABI sceUserServiceGetAccessibilityTriggerEffect(int user_id, int32_t* 
     Aps5TraceCall_nid_no_patch(__func__);
     if (user_id != USER_SERVICE_INITIAL_USER_ID) return USER_SERVICE_ERROR_INVALID_ARGUMENT;
     if (trigger_effect == nullptr) return USER_SERVICE_ERROR_INVALID_ARGUMENT;
-    *trigger_effect = 0; // the console default for this accessibility setting
+    *trigger_effect = 0;
     return USER_SERVICE_OK;
 }
 
@@ -35,7 +35,7 @@ int APS5_VABI sceUserServiceGetAccessibilityVibration(int user_id, int32_t* vibr
     Aps5TraceCall_nid_no_patch(__func__);
     if (user_id != USER_SERVICE_INITIAL_USER_ID) return USER_SERVICE_ERROR_INVALID_ARGUMENT;
     if (vibration == nullptr) return USER_SERVICE_ERROR_INVALID_ARGUMENT;
-    *vibration = 0; // the console default for this accessibility setting
+    *vibration = 0;
     return USER_SERVICE_OK;
 }
 
@@ -43,7 +43,7 @@ int APS5_VABI sceUserServiceGetAccessibilityZoomEnabled(int user_id, int32_t* zo
     Aps5TraceCall_nid_no_patch(__func__);
     if (user_id != USER_SERVICE_INITIAL_USER_ID) return USER_SERVICE_ERROR_INVALID_ARGUMENT;
     if (zoom_enabled == nullptr) return USER_SERVICE_ERROR_INVALID_ARGUMENT;
-    *zoom_enabled = 0; // the console default for this accessibility setting
+    *zoom_enabled = 0;
     return USER_SERVICE_OK;
 }
 
@@ -51,20 +51,18 @@ int APS5_VABI sceUserServiceGetAgeLevel(int user_id, uint32_t* age_level) {
     Aps5TraceCall_nid_no_patch(__func__);
     if (user_id != USER_SERVICE_INITIAL_USER_ID) return USER_SERVICE_ERROR_INVALID_ARGUMENT;
     if (age_level == nullptr) return USER_SERVICE_ERROR_INVALID_ARGUMENT;
-    *age_level = 30; // an adult account; no parental restrictions apply on the host
+    *age_level = 30;
     return USER_SERVICE_OK;
 }
 
 int APS5_VABI sceUserServiceGetEvent(SceUserServiceEvent* event) {
     Aps5TraceCall_nid_no_patch(__func__);
-    // The single user is logged in before the title starts and never logs out; no events arise.
     if (event == nullptr) return USER_SERVICE_ERROR_INVALID_ARGUMENT;
     return USER_SERVICE_ERROR_NO_EVENT;
 }
 
 int APS5_VABI sceUserServiceGetGamePresets(int user_id, UserServiceGamePresets* presets) {
     Aps5TraceCall_nid_no_patch(__func__);
-    // Per-user game presets; a user who never chose any reports "use the game's default" (0) for each.
     if (user_id != USER_SERVICE_INITIAL_USER_ID) return USER_SERVICE_ERROR_INVALID_ARGUMENT;
     if (presets == nullptr || presets->this_size != sizeof(UserServiceGamePresets)) return USER_SERVICE_ERROR_INVALID_ARGUMENT;
     const auto size = presets->this_size;
@@ -108,7 +106,7 @@ int APS5_VABI sceUserServiceGetUserNumber(int user_id, int32_t* number) {
     Aps5TraceCall_nid_no_patch(__func__);
     if (number == nullptr) return USER_SERVICE_ERROR_INVALID_ARGUMENT;
     if (user_id != USER_SERVICE_INITIAL_USER_ID) return USER_SERVICE_ERROR_INVALID_ARGUMENT;
-    *number = 1; // the only local user
+    *number = 1;
     return USER_SERVICE_OK;
 }
 

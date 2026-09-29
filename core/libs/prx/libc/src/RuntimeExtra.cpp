@@ -29,15 +29,11 @@ int APS5_VABI fsetpos_nid_postfix(FileStream* stream, const std::int64_t* positi
     return ::fseeko(GetNativeStream(stream), static_cast<off_t>(*position), SEEK_SET) == 0 ? 0 : -1;
 }
 
-// Dinkumware serializes FILE access through these; the host stream lock provides the same.
 void APS5_VABI _Lockfilelock_nid_postfix(FileStream* stream) { ::flockfile(GetNativeStream(stream)); }
 void APS5_VABI _Unlockfilelock_nid_postfix(FileStream* stream) { ::funlockfile(GetNativeStream(stream)); }
 
-// No at_quick_exit handlers can be registered yet, so this is _Exit.
 [[noreturn]] void APS5_VABI quick_exit_nid_postfix(int code) { _Exit_nid_postfix(code); }
 
-// Only the "C" locale exists; any other request is a state this runtime cannot honour.
-// The C locale's conventions; the guest's struct lconv has the FreeBSD layout, which the host's matches.
 struct lconv* APS5_VABI localeconv_nid_postfix() {
     static struct lconv conventions = [] {
         struct lconv c{};
@@ -55,9 +51,6 @@ struct lconv* APS5_VABI localeconv_nid_postfix() {
 char* APS5_VABI setlocale_nid_postfix(int category, const char* locale) {
     static char current[] = "C";
     if (locale == nullptr || locale[0] == 0 || std::strcmp(locale, "C") == 0 || std::strcmp(locale, "POSIX") == 0) return current;
-    // Only C behaviour exists, but titles abort when their language locale is refused (Hades
-    // loops on setlocale(LC_ALL, "en") and then aborts): report the name as selected. Character
-    // classification and formatting stay those of the C locale.
     static std::mutex mutex;
     static std::set<std::string> names;
     std::lock_guard lock(mutex);
@@ -66,7 +59,6 @@ char* APS5_VABI setlocale_nid_postfix(int category, const char* locale) {
     return const_cast<char*>(it->c_str());
 }
 
-// Guest CLOCKS_PER_SEC is 1000000.
 std::int64_t APS5_VABI clock_nid_postfix() {
     return static_cast<std::int64_t>(std::clock()) * 1000000 / CLOCKS_PER_SEC;
 }

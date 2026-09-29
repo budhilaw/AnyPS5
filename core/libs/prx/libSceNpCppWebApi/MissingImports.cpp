@@ -8,16 +8,9 @@
 #include <string>
 #include "prx/libc/include/General.hpp"
 
-// Imports of the title's plugin modules (PSN, save data, share, FMOD) that no host library
-// implements. Every entry reports itself on first use. Known names are declared as such; the rest
-// are listed by NID.
 
 namespace {
 
-// PSN web requests cannot be served on the host: each C++ web API entry reports its first use
-// with the guest call site and fails with SCE_NP_ERROR_NOT_INITIALIZED so the plugin gives up
-// instead of continuing with half-built objects.
-// Whether [address, address + 32) is mapped and readable.
 bool readable(std::uint64_t address) {
     if (address == 0) return false;
     mach_vm_address_t start = address;
@@ -47,8 +40,6 @@ int Unavailable(const char* name, const void* caller, std::uint64_t a = 0, std::
     static std::set<std::string> reported;
     std::lock_guard lock(mutex);
     if (reported.insert(name).second) APS5_LOG_OUT("%s unavailable, caller=%p\n  arg0 %s\n  arg1 %s\n  arg2 0x%llx", name, caller, describe(a).c_str(), describe(b).c_str(), static_cast<unsigned long long>(c));
-    // ANYPS5_NP_STUB_SUCCESS=1 reports success instead, for titles whose plugins abandon their
-    // PSN setup on the first error and then dereference the objects that setup would have made.
     static const bool succeed = std::getenv("ANYPS5_NP_STUB_SUCCESS") != nullptr;
     return succeed ? 0 : static_cast<int>(0x80550003u);
 }

@@ -20,7 +20,6 @@ const mach_header_64* mainHeader() {
 
 std::uintptr_t slide() { return static_cast<std::uintptr_t>(_dyld_get_image_vmaddr_slide(0)); }
 
-// Returns the section contents or nullptr when the section is absent.
 const std::uint64_t* fields(const char* section, std::size_t count) {
     unsigned long size = 0;
     const auto* data = getsectiondata(mainHeader(), Segment, section, &size);
@@ -29,7 +28,6 @@ const std::uint64_t* fields(const char* section, std::size_t count) {
     return reinterpret_cast<const std::uint64_t*>(data);
 }
 
-// Checks that [address, address + size) lies inside one mapped segment of the main image.
 void requireMapped(std::uintptr_t address, std::size_t size, const char* what) {
     const auto* header = mainHeader();
     const auto* command = reinterpret_cast<const load_command*>(header + 1);
@@ -116,7 +114,6 @@ void* FindModuleInit(const char* path) {
         const auto* data = getsectiondata(header, Segment, "__init", &size);
         if (data == nullptr) return nullptr;
         if (size != sizeof(std::uint64_t)) throw std::runtime_error("guest image: malformed __init metadata");
-        // The slot is a dyld rebase, so it already carries the image slide.
         std::uint64_t value = 0;
         std::memcpy(&value, data, sizeof(value));
         return reinterpret_cast<void*>(static_cast<std::uintptr_t>(value));

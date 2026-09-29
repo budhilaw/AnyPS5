@@ -35,7 +35,6 @@ void APS5_VABI sceKernelSetThreadAtexitReport(thread_atexit_report_func_t func) 
 }
 
 void APS5_VABI sceKernelSetThreadDtors(thread_dtors_func_t dtors) {
-    // libc registers the routine that runs thread-local destructors at thread exit; kept for it.
     static thread_dtors_func_t registered = nullptr;
     registered = dtors;
 }

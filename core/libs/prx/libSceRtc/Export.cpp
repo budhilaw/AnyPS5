@@ -7,9 +7,6 @@
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 
-// The real-time clock: ticks are microseconds since 0001-01-01 00:00:00 in the proleptic
-// Gregorian calendar, as on the console. The host clock serves as both the local and the
-// network time source.
 namespace {
 
 constexpr int SCE_RTC_ERROR_INVALID_VALUE = static_cast<int>(0x80B00001);
@@ -25,8 +22,8 @@ constexpr int SCE_RTC_ERROR_INVALID_ARG = static_cast<int>(0x80B00011);
 
 constexpr std::uint64_t TicksPerSecond = 1000000;
 constexpr std::uint64_t TicksPerDay = TicksPerSecond * 86400;
-constexpr std::int64_t DaysToUnixEpoch = 719162; // days from 0001-01-01 to 1970-01-01
-constexpr std::int64_t DaysToWin32Epoch = 584388; // days from 0001-01-01 to 1601-01-01
+constexpr std::int64_t DaysToUnixEpoch = 719162;
+constexpr std::int64_t DaysToWin32Epoch = 584388;
 
 bool leap(std::int64_t year) { return (year % 4 == 0 && year % 100 != 0) || year % 400 == 0; }
 
@@ -35,7 +32,6 @@ int daysInMonth(std::int64_t year, int month) {
     return month == 2 && leap(year) ? 29 : lengths[month - 1];
 }
 
-// Days since 0001-01-01 of a proleptic Gregorian date (Howard Hinnant's algorithm).
 std::int64_t daysFromCivil(std::int64_t y, unsigned m, unsigned d) {
     y -= m <= 2;
     const std::int64_t era = (y >= 0 ? y : y - 399) / 400;
@@ -93,7 +89,6 @@ std::uint64_t nowTick() {
     return static_cast<std::uint64_t>(static_cast<std::int64_t>(DaysToUnixEpoch * TicksPerDay) + since);
 }
 
-// Host time zone offset (including daylight saving) in minutes for the given UTC tick.
 int localOffsetMinutes(std::uint64_t utcTick) {
     const auto unix = static_cast<std::int64_t>(utcTick / TicksPerSecond) - DaysToUnixEpoch * 86400;
     const auto when = static_cast<std::time_t>(unix);
@@ -151,7 +146,7 @@ int APS5_VABI sceRtcGetDayOfWeek(int year, int month, int day) {
     if (year < 1) return SCE_RTC_ERROR_INVALID_YEAR;
     if (month < 1 || month > 12) return SCE_RTC_ERROR_INVALID_MONTH;
     if (day < 1 || day > daysInMonth(year, month)) return SCE_RTC_ERROR_INVALID_DAY;
-    return static_cast<int>((daysFromCivil(year, static_cast<unsigned>(month), static_cast<unsigned>(day)) + 1) % 7); // 0001-01-01 was a Monday; Sunday = 0
+    return static_cast<int>((daysFromCivil(year, static_cast<unsigned>(month), static_cast<unsigned>(day)) + 1) % 7);
 }
 
 int APS5_VABI sceRtcCheckValid(const RtcDateTime* time) {
@@ -226,7 +221,7 @@ int APS5_VABI sceRtcGetWin32FileTime(const RtcDateTime* time, uint64_t* win32_ti
     const auto tick = toTick(*time);
     const auto base = static_cast<std::uint64_t>(DaysToWin32Epoch) * TicksPerDay;
     if (tick < base) return SCE_RTC_ERROR_INVALID_VALUE;
-    *win32_time = (tick - base) * 10; // 100 ns units
+    *win32_time = (tick - base) * 10;
     return 0;
 }
 

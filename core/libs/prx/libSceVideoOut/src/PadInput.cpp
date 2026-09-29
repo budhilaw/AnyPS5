@@ -16,9 +16,6 @@
 
 namespace {
 
-// ANYPS5_DEBUG_PRESS="40:cross,55:options,60:lsright:3" holds the named pad control from the
-// given number of seconds after the first input update, for 0.3 s or the given duration, so a
-// title can be driven without a keyboard. Sticks: lsleft/lsright/lsup/lsdown, rsleft/... .
 struct ScriptedInput { std::uint32_t buttons = 0; std::array<std::uint8_t, 4> sticks{128, 128, 128, 128}; };
 
 ScriptedInput ScriptedControls(std::chrono::steady_clock::time_point now) {

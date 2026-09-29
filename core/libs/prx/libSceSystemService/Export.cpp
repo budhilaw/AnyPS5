@@ -34,14 +34,13 @@ int APS5_VABI sceSystemServiceGetDisplaySafeAreaInfo(SystemServiceDisplaySafeAre
     Aps5TraceCall_nid_no_patch(__func__);
     if (info == nullptr) return SYSTEM_SERVICE_ERROR_PARAMETER;
     *info = SystemServiceDisplaySafeAreaInfo{};
-    info->ratio = 1.0f; // a monitor shows the whole frame; consoles default to 0.9 for overscan
+    info->ratio = 1.0f;
     return 0;
 }
 
 int APS5_VABI sceSystemServiceGetHdrToneMapLuminance(SystemServiceHdrToneMapLuminance* luminance) {
     Aps5TraceCall_nid_no_patch(__func__);
     if (luminance == nullptr) return SYSTEM_SERVICE_ERROR_PARAMETER;
-    // The window is presented in SDR: report the reference SDR display (100 nits peak).
     luminance->max_full_frame_tone_map_luminance = 100.0f;
     luminance->max_tone_map_luminance = 100.0f;
     luminance->min_tone_map_luminance = 0.0f;
@@ -98,7 +97,7 @@ int APS5_VABI sceSystemServiceParamGetString(int param_id, char* buf, size_t buf
 
 int APS5_VABI sceSystemServicePowerTick(void) {
     Aps5TraceCall_nid_no_patch(__func__);
-    return 0; // host idle timers are not held; the title keeps the display active by rendering
+    return 0;
 }
 
 int APS5_VABI sceSystemServiceReceiveEvent(SystemServiceEvent* event) {

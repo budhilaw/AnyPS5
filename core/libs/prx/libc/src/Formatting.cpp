@@ -177,7 +177,6 @@ int APS5_VABI vsprintf_nid_postfix(char* str, const char* format, VaList* args) 
 
 int APS5_VABI vsnprintf_nid_postfix(char* str, size_t size, const char* format, VaList* c);
 
-// C11 Annex K: on overflow the destination becomes an empty string and the call fails.
 int APS5_VABI vsprintf_s_nid_postfix(char* str, size_t size, const char* format, VaList* args) {
     if (!str || !format || size == 0) return -1;
     const int written = vsnprintf_nid_postfix(str, size, format, args);

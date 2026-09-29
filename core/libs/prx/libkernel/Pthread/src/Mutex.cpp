@@ -16,8 +16,6 @@ static constexpr int SCE_KERNEL_ERROR_ETIMEDOUT = 0x8002003C;
 
 extern "C" Pthread APS5_VABI scePthreadSelf();
 
-// ANYPS5_TRACE_LOCKS=1 reports a lock that stalls for more than five seconds together with the
-// thread holding it, which is how a guest deadlock between title threads is found.
 static bool TraceLocks() {
     static const bool enabled = std::getenv("ANYPS5_TRACE_LOCKS") != nullptr;
     return enabled;
@@ -97,8 +95,6 @@ int APS5_VABI scePthreadMutexDestroy(PthreadMutex* mutex) {
     return SCE_OK;
 }
 
-// PTHREAD_MUTEX_INITIALIZER is a null handle on the console's FreeBSD-derived libthr: the first
-// lock creates a default (normal) mutex. Unlocking or destroying a null handle stays an error.
 static PthreadMutexPrivate* EnsureMutex(PthreadMutex* mutex, const char* caller) {
     if (!mutex) throw std::runtime_error(std::string(caller) + ": null mutex");
     if (*mutex) return *mutex;
@@ -176,8 +172,6 @@ int APS5_VABI scePthreadMutexTrylock(PthreadMutex* mutex) {
     return SCE_OK;
 }
 
-// PTHREAD_PRIO_NONE (0) and PTHREAD_PRIO_INHERIT (1) are accepted: inheritance only changes how
-// the console schedules a contended owner. PTHREAD_PRIO_PROTECT needs a ceiling and is refused.
 int APS5_VABI scePthreadMutexattrSetprotocol(PthreadMutexattr* attr, int protocol) {
     if (!attr || !*attr) throw std::runtime_error("scePthreadMutexattrSetprotocol: null attr");
     if (protocol != 0 && protocol != 1) throw std::runtime_error("scePthreadMutexattrSetprotocol: unsupported protocol " + std::to_string(protocol));

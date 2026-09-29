@@ -4,8 +4,6 @@
 
 namespace AgcDriver::Graphics {
 
-// A 1x1 transparent black texture standing in for a null descriptor: the console returns zeros
-// for such reads, and titles bind them for texture slots they leave unset.
 Texture::Texture(const Context& context, TextureDimension dimension) : context(context) {
     try {
         const std::uint32_t layers = dimension == TextureDimension::kCube ? 6u : 1u;

@@ -7,9 +7,6 @@
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 
-// Kernel event flags: a 64-bit pattern that threads wait on with AND/OR matching and optional
-// clearing on wake-up. Deletion and cancellation wake every waiter with a distinct error, and a
-// deletion drains its waiters before the object is freed.
 namespace {
 
 constexpr int SCE_KERNEL_ERROR_EINVAL = static_cast<int>(0x80020016);
@@ -23,7 +20,7 @@ constexpr std::uint32_t WAITMODE_AND = 0x01;
 constexpr std::uint32_t WAITMODE_OR = 0x02;
 constexpr std::uint32_t WAITMODE_CLEAR_ALL = 0x10;
 constexpr std::uint32_t WAITMODE_CLEAR_PAT = 0x20;
-constexpr std::uint32_t ATTR_SINGLE = 0x10; // SCE_KERNEL_EVF_ATTR_SINGLE; MULTI is 0x20
+constexpr std::uint32_t ATTR_SINGLE = 0x10;
 
 bool Satisfied(std::uint64_t pattern, std::uint64_t bits, std::uint32_t mode) {
     if ((mode & WAITMODE_AND) != 0) return (pattern & bits) == bits;
@@ -82,7 +79,7 @@ int APS5_VABI sceKernelSetEventFlag(KernelEventFlag ef, uint64_t bit_pattern) {
 int APS5_VABI sceKernelClearEventFlag(KernelEventFlag ef, uint64_t bit_pattern) {
     if (ef == nullptr) return SCE_KERNEL_ERROR_EINVAL;
     std::lock_guard lock(ef->mutex);
-    ef->pattern &= bit_pattern; // the console clears the bits that are zero in the argument
+    ef->pattern &= bit_pattern;
     return 0;
 }
 
@@ -129,7 +126,7 @@ int APS5_VABI sceKernelWaitEventFlag(KernelEventFlag ef, uint64_t bit_pattern, u
     }
     if (result_pat != nullptr) *result_pat = ef->pattern;
     if (ef->deleted) {
-        ef->condition.notify_all(); // the deleter waits for the last waiter to leave
+        ef->condition.notify_all();
         return SCE_KERNEL_ERROR_EACCES;
     }
     if (ef->cancelGeneration != generation) return SCE_KERNEL_ERROR_ECANCELED;

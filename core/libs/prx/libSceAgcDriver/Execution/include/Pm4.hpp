@@ -25,14 +25,7 @@ std::string Name(std::uint32_t header);
 std::string_view UnsupportedReason(std::uint32_t header);
 void Wait(std::span<const std::uint32_t> packet);
 bool TryWait(std::span<const std::uint32_t> packet);
-// Evaluates the wait against `lookup` first: a label with a deferred (not yet executed) write
-// reads that value, like the console's in-order command processor sees it.
 bool TryWait(std::span<const std::uint32_t> packet, const std::function<bool(std::uint64_t, std::uint32_t, std::uint64_t&)>& lookup);
-// Whether the packet is a label write that can complete with the GPU work before it (its
-// destination, width and value; `known` false when the value is only known at execution).
-// The memory ranges a WRITE_DATA, COPY_DATA or DMA_DATA packet writes and (for memory sources) reads.
-// DMA_DATA selectors: a GDS destination or source (offsets into the global data share) and an
-// immediate 32-bit source.
 bool DmaGdsDestination(std::span<const std::uint32_t> packet);
 bool DmaGdsSource(std::span<const std::uint32_t> packet);
 bool DmaImmediateSource(std::span<const std::uint32_t> packet);

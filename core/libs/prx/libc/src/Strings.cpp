@@ -16,7 +16,6 @@ void* APS5_VABI memset_nid_postfix(void* s, int c, size_t n) {
 }
 
 void* APS5_VABI memcpy_nid_postfix(void* dest, const void* src, size_t n) {
-    // ANYPS5_TRACE_MEMCPY: a sparse sample of guest memcpy calls (size and caller).
     static const bool trace = std::getenv("ANYPS5_TRACE_MEMCPY") != nullptr;
     if (trace) {
         thread_local unsigned long long calls = 0, bytes = 0;
@@ -38,7 +37,6 @@ const void* APS5_VABI memchr_nid_postfix(const void* s, int c, size_t n) {
     return std::memchr(s, c, n);
 }
 
-// Compiler runtime: a float raised to an integer power (by squaring, like libgcc's __powisf2).
 float APS5_VABI __powisf2_nid_postfix(float base, int exponent) {
     const bool negative = exponent < 0;
     unsigned remaining = negative ? 0u - static_cast<unsigned>(exponent) : static_cast<unsigned>(exponent);
@@ -50,7 +48,6 @@ float APS5_VABI __powisf2_nid_postfix(float base, int exponent) {
     return negative ? 1.0f / result : result;
 }
 
-// Only the C locale exists: collation is byte order.
 int APS5_VABI strcoll_nid_postfix(const char* s1, const char* s2) {
     if (!s1 || !s2) throw std::invalid_argument("strcoll: null string");
     return std::strcmp(s1, s2);

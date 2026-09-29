@@ -12,8 +12,6 @@
 namespace AgcDriver::Graphics {
 
 void DrawQueue::retire(Batch batch) {
-    // GPU time estimate: a batch runs from its submission (or the previous batch's completion)
-    // until the host saw its fence signalled; polling makes this an upper bound.
     if (auto* frame = PerformanceContext::Current(); frame != nullptr && batch.commands) {
         const auto begin = std::max(batch.commands->submittedAt, lastCompletion);
         if (batch.commands->completedAt > begin) frame->Add(frame->Get("Graphics.GpuEstimate", "busy"), std::chrono::duration_cast<FrameTiming::Clock::duration>(batch.commands->completedAt - begin));
@@ -53,7 +51,6 @@ void DrawQueue::WaitGpu() {
 void DrawQueue::Wait() {
     if (pending.empty() && !recording.commands) return;
     PerformanceTimer timing("Graphics.DrawQueue.Wait");
-    // ANYPS5_TRACE_WAITS=<seconds>: from that time on, the callers of the first waits (diagnostics).
     if (static const char* traceWaits = std::getenv("ANYPS5_TRACE_WAITS"); traceWaits != nullptr) {
         static const auto traceStart = std::chrono::steady_clock::now();
         static int reported = 0;

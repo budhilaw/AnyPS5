@@ -8,11 +8,6 @@
 #include <thread>
 #include <unordered_map>
 
-// Reader-writer locks with the console's libthr semantics: a thread may hold several read locks
-// at once (a recursive read is granted even while a writer waits, which is what keeps IL2CPP's
-// nested metadata reads from deadlocking against its writers), writers are otherwise preferred,
-// and unlock tells readers from the writer by ownership. PTHREAD_RWLOCK_INITIALIZER is a null
-// handle on the console, so the first operation creates the lock.
 struct PthreadRwlockPrivate {
     std::mutex mutex;
     std::condition_variable readersReady;
@@ -35,8 +30,6 @@ constexpr int SCE_KERNEL_ERROR_ENOMEM = 0x8002000C;
 constexpr int SCE_KERNEL_ERROR_EBUSY = 0x80020010;
 constexpr int SCE_KERNEL_ERROR_EINVAL = 0x80020016;
 
-// Read locks held by the calling thread, per lock (FreeBSD's rdlock_count, kept per lock so the
-// count survives interleaved locks).
 unsigned& HeldReads(PthreadRwlockPrivate* lock) {
     thread_local std::unordered_map<PthreadRwlockPrivate*, unsigned> held;
     return held[lock];
@@ -134,7 +127,6 @@ int APS5_VABI scePthreadRwlockUnlock(PthreadRwlock* rwlock) {
         return SCE_KERNEL_ERROR_EPERM;
     }
     guard.unlock();
-    // Writers first (they were preferred while waiting), then any readers they held back.
     p->writersReady.notify_one();
     p->readersReady.notify_all();
     return SCE_OK;

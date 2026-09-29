@@ -11,9 +11,6 @@ namespace AgcDriver::Graphics {
 
 namespace {
 
-// Draws per submitted command buffer, and the command buffers the GPU may have in flight before
-// recording waits for the oldest (which bounds the memory in-flight draws hold). Earlier
-// batches of 8 draws with a full drain every 64 kept the GPU and the recorder taking turns.
 constexpr std::size_t BatchDraws = 64;
 constexpr std::size_t MaxPendingBatches = 4;
 
@@ -73,7 +70,6 @@ void DrawQueue::EndPass() {
     boundPipeline = VK_NULL_HANDLE;
     const auto commands = recording.commands->Handle();
     endRenderPass(commands);
-    // What the pass's draws wrote is visible to later transfers, shaders and the host.
     VkMemoryBarrier download{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
     download.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT;
     download.dstAccessMask = VK_ACCESS_HOST_READ_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT;
@@ -111,8 +107,6 @@ void DrawQueue::EnqueueUpload(std::function<void()> release, std::size_t bytes) 
 void DrawQueue::Flush() {
     if (!recording.commands) return;
     EndPass();
-    // A batch without draws still carries barriers and layout transitions (or a draw failed
-    // after it began): submitting it keeps the command buffer reusable and the queue in order.
     pending.push_back(std::move(recording));
     recording = Batch{};
     pending.back().commands->Submit();
@@ -126,7 +120,6 @@ void DrawQueue::Resolve(std::uint64_t address, std::size_t bytes, bool ordered) 
     const auto overlaps = [&](const Writer& writer) {
         const auto& resources = *writer.resources;
         if (ordered ? !resources.WritesOverlapCopied(address, bytes) : !resources.WritesOverlap(address, bytes)) return false;
-        // ANYPS5_TRACE_WAITS: the in-flight write ranges that make a target lookup wait (diagnostics).
         static const char* traceValue = std::getenv("ANYPS5_TRACE_WAITS");
         static const auto traceStart = std::chrono::steady_clock::now();
         static int reported = 0;

@@ -14,17 +14,15 @@ namespace {
 using Bytes = std::vector<std::uint8_t>;
 
 constexpr std::uint64_t Page = 0x1000;
-constexpr std::uint64_t PageZeroSize = 0x100000000;       // 4 GiB __PAGEZERO, as Apple's linker emits
-constexpr std::uint64_t HeaderSize = 0x4000;              // __TEXT: Mach-O header, load commands, entry stub
+constexpr std::uint64_t PageZeroSize = 0x100000000;
+constexpr std::uint64_t HeaderSize = 0x4000;
 constexpr std::uint16_t ElfTypeSceModule = 0xFE18;
 
 constexpr std::uint32_t MhMagic64 = 0xfeedfacf;
 constexpr std::uint32_t CpuTypeX86_64 = 0x01000007;
 constexpr std::uint32_t CpuSubtypeX86_64All = 0x80000003;
 constexpr std::uint32_t MhExecute = 2, MhDylib = 6;
-// The executable is not position independent: dyld would slide it by a 4 KiB multiple, while the
-// guest assumes 16 KiB pages and rounds addresses accordingly, which must stay inside the image.
-constexpr std::uint32_t MhFlagsExecute = 0x1 | 0x4 | 0x80; // NOUNDEFS | DYLDLINK | TWOLEVEL
+constexpr std::uint32_t MhFlagsExecute = 0x1 | 0x4 | 0x80;
 constexpr std::uint32_t MhFlagsDylib = 0x1 | 0x4 | 0x80;
 
 constexpr std::uint32_t LcSegment64 = 0x19;
@@ -83,7 +81,6 @@ struct Segment {
     std::uint64_t Vmaddr = 0, Vmsize = 0, Fileoff = 0, Filesize = 0;
     std::uint32_t Prot = 0;
     std::vector<Section> Sections;
-    // Guest segments only: the ELF program headers they carry (loads sharing a page are merged).
     std::vector<Domain::ProgramHeader> Members;
 };
 
@@ -151,12 +148,11 @@ std::vector<Relocation> readRelocations(const Domain::SysVDynamicSection& dynami
 struct GuestExport { std::string Name; std::uint64_t Vaddr; };
 
 std::uint64_t moduleIdentifier(const std::string& name) {
-    std::uint64_t hash = 1469598103934665603ull; // FNV-1a; libkernel matches this against __modtls
+    std::uint64_t hash = 1469598103934665603ull;
     for (const unsigned char c : name) { hash ^= c; hash *= 1099511628211ull; }
     return (hash & 0x7fffffffu) | 1u;
 }
 
-// Reads DT_* values of the ELF's PT_DYNAMIC segment.
 std::map<std::int64_t, std::vector<std::uint64_t>> dynamicTags(const Bytes& elf, const std::vector<Domain::ProgramHeader>& headers) {
     std::map<std::int64_t, std::vector<std::uint64_t>> tags;
     for (const auto& header : headers) {
@@ -177,7 +173,6 @@ std::uint64_t fileOffsetOf(std::uint64_t vaddr, std::uint64_t size, const std::v
     throw Domain::RelinkerException("Address is not backed by a loadable segment", vaddr);
 }
 
-// Defined dynamic symbols of a module: NID (the "#lib#module" suffix stripped) and address.
 std::vector<GuestExport> moduleExports(const Bytes& elf, const std::map<std::int64_t, std::vector<std::uint64_t>>& tags, const std::vector<Domain::ProgramHeader>& loads) {
     const auto single = [&](std::int64_t tag) -> std::uint64_t {
         const auto found = tags.find(tag);
@@ -198,13 +193,12 @@ std::vector<GuestExport> moduleExports(const Bytes& elf, const std::map<std::int
         std::string name(reinterpret_cast<const char*>(elf.data() + nameFile));
         name = name.substr(0, name.find('#'));
         if (name.empty()) throw Domain::RelinkerException("Module export with an empty name", entry);
-        if (!unique.insert(name).second) continue; // the same NID exported under several library suffixes
+        if (!unique.insert(name).second) continue;
         exports.push_back({name, value});
     }
     return exports;
 }
 
-// dyld export trie (LC_DYLD_INFO export_off): uleb terminal size [flags, offset], child count, edges.
 class ExportTrie {
 public:
     explicit ExportTrie(const std::vector<std::pair<std::string, std::uint64_t>>& entries) {
@@ -216,7 +210,6 @@ public:
         std::vector<std::uint64_t> offsets(order.size(), 0);
         std::map<const Node*, std::size_t> indices;
         for (std::size_t i = 0; i < order.size(); ++i) indices[order[i]] = i;
-        // Node sizes depend on child offsets (uleb); iterate until stable.
         for (int pass = 0; pass < 16; ++pass) {
             std::uint64_t cursor = 0;
             bool changed = false;
@@ -239,11 +232,11 @@ private:
         while (!rest.empty()) {
             bool advanced = false;
             for (auto& [edgeKey, child] : node->children) {
-                const std::string edge = edgeKey; // copied: the map entry may be erased below
+                const std::string edge = edgeKey;
                 std::size_t common = 0;
                 while (common < edge.size() && common < rest.size() && edge[common] == rest[common]) ++common;
                 if (common == 0) continue;
-                if (common < edge.size()) { // split the edge
+                if (common < edge.size()) {
                     Node split;
                     split.children.emplace(edge.substr(common), std::move(child));
                     node->children.erase(edge);
@@ -290,7 +283,6 @@ class Layout {
 public:
     std::vector<Segment> Segments;
 
-    // Segment index and offset for a Mach-O virtual address.
     std::pair<std::size_t, std::uint64_t> Locate(std::uint64_t vmaddr) const {
         for (std::size_t index = 0; index < Segments.size(); ++index) {
             const auto& segment = Segments[index];
@@ -312,17 +304,16 @@ std::vector<std::uint8_t> MachOPatcher::Patch(
     const bool dependencyDiagnostics)
 {
     (void)originalPltGotVaddr;
-    (void)lazyBinding; // dyld binds every import at load; the guest never observes lazy resolution
+    (void)lazyBinding;
     if (dependencyDiagnostics) throw Domain::RelinkerException("macOS target does not support --windows-diagnostics");
     if (sourceElf.size() < 64) throw Domain::RelinkerException("ELF too small for a Mach-O conversion");
     const auto entry = Io::ReadU64(sourceElf, kEhdrEntryOffset);
     const bool module = Io::ReadU16(sourceElf, 16) == ElfTypeSceModule;
     const std::uint64_t HeaderVmaddr = module ? 0 : PageZeroSize;
-    const std::uint64_t GuestBase = HeaderVmaddr + HeaderSize; // guest virtual address 0 maps here
+    const std::uint64_t GuestBase = HeaderVmaddr + HeaderSize;
     const auto tags = dynamicTags(sourceElf, originalHeaders);
     const auto moduleId = moduleIdentifier(_outputName);
 
-    // Guest segments in address order.
     std::vector<Domain::ProgramHeader> loads;
     const Domain::ProgramHeader* tls = nullptr;
     const Domain::ProgramHeader* processParameters = nullptr;
@@ -350,7 +341,6 @@ std::vector<std::uint8_t> MachOPatcher::Patch(
     for (const auto& load : loads) entryMapped = entryMapped || ((load.Flags & 1) && entry >= load.MappedAddress && entry - load.MappedAddress < load.MemorySize);
     if (!module && !entryMapped) throw Domain::RelinkerException("ELF entry point is not in an executable segment", entry);
 
-    // Guest code: rewrite thread-local storage access before the bytes are copied.
     Bytes image = sourceElf;
     const auto tlsRewrite = RewriteTlsAccesses(image, originalHeaders, tls, !module);
     const bool publishTls = tls != nullptr && tls->MemorySize != 0;
@@ -360,13 +350,9 @@ std::vector<std::uint8_t> MachOPatcher::Patch(
     const auto relocations = readRelocations(dynamicSection);
     const auto rpath = translateRunPath(runPath);
 
-    // Layout: __PAGEZERO, __TEXT (header + stub), guest segments, __ANYPS5, __LINKEDIT.
     Layout layout;
     if (!module) layout.Segments.push_back({"__PAGEZERO", 0, PageZeroSize, 0, 0, 0, {}, {}});
     layout.Segments.push_back({"__TEXT", HeaderVmaddr, HeaderSize, 0, HeaderSize, VmProtRead | VmProtExecute, {}, {}});
-    // Loads whose page ranges intersect (a zero-filled tail followed by the next segment on the
-    // same page, as ELF linkers emit) become one Mach-O segment with the union of their permissions;
-    // later members overwrite earlier ones on the shared page, as the ELF loader would map them.
     std::vector<Segment> guests;
     for (const auto& load : loads) {
         const auto first = load.MappedAddress & ~(Page - 1);
@@ -382,15 +368,13 @@ std::vector<std::uint8_t> MachOPatcher::Patch(
         segment.Name = "__GUEST" + std::to_string(guests.size());
         segment.Vmaddr = GuestBase + first;
         segment.Vmsize = last - first;
-        segment.Prot = protection(load.Flags) | VmProtRead; // dyld and this runtime read every segment
+        segment.Prot = protection(load.Flags) | VmProtRead;
         segment.Members.push_back(load);
         guests.push_back(std::move(segment));
     }
     std::uint64_t fileCursor = HeaderSize;
     for (auto& segment : guests) {
-        // A __text section over executable guest bytes lets otool/objdump/lldb disassemble them; dyld ignores it.
         segment.Sections.clear();
-        // macOS enforces W^X for translated code and dyld cannot apply fixups to read-execute pages.
         if ((segment.Prot & VmProtWrite) != 0 && (segment.Prot & VmProtExecute) != 0)
             throw Domain::RelinkerException("Writable and executable segments are not supported on macOS", segment.Members.front().Offset);
         std::uint64_t fileEnd = 0;
@@ -403,8 +387,6 @@ std::vector<std::uint8_t> MachOPatcher::Patch(
     }
     const std::uint64_t guestEnd = layout.Segments.back().Vmaddr + layout.Segments.back().Vmsize;
 
-    // Guest metadata for libc.prx and libkernel.prx.
-    // Read-write: dyld binds the entry stub's exit slot here.
     Segment metadata{"__ANYPS5", guestEnd + Page, 0, fileCursor, 0, VmProtRead | VmProtWrite, {}, {}};
     const auto addSection = [&](const char* name, Bytes data) {
         while (metadata.Filesize % 16) { ++metadata.Filesize; }
@@ -425,15 +407,6 @@ std::vector<std::uint8_t> MachOPatcher::Patch(
         appendU64(data, tls->FileSize); appendU64(data, tls->MemorySize); appendU64(data, std::max<std::uint64_t>(tls->Alignment, 1)); appendU64(data, module ? moduleId : GuestTcbSlot);
         addSection(module ? "__modtls" : "__tls", std::move(data));
     }
-    // Module initializers (DT_INIT, then DT_INIT_ARRAY) run as dyld initializers; the PS5 loader
-    // runs them when the module is loaded. The executable's are left to its own startup code.
-    // DT_INIT of a PS5 module is the SDK's `_init(args, argp, start)`: it runs the constructors and
-    // tail-calls `start` when nonzero. dyld passes (argc, argv, envp, ...) to initializers, so a
-    // trampoline in the header page clears the three registers before jumping to it.
-    // DT_INIT of a PS5 module is the SDK's `_init(args, argp, start)`, which the console's loader
-    // calls with the arguments of sceKernelLoadStartModule; it runs the constructors and then
-    // module_start. dyld cannot pass those arguments, so the address is published in an `__init`
-    // metadata slot and libkernel calls it after dlopen. DT_INIT_ARRAY entries stay dyld initializers.
     std::vector<std::uint64_t> initializers;
     std::uint64_t moduleInit = 0;
     if (module) {
@@ -465,9 +438,6 @@ std::vector<std::uint8_t> MachOPatcher::Patch(
         for (const auto initializer : initializers) appendU64(data, GuestBase + initializer);
         addSection("__mod_init_func", std::move(data));
     }
-    // Slot bound to libSystem's exit for the entry stub, and, when the guest links libc.prx, a slot
-    // bound to libc's guest-main runner: on macOS the guest's main runs on a secondary thread so
-    // the process main thread stays free for Cocoa (window creation and event delivery).
     const bool hopMain = !module && std::find(libraries.begin(), libraries.end(), "libc.prx") != libraries.end();
     const std::uint64_t exitSlotVmaddr = metadata.Vmaddr + alignUp(metadata.Filesize, 16);
     if (!module) { Bytes data(8, 0); addSection("__exit", std::move(data)); }
@@ -478,7 +448,6 @@ std::vector<std::uint8_t> MachOPatcher::Patch(
     fileCursor += metadata.Filesize;
     layout.Segments.push_back(std::move(metadata));
 
-    // Entry stub inside __TEXT: main(argc, argv, ...) -> guest _start(&{argc, argv}, nullptr), then exit(eax).
     Bytes stub;
     const std::uint64_t stubVmaddr = HeaderVmaddr + 0x2000;
     const std::uint64_t guestEntry = GuestBase + entry;
@@ -486,7 +455,6 @@ std::vector<std::uint8_t> MachOPatcher::Patch(
         const std::uint8_t prologue[] = {0x55, 0x48, 0x89, 0xe5, 0x48, 0x83, 0xec, 0x30, 0x48, 0x83, 0xe4, 0xf0, 0x89, 0x3c, 0x24, 0x48, 0x89, 0x74, 0x24, 0x08, 0x48, 0x89, 0xe7, 0x31, 0xf6};
         stub.insert(stub.end(), prologue, prologue + sizeof(prologue));
         if (hopMain) {
-            // lea guestEntry(%rip), %rsi; call *runmain(%rip): LibcRunGuestMain(args, entry)
             const auto leaNext = stubVmaddr + stub.size() + 7;
             const auto leaRel = static_cast<std::int64_t>(guestEntry) - static_cast<std::int64_t>(leaNext);
             if (leaRel < INT32_MIN || leaRel > INT32_MAX) throw Domain::RelinkerException("Guest entry point is out of call range", entry);
@@ -501,15 +469,14 @@ std::vector<std::uint8_t> MachOPatcher::Patch(
             if (rel < INT32_MIN || rel > INT32_MAX) throw Domain::RelinkerException("Guest entry point is out of call range", entry);
             stub.push_back(0xe8); appendU32(stub, static_cast<std::uint32_t>(static_cast<std::int32_t>(rel)));
         }
-        stub.push_back(0x89); stub.push_back(0xc7); // mov %eax, %edi
+        stub.push_back(0x89); stub.push_back(0xc7);
         const auto exitCallNext = stubVmaddr + stub.size() + 6;
         const auto exitRel = static_cast<std::int64_t>(exitSlotVmaddr) - static_cast<std::int64_t>(exitCallNext);
         if (exitRel < INT32_MIN || exitRel > INT32_MAX) throw Domain::RelinkerException("Exit slot is out of range");
-        stub.push_back(0xff); stub.push_back(0x15); appendU32(stub, static_cast<std::uint32_t>(static_cast<std::int32_t>(exitRel))); // call *exit(%rip)
-        stub.push_back(0x0f); stub.push_back(0x0b); // ud2
+        stub.push_back(0xff); stub.push_back(0x15); appendU32(stub, static_cast<std::uint32_t>(static_cast<std::int32_t>(exitRel)));
+        stub.push_back(0x0f); stub.push_back(0x0b);
     }
 
-    // Rebase and bind streams (dyld classic opcodes), sorted by address.
     Bytes rebase, bind;
     {
         std::vector<const Relocation*> rebases, binds;
@@ -517,44 +484,43 @@ std::vector<std::uint8_t> MachOPatcher::Patch(
         for (std::size_t index = 0; index < initializers.size(); ++index) initializerRebases.push_back({initializerVmaddr + index * 8 - GuestBase, RelocationRelative, 0, {}});
         if (moduleInit != 0) initializerRebases.push_back({moduleInitVmaddr - GuestBase, RelocationRelative, 0, {}});
         for (const auto& relocation : relocations) {
-            if (relocation.Type == RelocationTlsModule || relocation.Type == RelocationTlsOffset) continue; // resolved statically below
+            if (relocation.Type == RelocationTlsModule || relocation.Type == RelocationTlsOffset) continue;
             (relocation.Type == RelocationRelative ? rebases : binds).push_back(&relocation);
         }
         for (const auto& relocation : initializerRebases) rebases.push_back(&relocation);
         const auto byAddress = [](const Relocation* a, const Relocation* b) { return a->Address < b->Address; };
         std::sort(rebases.begin(), rebases.end(), byAddress);
         std::sort(binds.begin(), binds.end(), byAddress);
-        appendU8(rebase, 0x11); // REBASE_OPCODE_SET_TYPE_IMM | REBASE_TYPE_POINTER
+        appendU8(rebase, 0x11);
         std::size_t currentSegment = SIZE_MAX;
         std::uint64_t nextOffset = 0;
         for (const auto* relocation : rebases) {
             const auto [segment, offset] = layout.Locate(GuestBase + relocation->Address);
             if (segment != currentSegment || offset != nextOffset) {
-                appendU8(rebase, static_cast<std::uint8_t>(0x20 | segment)); appendUleb(rebase, offset); // SET_SEGMENT_AND_OFFSET_ULEB
+                appendU8(rebase, static_cast<std::uint8_t>(0x20 | segment)); appendUleb(rebase, offset);
                 currentSegment = segment;
             }
-            appendU8(rebase, 0x51); // DO_REBASE_IMM_TIMES 1
+            appendU8(rebase, 0x51);
             nextOffset = offset + 8;
         }
         appendU8(rebase, 0);
-        appendU8(bind, 0x3e); // BIND_OPCODE_SET_DYLIB_SPECIAL_IMM(BIND_SPECIAL_DYLIB_FLAT_LOOKUP)
-        appendU8(bind, 0x51); // BIND_OPCODE_SET_TYPE_IMM(BIND_TYPE_POINTER)
+        appendU8(bind, 0x3e);
+        appendU8(bind, 0x51);
         std::string currentSymbol;
         std::int64_t currentAddend = 0;
         bool first = true;
         for (const auto* relocation : binds) {
             const auto [segment, offset] = layout.Locate(GuestBase + relocation->Address);
             if (first || relocation->Symbol != currentSymbol) {
-                appendU8(bind, 0x40); bind.push_back('_'); bind.insert(bind.end(), relocation->Symbol.begin(), relocation->Symbol.end()); appendU8(bind, 0); // SET_SYMBOL_TRAMPOLINE_FLAGS_IMM
+                appendU8(bind, 0x40); bind.push_back('_'); bind.insert(bind.end(), relocation->Symbol.begin(), relocation->Symbol.end()); appendU8(bind, 0);
                 currentSymbol = relocation->Symbol;
             }
             const auto addend = relocation->Type == RelocationJumpSlot ? 0 : relocation->Addend;
-            if (first || addend != currentAddend) { appendU8(bind, 0x60); appendSleb(bind, addend); currentAddend = addend; } // SET_ADDEND_SLEB
-            appendU8(bind, static_cast<std::uint8_t>(0x70 | segment)); appendUleb(bind, offset); // SET_SEGMENT_AND_OFFSET_ULEB
-            appendU8(bind, 0x90); // DO_BIND
+            if (first || addend != currentAddend) { appendU8(bind, 0x60); appendSleb(bind, addend); currentAddend = addend; }
+            appendU8(bind, static_cast<std::uint8_t>(0x70 | segment)); appendUleb(bind, offset);
+            appendU8(bind, 0x90);
             first = false;
         }
-        // The stub's exit slot.
         if (!module) {
             const auto [segment, offset] = layout.Locate(exitSlotVmaddr);
             appendU8(bind, 0x40); const char name[] = "_exit"; bind.insert(bind.end(), name, name + sizeof(name));
@@ -572,7 +538,6 @@ std::vector<std::uint8_t> MachOPatcher::Patch(
         appendU8(bind, 0);
     }
 
-    // __LINKEDIT: rebase, bind, symbol table (empty) and string table.
     Segment linkedit{"__LINKEDIT", 0, 0, fileCursor, 0, VmProtRead, {}, {}};
     const auto lastGuest = layout.Segments.back();
     linkedit.Vmaddr = lastGuest.Vmaddr + lastGuest.Vmsize;
@@ -587,10 +552,6 @@ std::vector<std::uint8_t> MachOPatcher::Patch(
     }
     const auto exportOffset = linkedit.Fileoff + linkeditData.size(); linkeditData.insert(linkeditData.end(), exportTrie.begin(), exportTrie.end()); while (linkeditData.size() % 8) linkeditData.push_back(0);
     const auto stringOffset = linkedit.Fileoff + linkeditData.size(); linkeditData.push_back(0); linkeditData.push_back(0); while (linkeditData.size() % 8) linkeditData.push_back(0);
-    // Function starts: Rosetta translates ahead of time the code it can find from them. Without
-    // them it finds little of a stripped guest image and translates the rest at run time, which
-    // runs markedly slower (Hades: 52 ms frames became 42 ms). Every FDE of the unwind table
-    // starts a function; so does code that relative relocations point at (vtables, callbacks).
     Bytes functionStarts;
     {
         std::set<std::uint64_t> starts;
@@ -601,7 +562,6 @@ std::vector<std::uint8_t> MachOPatcher::Patch(
         if (exceptionHeader != nullptr && exceptionHeader->FileSize >= 12) {
             const auto base = static_cast<std::size_t>(exceptionHeader->Offset);
             const auto version = sourceElf[base], countEncoding = sourceElf[base + 2], tableEncoding = sourceElf[base + 3];
-            // DW_EH_PE_udata4 count, DW_EH_PE_datarel | DW_EH_PE_sdata4 table: what linkers emit.
             if (version == 1 && countEncoding == 0x03 && tableEncoding == 0x3b) {
                 const auto count = Io::ReadU32(sourceElf, base + 8);
                 if (12 + static_cast<std::uint64_t>(count) * 8 <= exceptionHeader->FileSize) {
@@ -635,7 +595,6 @@ std::vector<std::uint8_t> MachOPatcher::Patch(
     linkedit.Vmsize = alignUp(linkeditData.size(), Page);
     layout.Segments.push_back(linkedit);
 
-    // Load commands.
     Bytes commands;
     std::uint32_t commandCount = 0;
     const auto segmentCommand = [&](const Segment& segment) {
@@ -703,7 +662,6 @@ std::vector<std::uint8_t> MachOPatcher::Patch(
     }
     if (32 + commands.size() > stubVmaddr - HeaderVmaddr) throw Domain::RelinkerException("Mach-O load commands exceed the header page");
 
-    // Assemble the file.
     Bytes out(static_cast<std::size_t>(fileCursor + linkedit.Filesize), 0);
     Bytes header;
     appendU32(header, MhMagic64); appendU32(header, CpuTypeX86_64); appendU32(header, CpuSubtypeX86_64All); appendU32(header, module ? MhDylib : MhExecute);
@@ -719,8 +677,6 @@ std::vector<std::uint8_t> MachOPatcher::Patch(
             if (section.Name != "__text") std::copy(section.Data.begin(), section.Data.end(), out.begin() + static_cast<std::ptrdiff_t>(section.Fileoff));
     std::copy(linkeditData.begin(), linkeditData.end(), out.begin() + static_cast<std::ptrdiff_t>(linkedit.Fileoff));
 
-    // RELATIVE relocation targets hold GuestBase + addend before dyld adds the slide; TLS module
-    // relocations hold the module id and the offset inside the module's thread block.
     for (const auto& relocation : relocations) {
         if (relocation.Type != RelocationRelative && relocation.Type != RelocationTlsModule && relocation.Type != RelocationTlsOffset) continue;
         const auto [segmentIndex, offset] = layout.Locate(GuestBase + relocation.Address);

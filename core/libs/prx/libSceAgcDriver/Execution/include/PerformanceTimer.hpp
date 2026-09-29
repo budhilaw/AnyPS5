@@ -26,9 +26,6 @@
 
 namespace AgcDriver {
 
-// A monotonic clock that stays cheap under Rosetta: steady_clock goes through
-// mach_continuous_time, which traps, and the driver reads the clock tens of thousands of times
-// per frame for its timing marks. mach_absolute_time is a commpage read.
 struct TimingClock {
     using rep = std::int64_t;
     using period = std::nano;
@@ -54,10 +51,9 @@ class FrameTiming {
 public:
     using Clock = TimingClock;
 
-    // Updated without the frame's lock: the driver and graphics threads mark the same frame.
     struct Metric {
-        std::atomic<std::int64_t> total{0};    // nanoseconds
-        std::atomic<std::int64_t> maximum{0};  // nanoseconds
+        std::atomic<std::int64_t> total{0};
+        std::atomic<std::int64_t> maximum{0};
         std::atomic<std::uint64_t> count{0};
         std::atomic<std::uint64_t> bytes{0};
     };
@@ -65,8 +61,6 @@ public:
     explicit FrameTiming(std::uint64_t id) : id(id) {}
 
     Metric* Get(const char* scope, const char* stage) {
-        // Timers pass string literals: their addresses find the metric without comparing text,
-        // first in a per-thread cache (frames are keyed by id: a new frame may reuse an address).
         struct Cached { std::uint64_t frame; const FrameTiming* owner; const char* scope; const char* stage; Metric* metric; };
         thread_local std::array<Cached, 256> cache{};
         const auto slot = (std::hash<const void*>{}(scope) * 31u ^ std::hash<const void*>{}(stage)) % cache.size();
@@ -151,8 +145,6 @@ public:
         if (std::fwrite(text.data(), 1, text.size(), stdout) != text.size() || std::fflush(stdout) != 0) throw std::runtime_error("Frame timing: report write failed");
     }
 
-    // Prints the metrics gathered so far for a frame that has not flipped yet (diagnostics for
-    // phases where the title renders without presenting).
     void PrintPartial(const char* reason) {
         std::lock_guard lock(mutex);
         std::ostringstream output;

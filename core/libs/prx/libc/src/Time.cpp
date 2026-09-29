@@ -49,8 +49,6 @@ GuestTm* APS5_VABI localtime_nid_postfix(const int64_t* timer) {
     return libc_localtime_nid_postfix(timer);
 }
 
-// C11 Annex K order, as Sony's libc declares them: struct tm* gmtime_s(const time_t*, struct tm*)
-// (the Microsoft order would write the structure over the caller's time value).
 GuestTm* APS5_VABI localtime_s_nid_postfix(const int64_t* timer, GuestTm* result) {
     if (timer == nullptr || result == nullptr) return nullptr;
     const std::time_t t = static_cast<std::time_t>(*timer);
@@ -72,14 +70,14 @@ GuestTm* APS5_VABI gmtime_s_nid_postfix(const int64_t* timer, GuestTm* result) {
 int64_t APS5_VABI libc_mktime_nid_postfix(GuestTm* timeptr) {
     std::tm host = ToHostTm(*timeptr);
     const auto result = std::mktime(&host);
-    *timeptr = ToGuestTm(host); // mktime normalizes the fields
+    *timeptr = ToGuestTm(host);
     return static_cast<int64_t>(result);
 }
 
 int64_t APS5_VABI mktime_nid_postfix(GuestTm* timeptr) {
     std::tm host = ToHostTm(*timeptr);
     const auto result = std::mktime(&host);
-    *timeptr = ToGuestTm(host); // mktime normalizes the fields
+    *timeptr = ToGuestTm(host);
     return static_cast<int64_t>(result);
 }
 
@@ -93,7 +91,6 @@ size_t APS5_VABI strftime_nid_postfix(char* str, size_t count, const char* forma
     return std::strftime(str, count, format, &host);
 }
 
-// The guest's wchar_t is 16 bits wide; the C locale's conversions produce ASCII only.
 size_t APS5_VABI wcsftime_nid_postfix(std::uint16_t* str, size_t count, const std::uint16_t* format, const GuestTm* guestTime) {
     if (!str || !format || !guestTime || count == 0) return 0;
     const std::tm hostTime = ToHostTm(*guestTime);

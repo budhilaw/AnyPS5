@@ -5,8 +5,6 @@
 #include <cstdio>
 #include <cstring>
 
-// Seconds since libc's clock started (process start), for relating log lines to wall time.
-// Defined once in libc so every library shares the origin.
 double Aps5LogSeconds();
 
 inline const char* TrimNidPostfix(const char* func) {

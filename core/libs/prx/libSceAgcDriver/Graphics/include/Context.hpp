@@ -18,8 +18,6 @@ class PipelineCache;
 class GuestBufferCache;
 class Buffer;
 
-// Counts every queue submission of the process, so an idle wait can be skipped when nothing was
-// submitted since the last one.
 inline std::atomic<std::uint64_t>& QueueSubmissionCounter() {
     static std::atomic<std::uint64_t> counter{0};
     return counter;
@@ -81,8 +79,6 @@ struct Context {
 
     template<typename TFunction>
     TFunction Function(const char* name) const {
-        // Callers pass string literals and a command costs a name lookup in the loader and
-        // MoltenVK otherwise: every function type remembers its last device, name and entry.
         struct Cached {
             VkDevice device;
             const char* name;
@@ -103,16 +99,10 @@ struct Context {
         }
         throw std::runtime_error("AGC graphics: required Vulkan memory type is unavailable");
     }
-    // The owner of `pipelineCache`, for persisting it after slow compiles (may be null).
     PipelineCache* pipelineCacheOwner = nullptr;
-    // Persistent GPU mirrors of guest buffers (may be null: every binding then copies).
     GuestBufferCache* guestBufferCache = nullptr;
-    // The global data share (64 KiB) shaders and CP transfers address by offset (may be null).
     Buffer* gds = nullptr;
-    // The device clamps depth instead of clipping (PA_CL_CLIP_CNTL near/far clip disabled).
     bool depthClamp = false;
-    // VK_EXT_external_memory_host: host memory (guest memory's host alias) can back buffers
-    // directly, pointers and sizes aligned to hostPointerAlignment.
     bool hostPointerImport = false;
     VkDeviceSize hostPointerAlignment = 0;
 };

@@ -68,7 +68,7 @@ int APS5_VABI sceKernelWaitSema(KernelSema sem, int need, KernelUseconds* time) 
  }
  --sem->waiters;
  if (sem->deleted) {
-  sem->condition.notify_all(); // the deleter waits for the last waiter to leave
+  sem->condition.notify_all();
   return KERNEL_SEMA_ERROR_EACCES;
  }
  if (sem->cancelGeneration != generation) return KERNEL_SEMA_ERROR_ECANCELED;
@@ -81,7 +81,7 @@ int APS5_VABI sceKernelCancelSema(KernelSema sem, int count, int* threads) {
  if (sem == nullptr || count > sem->maxCount) return KERNEL_SEMA_ERROR_EINVAL;
  std::lock_guard<std::mutex> lock(sem->mutex);
  if (threads != nullptr) *threads = sem->waiters;
- if (count >= 0) sem->tokenCount = count; // a negative count keeps the current token count
+ if (count >= 0) sem->tokenCount = count;
  ++sem->cancelGeneration;
  sem->condition.notify_all();
  return KERNEL_SEMA_OK;

@@ -155,14 +155,12 @@ int APS5_VABI scePthreadAttrSetschedpolicy(PthreadAttr* attr, int policy) {
 
 int APS5_VABI scePthreadAttrSetsolosched(PthreadAttr* attr, int solosched) {
     if (!attr || !*attr || (solosched != 0 && solosched != 1)) return SCE_KERNEL_ERROR_EINVAL;
-    (*attr)->_solosched = solosched; // a core-exclusivity hint the host scheduler does not take
+    (*attr)->_solosched = solosched;
     return SCE_OK;
 }
 
 int APS5_VABI scePthreadAttrSetstack(PthreadAttr* attr, void* addr, size_t size) {
     if (!attr || !*attr || !addr || size < 16384) return SCE_KERNEL_ERROR_EINVAL;
-    // Caller-provided stacks are recorded for queries; threads still run on host-allocated stacks
-    // of the requested size, since guest memory cannot back a host thread's stack portably.
     (*attr)->stackAddress = addr;
     (*attr)->_stacksize = size;
     return SCE_OK;

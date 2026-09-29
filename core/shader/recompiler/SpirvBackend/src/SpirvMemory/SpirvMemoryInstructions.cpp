@@ -776,8 +776,6 @@ std::uint32_t AppendConsume(SpirvValueEmitContext& ctx, const IrValue& inst, boo
     const auto& mem = SharedMemory(ctx, inst);
     const bool wave64 = state.laneCount == 2u;
     const auto m0 = ctx.Arg(inst, 0);
-    // M0 for GDS appends: bits 15:0 are the GDS base address and bits 31:16 the size; LDS keeps its
-    // limit in the low bits and the base in the high ones.
     const bool gds = mem.kind == ResourceKind::Gds;
     const auto m0High = Binary(state, spv::OpShiftRightLogical, TypeU32(state), m0, ConstantU32(state, 16u));
     const auto m0Low = Binary(state, spv::OpBitwiseAnd, TypeU32(state), m0, ConstantU32(state, 0xffffu));
@@ -801,8 +799,6 @@ std::uint32_t AppendConsume(SpirvValueEmitContext& ctx, const IrValue& inst, boo
     const auto lanesActive = wave64 ? Binary(state, spv::OpINotEqual, TypeBool(state), count, ConstantU32(state, 0u)) : exec;
     auto condition = AndCondition(state, isFirst, AndCondition(state, lanesActive, storageBounds));
     if (!gds) {
-        // LDS appends are clamped to the M0 limit; GDS appends only use the M0 base (titles pass a
-        // zero size field and the hardware still counts).
         condition = AndCondition(state, condition, Binary(state, spv::OpULessThan, TypeBool(state), ConstantU32(state, mem.offset + 3u), size));
     }
     const auto atomic = EmitValueOrZeroIfCondition(state, condition, [&]() {

@@ -9,7 +9,6 @@ namespace AgcDriver::Graphics {
 
 enum class ColorTileMode : std::uint32_t {
     Linear = 0,
-    // 64KB_Z_X: kept on the GPU only (no host tiling code); sampled like a depth-swizzled texture.
     ZOrder64KB = 0x18,
     RenderTarget = 0x1b
 };

@@ -20,37 +20,30 @@
 
 extern "C" int* APS5_VABI __error_nid_postfix();
 
-// sceLibcMspace*: allocators over caller-provided memory ranges. Titles build their general heap on
-// one (Hades: a 4 GiB "User Malloc" space), so every operation has to stay logarithmic. The
-// bookkeeping lives in host memory; the guest range only holds the allocations themselves and the
-// handle is the range's base address.
 namespace {
 
 constexpr std::size_t Granule = 16;
-// Freed small blocks wait in per-size lists for the next allocation of their size (titles free
-// and allocate the same sizes every frame) instead of going back through the free maps.
 constexpr std::size_t QuickLimit = 1024;
 constexpr std::size_t QuickBudget = 32u << 20;
 
 struct Allocation {
-    std::uintptr_t start;     // the block the allocation occupies (alignment padding included)
-    std::size_t capacity;     // block bytes
-    std::size_t requested;    // bytes the caller asked for (rounded to the granule)
-    bool cached = false;      // freed, waiting in a quick list
+    std::uintptr_t start;
+    std::size_t capacity;
+    std::size_t requested;
+    bool cached = false;
 };
 
 struct Arena {
     std::uintptr_t start;
     std::uintptr_t end;
-    std::map<std::uintptr_t, std::size_t> freeByAddress;                 // block start -> bytes
-    std::set<std::pair<std::size_t, std::uintptr_t>> freeBySize;         // (bytes, start)
-    std::unordered_map<std::uintptr_t, Allocation> allocations;          // user pointer -> block
-    std::array<std::vector<std::uintptr_t>, QuickLimit / Granule> quick; // freed blocks by size
+    std::map<std::uintptr_t, std::size_t> freeByAddress;
+    std::set<std::pair<std::size_t, std::uintptr_t>> freeBySize;
+    std::unordered_map<std::uintptr_t, Allocation> allocations;
+    std::array<std::vector<std::uintptr_t>, QuickLimit / Granule> quick;
     std::size_t quickBytes = 0;
 
     void AddFree(std::uintptr_t address, std::size_t bytes) {
         if (bytes == 0) return;
-        // Coalesce with the neighbours on both sides.
         auto next = freeByAddress.lower_bound(address);
         if (next != freeByAddress.end() && address + bytes == next->first) {
             freeBySize.erase({next->second, next->first});
@@ -77,8 +70,6 @@ struct Arena {
 };
 
 #if defined(__APPLE__)
-// Titles allocate from many threads at once; the unfair lock hands over without a kernel round
-// trip. Every holder unlocks in the function that locked.
 class ArenaLock {
 public:
     void lock() { os_unfair_lock_lock(&word); }
@@ -92,7 +83,7 @@ using ArenaLock = std::mutex;
 #endif
 
 ArenaLock arenaMutex;
-std::map<std::uintptr_t, std::unique_ptr<Arena>> arenas; // keyed by start
+std::map<std::uintptr_t, std::unique_ptr<Arena>> arenas;
 
 void Error(int value) { *__error_nid_postfix() = value; }
 
@@ -104,7 +95,6 @@ Arena* Find(void* handle) {
     return it->second.get();
 }
 
-// The innermost space holding the pointer as an allocation (spaces may nest).
 Arena* Owner(const void* pointer) {
     const auto address = reinterpret_cast<std::uintptr_t>(pointer);
     auto it = arenas.upper_bound(address);
@@ -119,7 +109,6 @@ Arena* Owner(const void* pointer) {
 
 void Release(Arena* arena, std::unordered_map<std::uintptr_t, Allocation>::iterator allocation);
 
-// Returns every cached block to the free maps (an allocation found no room without them).
 bool FlushQuick(Arena* arena) {
     if (arena->quickBytes == 0) return false;
     for (auto& list : arena->quick) {
@@ -147,14 +136,12 @@ void* Allocate(Arena* arena, std::size_t size, std::size_t alignment) {
             return reinterpret_cast<void*>(address);
         }
     }
-    // Best fit: the smallest free block that holds the size; larger alignments may need a larger one.
     for (auto it = arena->freeBySize.lower_bound({size, 0}); it != arena->freeBySize.end(); ++it) {
         const auto [bytes, start] = *it;
         const auto aligned = (start + alignment - 1) & ~(alignment - 1);
         const auto padding = aligned - start;
         if (padding > bytes || size > bytes - padding) continue;
         arena->RemoveFree(start, bytes);
-        // Padding of a granule or more goes back to the free lists; so does the tail.
         std::uintptr_t blockStart = start;
         std::size_t blockBytes = bytes;
         if (padding >= Granule) {
@@ -187,7 +174,6 @@ void Release(Arena* arena, std::unordered_map<std::uintptr_t, Allocation>::itera
     arena->AddFree(block.start, block.capacity);
 }
 
-// A freed block of a quick size stays allocated in a quick list while the budget allows.
 void Free(Arena* arena, std::unordered_map<std::uintptr_t, Allocation>::iterator allocation) {
     auto& block = allocation->second;
     if (block.capacity <= QuickLimit && block.start == allocation->first && arena->quickBytes + block.capacity <= QuickBudget) {
@@ -199,7 +185,6 @@ void Free(Arena* arena, std::unordered_map<std::uintptr_t, Allocation>::iterator
     Release(arena, allocation);
 }
 
-// Grows or shrinks in place when the block (and a free block right after it) allows it.
 bool ResizeInPlace(Arena* arena, Allocation& block, std::uintptr_t pointer, std::size_t size) {
     size = RoundUp(std::max<std::size_t>(size, 1));
     const auto needed = (pointer - block.start) + size;
@@ -249,12 +234,9 @@ bool ValidAlignment(std::size_t alignment) { return alignment != 0 && (alignment
 extern "C" {
 
 void* APS5_VABI sceLibcMspaceCreate_nid_postfix(const char* name, void* base, std::size_t size, unsigned flags) {
-    // Flag bits (thread safety, debug checks, statistics) change bookkeeping only; every arena here
-    // is locked and unchecked.
     const auto start = reinterpret_cast<std::uintptr_t>(base);
 #if defined(__APPLE__)
     {
-        // Diagnostic: how much of the range is mapped (titles may reserve more than they commit).
         mach_vm_address_t address = start;
         std::size_t mapped = 0;
         while (address < start + size) {
@@ -278,8 +260,6 @@ void* APS5_VABI sceLibcMspaceCreate_nid_postfix(const char* name, void* base, st
     }
     std::lock_guard lock(arenaMutex);
     const auto end = start + size;
-    // Titles nest spaces: a space's memory may come from an allocation of another one (Hades'
-    // ActivityManagerMspace lives in its "User Malloc" space). Only an identical base is refused.
     if (arenas.count(start) != 0) {
         Error(22);
         return nullptr;

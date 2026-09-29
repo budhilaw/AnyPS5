@@ -8,11 +8,6 @@ endif()
 
 option(ANYPS5_ENABLE_SPIRV_TOOLS "Enable SPIRV-Tools validation and optimization" OFF)
 
-# The guest x86-64 ABI runtime (C++ exception runtime built on libstdc++ internals, SysV va_list
-# marshalling, x87 long double) only compiles on an x86-64 host with GCC. Other hosts get a
-# host-only libc that serves the native libraries and tests but cannot execute guest code.
-# On macOS the x86-64 build (Apple Clang, libc++) also carries the guest ABI: the runtime uses
-# Itanium RTTI layouts spelled out for libc++ and Mach-O guest metadata (see docs/TechnicalDebt.md).
 set(ANYPS5_HOST_X86_64 OFF)
 if(CMAKE_OSX_ARCHITECTURES)
     if(CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64")
@@ -36,8 +31,6 @@ if(NOT APPLE)
 endif()
 
 if(APPLE)
-    # One SDL copy for every library: static copies would each register their own Cocoa
-    # application classes, and AppKit rejects duplicates.
     set(SDL_SHARED ON CACHE BOOL "" FORCE)
     set(SDL_STATIC OFF CACHE BOOL "" FORCE)
     set(ANYPS5_SDL_TARGET SDL2)

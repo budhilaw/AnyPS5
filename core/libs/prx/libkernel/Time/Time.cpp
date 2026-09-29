@@ -21,8 +21,6 @@
 
 static std::uint64_t GetMonotonicNanos() {
 #if defined(__APPLE__)
-    // clock_gettime and steady_clock go through mach_continuous_time, a slow path under Rosetta,
-    // and titles read the clock in tight loops (Hades spent half its main thread there).
     static const mach_timebase_info_data_t timebase = [] {
         mach_timebase_info_data_t info{};
         mach_timebase_info(&info);
@@ -133,7 +131,6 @@ int APS5_VABI clock_gettime_nid_postfix(int clockId, KernelTimespec* tp) {
     throw std::runtime_error(std::string(__func__) + ": unsupported clock_id " + std::to_string(clockId));
 #else
 #if defined(__APPLE__)
-    // The monotonic clocks skip the native clock_gettime (a slow path under Rosetta).
     if (clockId == 4 || clockId == 7 || clockId == 11 || clockId == 5 || clockId == 8 || clockId == 12) {
         const std::uint64_t nanos = GetMonotonicNanos();
         tp->tv_sec = static_cast<std::int64_t>(nanos / 1000000000ULL);
@@ -278,9 +275,9 @@ int APS5_VABI sceKernelClockGettime(KernelClockid clock_id, KernelTimespec* tp) 
     if (tp == nullptr) return SCE_KERNEL_ERROR_EINVAL;
     std::chrono::nanoseconds now;
     switch (clock_id) {
-        case 0: case 9: case 10: case 13: now = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::system_clock::now().time_since_epoch()); break; // REALTIME variants
-        case 4: case 5: case 7: case 8: case 11: case 12: now = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()); break; // MONOTONIC/UPTIME variants
-        case 15: now = std::chrono::nanoseconds(static_cast<std::int64_t>(std::clock()) * (1000000000ll / CLOCKS_PER_SEC)); break; // PROCESS_CPUTIME_ID
+        case 0: case 9: case 10: case 13: now = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::system_clock::now().time_since_epoch()); break;
+        case 4: case 5: case 7: case 8: case 11: case 12: now = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()); break;
+        case 15: now = std::chrono::nanoseconds(static_cast<std::int64_t>(std::clock()) * (1000000000ll / CLOCKS_PER_SEC)); break;
         default: return SCE_KERNEL_ERROR_EINVAL;
     }
     tp->tv_sec = static_cast<std::int64_t>(now.count() / 1000000000ll);
@@ -326,7 +323,7 @@ uint64_t APS5_VABI sceKernelReadTsc(void) {
 }
 
 uint64_t APS5_VABI sceKernelGetTscFrequency(void) {
-    return 1000000000ull; // sceKernelReadTsc counts nanoseconds of the host's monotonic clock
+    return 1000000000ull;
 }
 
 unsigned int APS5_VABI sceKernelSleep(unsigned int seconds) {

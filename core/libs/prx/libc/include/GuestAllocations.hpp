@@ -31,15 +31,12 @@ void GuestAllocationsEnd_nid_postfix(void* mutation) noexcept;
 void GuestAllocationsAdd_nid_postfix(void* mutation, void* pointer, std::size_t bytes, bool readable, bool writable);
 void GuestAllocationsRequireUnpinned_nid_postfix(void* mutation, const void* pointer, std::size_t bytes);
 void GuestAllocationsRequireAvailable_nid_postfix(void* mutation, const void* pointer, std::size_t bytes);
-// Whether [pointer, pointer + bytes) is entirely covered by registered ranges without CPU access (reservations).
 bool GuestAllocationsIsReserved_nid_postfix(void* mutation, const void* pointer, std::size_t bytes);
-// The registered range containing `address`, or with `findNext` the first one at or after it.
 bool GuestAllocationsQuery_nid_postfix(void* mutation, std::uint64_t address, bool findNext, Range* result);
 Range GuestAllocationsFind_nid_postfix(void* mutation, const void* pointer);
 void GuestAllocationsRemove_nid_postfix(void* mutation, const void* pointer);
 void GuestAllocationsProtect_nid_postfix(void* mutation, const void* pointer, std::size_t bytes, bool readable, bool writable, const std::function<void()>& apply);
 std::uint64_t GuestAllocationsProtectionGeneration_nid_postfix();
-// Changes whenever a guest mapping is added, removed, reprotected or unmapped.
 std::uint64_t GuestAllocationsMapEpoch_nid_postfix();
 void GuestAllocationsUnmap_nid_postfix(void* mutation, const void* pointer, std::size_t bytes, const std::function<void(const void*, bool)>& apply);
 Lease GuestAllocationsAcquire_nid_postfix();
@@ -63,8 +60,6 @@ public:
     void Remove(const void* pointer) { GuestAllocationsRemove_nid_postfix(handle, pointer); }
     void Unmap(const void* pointer, std::size_t bytes, const std::function<void(const void*, bool)>& apply) { GuestAllocationsUnmap_nid_postfix(handle, pointer, bytes, apply); }
     void Protect(const void* pointer, std::size_t bytes, bool readable, bool writable, const std::function<void()>& apply) { GuestAllocationsProtect_nid_postfix(handle, pointer, bytes, readable, writable, apply); }
-    // Counts guest protection changes: consumers that assume read-only memory never changes
-    // re-check when it moves.
     static std::uint64_t ProtectionGeneration() { return GuestAllocationsProtectionGeneration_nid_postfix(); }
 
 private:

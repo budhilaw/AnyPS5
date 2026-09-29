@@ -153,7 +153,6 @@ void FlipRequest::GpuReady(const std::shared_ptr<AgcDriver::FrameTiming>& frameT
         ready = true;
     }
     queue->changed.notify_all();
-    // The presentation thread waits for the frame's GPU work; the driver goes on meanwhile.
     if (AgcDriver::AsyncFlips()) return;
     std::unique_lock lock(cfg->mutex);
     cfg->vblankCond.wait(lock, [&] { return gpuComplete || cfg->failure || cfg->closing; });
@@ -387,7 +386,7 @@ void VideoOutDriver::processFlip(FlipRequest& req) {
     extensions.resize(extensionCount);
     const AgcDriver::PresentationWindow target{window.Handle(), extensions, [](void* context, VkInstance instance) {
         VkSurfaceKHR surface = VK_NULL_HANDLE;
-        MainThread::Run([&] { // the Metal layer behind the surface is created on the window's thread
+        MainThread::Run([&] {
             if (!SDL_Vulkan_CreateSurface(static_cast<SDL_Window*>(context), instance, &surface)) throw std::runtime_error(std::string("SDL_Vulkan_CreateSurface failed: ") + SDL_GetError());
         });
         return surface;
@@ -449,7 +448,7 @@ void VideoOutDriver::processFlip(FlipRequest& req) {
 
 void VideoOutDriver::presentLoop(std::stop_token token) {
 #ifdef __APPLE__
-    pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);  // flips pace the title
+    pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
 #endif
     std::shared_ptr<FlipRequest> current;
     PadInput padInput;

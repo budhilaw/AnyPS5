@@ -9,7 +9,6 @@ namespace AgcDriver::GuestMemory {
 class MemoryAccessScope {
 public:
     using Resolver = void (*)(void*, std::uint64_t, std::size_t, bool);
-    // Whether no queued GPU work touches the range, so later reads there need no resolving.
     using Query = bool (*)(void*, std::uint64_t, std::size_t);
     MemoryAccessScope(void* context, Resolver resolver, Query quiet = nullptr) : previousContext(currentContext), previousResolver(currentResolver), previousQuiet(currentQuiet) {
         currentContext = context;

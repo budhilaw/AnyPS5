@@ -29,7 +29,6 @@ constexpr int SCE_KERNEL_ERROR_EBUSY = static_cast<int>(0x80020010);
 constexpr int SCE_KERNEL_ERROR_EINVAL = static_cast<int>(0x80020016);
 constexpr int SCE_KERNEL_ERROR_EPERM = static_cast<int>(0x80020001);
 
-// SceAmprCommandBuffer header: type, write offset, command count, buffer size, buffer pointer.
 constexpr std::size_t HeaderTypeOffset = 0x00;
 constexpr std::size_t HeaderWriteOffset = 0x04;
 constexpr std::size_t HeaderCountOffset = 0x08;
@@ -39,7 +38,7 @@ constexpr std::size_t HeaderSize = 0x18;
 constexpr std::uint32_t MaximumBufferSize = 64u << 20;
 constexpr std::uint8_t ReadFileOpcode = 0x17;
 constexpr std::uint32_t ReadFileRecordSize = 0x14;
-constexpr std::uint32_t ReadFileRecordSizeExtended = 0x18; // file offsets beyond 32 bits
+constexpr std::uint32_t ReadFileRecordSizeExtended = 0x18;
 constexpr std::uint32_t InvalidFileId = 0xffffffffu;
 
 struct ReadCommand {
@@ -60,7 +59,7 @@ struct CommandBufferState {
 struct ResolvedFile {
     std::filesystem::path path;
     std::uint64_t size = 0;
-    int descriptor = -1; // opened on first read and kept open: titles read each file many times
+    int descriptor = -1;
 };
 
 struct SubmissionResult {
@@ -97,7 +96,6 @@ int readIntoGuest(ResolvedFile& file, const ReadCommand& command) {
     }
     auto* cursor = static_cast<std::byte*>(command.destination);
     std::uint64_t remaining = command.size;
-    // GPU caches may write-protect the destination; the kernel would fail the read with EFAULT.
     PrepareGuestBuffer(command.destination, static_cast<std::size_t>(command.size), true);
     std::uint64_t offset = command.fileOffset;
     while (remaining > 0) {
@@ -108,7 +106,7 @@ int readIntoGuest(ResolvedFile& file, const ReadCommand& command) {
             APS5_LOG_OUT("APR read of %s (%llu bytes at %llu into %p) failed: errno %d", file.path.c_str(), static_cast<unsigned long long>(command.size), static_cast<unsigned long long>(command.fileOffset), command.destination, errno);
             return SCE_KERNEL_ERROR_EIO;
         }
-        if (got == 0) break; // reads past the end of the file leave the rest untouched, as the console does
+        if (got == 0) break;
         cursor += got;
         remaining -= static_cast<std::uint64_t>(got);
         offset += static_cast<std::uint64_t>(got);
@@ -116,7 +114,6 @@ int readIntoGuest(ResolvedFile& file, const ReadCommand& command) {
     return 0;
 }
 
-// Runs every queued read of a command buffer; a failure reports the SCE error and the record offset.
 int execute(void* commandBuffer, SubmissionResult& result) {
     std::vector<ReadCommand> reads;
     {
@@ -191,7 +188,6 @@ int APS5_VABI AprCommandBufferAppendRead(void* commandBuffer, std::uint32_t file
     auto& state = it->second;
     const auto recordSize = (fileOffset >> 32u) != 0 ? ReadFileRecordSizeExtended : ReadFileRecordSize;
     if (state.size - state.writeOffset < recordSize) return SCE_KERNEL_ERROR_ENOMEM;
-    // The record itself only carries the opcode for inspection; the command lives in host state.
     std::memset(state.buffer + state.writeOffset, 0, recordSize);
     state.buffer[state.writeOffset] = static_cast<std::byte>(ReadFileOpcode);
     state.reads.push_back({state.writeOffset, fileId, destination, size, fileOffset});
@@ -201,8 +197,6 @@ int APS5_VABI AprCommandBufferAppendRead(void* commandBuffer, std::uint32_t file
     return 0;
 }
 
-// Resolves guest paths to file ids and sizes. Returns 0, or -1 with errno set and error_index at
-// the first path that failed, as the kernel's syscall wrapper does.
 int APS5_VABI sceKernelAprResolveFilepathsToIdsAndFileSizes(const char* const* path_list, uint32_t count, uint32_t* ids, uint64_t* sizes, uint32_t* error_index) {
     if (path_list == nullptr || count == 0 || count > 1024 || (ids == nullptr && sizes == nullptr)) return syscallFailure(SCE_KERNEL_ERROR_EINVAL);
     for (uint32_t i = 0; i < count; ++i) {
@@ -234,8 +228,6 @@ int APS5_VABI sceKernelAprResolveFilepathsToIdsAndFileSizes(const char* const* p
     return 0;
 }
 
-// Submits a command buffer. The reads complete synchronously; the submission id lets the title
-// wait afterwards. `result` receives {execution result, offset of the failing record}.
 int APS5_VABI sceKernelAprSubmitCommandBufferAndGetResult(void* command_buffer, uint64_t flags, SubmissionResult* result, uint32_t* out_submission_id) {
     if (command_buffer == nullptr) return syscallFailure(SCE_KERNEL_ERROR_EINVAL);
     SubmissionResult executed{};
@@ -262,7 +254,7 @@ int APS5_VABI sceKernelAprSubmitCommandBufferAndGetResult(void* command_buffer, 
 int APS5_VABI sceKernelAprWaitCommandBuffer(uint32_t submission_id) {
     std::lock_guard lock(submissionMutex);
     const auto it = completedSubmissions.find(submission_id);
-    if (it == completedSubmissions.end()) return syscallFailure(static_cast<int>(0x80020003)); // ESRCH: unknown submission
+    if (it == completedSubmissions.end()) return syscallFailure(static_cast<int>(0x80020003));
     completedSubmissions.erase(it);
     return 0;
 }

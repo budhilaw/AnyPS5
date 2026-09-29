@@ -2,7 +2,6 @@
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 
-// Field accessors of a kevent-shaped KernelEvent returned by sceKernelWaitEqueue.
 namespace {
 constexpr std::uint16_t EV_ERROR_FLAG = 0x4000;
 }

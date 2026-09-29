@@ -43,13 +43,12 @@
 
 namespace AgcDriver {
 
-constexpr std::size_t GdsBytes = 64 * 1024; // the console's global data share
+constexpr std::size_t GdsBytes = 64 * 1024;
 
 namespace {
 
-// Spelled out so the vendored headers need neither VK_ENABLE_BETA_EXTENSIONS nor a 1.3.216+ core header.
 constexpr const char* PortabilityEnumerationExtension = "VK_KHR_portability_enumeration";
-constexpr VkInstanceCreateFlags PortabilityEnumerationFlag = 0x00000001; // VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR
+constexpr VkInstanceCreateFlags PortabilityEnumerationFlag = 0x00000001;
 constexpr const char* PortabilitySubsetExtension = "VK_KHR_portability_subset";
 
 void check(VkResult result, const char* operation) {
@@ -81,12 +80,8 @@ struct VulkanDevice::State {
     std::vector<VkImage> images;
     VkFence acquireFence = VK_NULL_HANDLE;
     VkFence renderFence = VK_NULL_HANDLE;
-    bool renderPending = false;  // the last presentation's commands may still execute
-    // The render target the last presentation copies from, kept until those commands completed
-    // (the render cache may drop the target meanwhile: the title reuses its memory).
+    bool renderPending = false;
     std::shared_ptr<Graphics::ResidentColor> presentedTarget;
-    // Ranges host accesses have to resolve (see NeedsResolve), republished under the memory
-    // tracking lock by the entry points that change them.
     mutable std::mutex hostRangesMutex;
     std::shared_ptr<const std::vector<std::pair<std::uint64_t, std::uint64_t>>> hostRanges = std::make_shared<const std::vector<std::pair<std::uint64_t, std::uint64_t>>>();
     std::vector<std::pair<std::uint64_t, std::uint64_t>> hostRangesScratch;
@@ -94,7 +89,6 @@ struct VulkanDevice::State {
         hostRangesScratch.clear();
         if (renderCache) renderCache->AppendColorRanges(hostRangesScratch);
         if (drawQueue) drawQueue->AppendWriteRanges(hostRangesScratch);
-        // Most draws change neither: readers keep the list they have.
         if (hostRangesScratch == *hostRanges) return;
         auto ranges = std::make_shared<const std::vector<std::pair<std::uint64_t, std::uint64_t>>>(hostRangesScratch);
         std::lock_guard lock(hostRangesMutex);
@@ -136,13 +130,11 @@ struct VulkanDevice::State {
     std::shared_ptr<Graphics::BufferPool> bufferPool;
     std::unique_ptr<Graphics::GuestBufferCache> guestBufferCache;
     std::unique_ptr<Graphics::Buffer> gds;
-    std::uint64_t idleSubmissions = ~0ull;  // QueueSubmissionCounter at the last device idle
+    std::uint64_t idleSubmissions = ~0ull;
     std::shared_ptr<Graphics::DescriptorCache> descriptorCache;
     std::shared_ptr<Graphics::SamplerCache> samplerCache;
     std::unique_ptr<Graphics::TextureCache> textureCache;
     std::unique_ptr<Graphics::PipelineCache> pipelineCache;
-    // Compute pipelines by SPIR-V and descriptor layout: a title dispatches the same program
-    // many times and the host compile is the expensive part.
     struct ComputePipeline {
         VkShaderModule module = VK_NULL_HANDLE;
         VkPipelineLayout layout = VK_NULL_HANDLE;
@@ -314,7 +306,6 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
             if (!hasInstanceExtension(name)) throw std::runtime_error(std::string("Vulkan presentation: required instance extension missing: ") + name);
         }
     }
-    // Portability drivers (MoltenVK on macOS) are hidden by the loader unless the application opts in.
     if (hasInstanceExtension(PortabilityEnumerationExtension)) {
         instanceExtensions.push_back(PortabilityEnumerationExtension);
         create.flags |= PortabilityEnumerationFlag;
@@ -427,11 +418,9 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
         state->capabilities.push_back(spv::CapabilityFragmentBarycentricKHR);
         state->spirvExtensions.push_back("SPV_KHR_fragment_shader_barycentric");
     }
-    // A portability device must have VK_KHR_portability_subset enabled whenever it advertises it.
     if (hasExtension(PortabilitySubsetExtension)) deviceExtensions.push_back(PortabilitySubsetExtension);
     deviceExtensions.push_back(VK_KHR_SHADER_FLOAT_CONTROLS_EXTENSION_NAME);
     state->capabilities.push_back(spv::CapabilitySignedZeroInfNanPreserve);
-    // Vulkan 1.0 guarantees these (1D sampled and storage images).
     state->capabilities.push_back(spv::CapabilitySampled1D);
     state->capabilities.push_back(spv::CapabilityImage1D);
     state->spirvExtensions.push_back("SPV_KHR_float_controls");
@@ -444,8 +433,6 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
     state->spirvExtensions.push_back("SPV_KHR_physical_storage_buffer");
     state->depthRangeUnrestricted = hasExtension(VK_EXT_DEPTH_RANGE_UNRESTRICTED_EXTENSION_NAME);
     if (state->depthRangeUnrestricted) deviceExtensions.push_back(VK_EXT_DEPTH_RANGE_UNRESTRICTED_EXTENSION_NAME);
-    // Host memory import lets heap-sized guest buffers be bound in place instead of mirrored
-    // (ANYPS5_NO_HOST_IMPORT=1 keeps mirroring them).
     if (hasExtension(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME) && std::getenv("ANYPS5_NO_HOST_IMPORT") == nullptr) {
         VkPhysicalDeviceExternalMemoryHostPropertiesEXT hostProperties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT};
         VkPhysicalDeviceProperties2 properties2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &hostProperties};
@@ -492,10 +479,8 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
     enabled.textureCompressionBC = VK_TRUE;
     state->samplerAnisotropy = true;
     state->textureCompressionBC = true;
-    // Storage images: titles write textures from compute and pixel shaders; the recompiler emits
-    // them without a SPIR-V format, so both format-less access features are needed.
-    enabled.dualSrcBlend = available.dualSrcBlend; // titles blend with two color exports (DUAL_EXPORT_ENABLE)
-    enabled.depthClamp = available.depthClamp; // shadow passes disable near/far clipping
+    enabled.dualSrcBlend = available.dualSrcBlend;
+    enabled.depthClamp = available.depthClamp;
     state->depthClamp = enabled.depthClamp == VK_TRUE;
     enabled.shaderStorageImageWriteWithoutFormat = available.shaderStorageImageWriteWithoutFormat;
     enabled.shaderStorageImageReadWithoutFormat = available.shaderStorageImageReadWithoutFormat;
@@ -604,7 +589,6 @@ void VulkanDevice::WaitIdle() {
     state->drawQueue->Wait();
     state->PublishHostRanges();
     timing.Mark("draw_wait");
-    // Nothing reached the queue since the device was last idle: it still is.
     const auto submissions = Graphics::QueueSubmissionCounter().load(std::memory_order_relaxed);
     if (submissions == state->idleSubmissions) return;
     VkResult idle = VK_SUCCESS;
@@ -648,11 +632,10 @@ void VulkanDevice::GdsTransfer(std::span<const std::uint32_t> packet) {
     const bool fromGds = Pm4::DmaGdsSource(packet);
     require(toGds || fromGds, "DMA_DATA does not involve GDS");
     require(!(toGds && fromGds), "GDS to GDS DMA_DATA is not implemented");
-    // Everything recorded so far may read or update GDS on the GPU: complete it first.
     state->drawQueue->Wait();
     timing.Mark("draw_wait");
     auto gds = state->gds->Bytes();
-    std::uint32_t previous = 0; // the counter a CP write replaces: shows whether shaders touched GDS
+    std::uint32_t previous = 0;
     if (toGds && packet[4] + 4 <= gds.size()) std::memcpy(&previous, gds.data() + packet[4], 4);
     if (toGds) {
         const auto offset = static_cast<std::size_t>(packet[4]);
@@ -672,7 +655,6 @@ void VulkanDevice::GdsTransfer(std::span<const std::uint32_t> packet) {
     }
     static const bool trace = std::getenv("ANYPS5_TRACE_INDIRECT") != nullptr || std::getenv("ANYPS5_TRACE_WRITEBACK") != nullptr;
     if (trace) {
-        // Every nonzero dword of the share: shows where shader atomics land.
         std::string nonzero;
         std::size_t count = 0;
         for (std::size_t offset = 0; offset + 4 <= gds.size(); offset += 4) {
@@ -726,8 +708,6 @@ void VulkanDevice::WaitTicket(std::uint64_t ticket) {
     std::unique_lock lock(state->ticketMutex);
     while (state->ticketsDone < ticket) {
         if (state->ticketDone.wait_for(lock, std::chrono::milliseconds(1), [&] { return state->ticketsDone >= ticket; })) break;
-        // Completions run when someone collects: the driver does between packets, but it may be
-        // idle waiting for the title.
         lock.unlock();
         {
             std::lock_guard memoryLock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
@@ -812,9 +792,6 @@ void VulkanDevice::PresentDisplayBuffer(const DisplayBuffer& buffer) {
 void VulkanDevice::present(std::uint32_t width, std::uint32_t height, bool opaque, std::span<const std::byte> pixels, const DisplayBuffer* display) {
     std::lock_guard memoryLock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
     PerformanceTimer timing("Vulkan.Present");
-    // The flip's work already completed (the caller waited for its ticket). Work the driver
-    // recorded since goes to the queue first, so the presentation commands follow it there as
-    // they follow it in the layouts the resident targets track.
     if (AsyncFlips()) {
         state->drawQueue->Flush();
         state->drawQueue->Collect();
@@ -823,8 +800,6 @@ void VulkanDevice::present(std::uint32_t width, std::uint32_t height, bool opaqu
     }
     state->PublishHostRanges();
     timing.Mark("draw_wait");
-    // The previous presentation's commands must be done before its command buffer, staging
-    // buffers and scaler image are reused.
     if (state->renderPending) {
         check(state->DeviceFunction<PFN_vkWaitForFences>("vkWaitForFences")(state->device, 1, &state->renderFence, VK_TRUE, std::numeric_limits<std::uint64_t>::max()), "vkWaitForFences previous presentation");
         state->renderPending = false;
@@ -845,8 +820,6 @@ void VulkanDevice::present(std::uint32_t width, std::uint32_t height, bool opaqu
             ResolveMemory(display->address, bytes, false);
             state->colorTransfer->Upload(display->address, width, height, Graphics::ColorTileMode::RenderTarget);
         }
-        // ANYPS5_DUMP_TARGETS_AT=<seconds>:<prefix>: the resident color targets once, at the first
-        // present after that time (diagnostics that leave the frame rate alone until then).
         if (static const char* dumpAt = std::getenv("ANYPS5_DUMP_TARGETS_AT"); dumpAt != nullptr) {
             static const auto dumpStart = std::chrono::steady_clock::now();
             static bool dumped = false;
@@ -859,8 +832,6 @@ void VulkanDevice::present(std::uint32_t width, std::uint32_t height, bool opaqu
                 APS5_LOG_OUT("dumped the resident color targets to %s", colon + 1);
             }
         }
-        // ANYPS5_DUMP_FRAME=<prefix>: every 30th presented display buffer as a BMP, with the
-        // resident targets known at that time.
         static const char* dumpPrefix = std::getenv("ANYPS5_DUMP_FRAME");
         static unsigned presented = 0;
         if (dumpPrefix != nullptr && presented++ % 30 == 0) {
@@ -884,7 +855,6 @@ void VulkanDevice::present(std::uint32_t width, std::uint32_t height, bool opaqu
                         auto put32 = [&](int at, std::uint32_t v) { header[at] = v & 0xff; header[at + 1] = (v >> 8) & 0xff; header[at + 2] = (v >> 16) & 0xff; header[at + 3] = (v >> 24) & 0xff; };
                         put32(2, fileSize); put32(10, 54); put32(14, 40); put32(18, width); put32(22, static_cast<std::uint32_t>(-static_cast<std::int32_t>(height))); header[26] = 1; header[28] = 32; put32(34, imageBytes);
                         std::fwrite(header, 1, 54, file);
-                        // The decoded pixels are RGBA; BMP wants BGRA.
                         std::vector<unsigned char> row(rowBytes);
                         for (std::uint32_t y = 0; y < height; ++y) {
                             const auto* line = reinterpret_cast<const unsigned char*>(pixels.data()) + static_cast<std::size_t>(y) * rowBytes;
@@ -988,7 +958,7 @@ void VulkanDevice::present(std::uint32_t width, std::uint32_t height, bool opaqu
     Graphics::QueueSubmissionCounter().fetch_add(1, std::memory_order_relaxed);
     timing.Mark("queue_submit");
     if (AsyncFlips()) {
-        state->renderPending = true;  // the present waits on `rendered`; the host does not
+        state->renderPending = true;
         state->presentedTarget = resident;
     } else {
         check(wait(state->device, 1, &state->renderFence, VK_TRUE, std::numeric_limits<std::uint64_t>::max()), "vkWaitForFences clear");
@@ -1014,7 +984,7 @@ ShaderRecompiler::SpirvTarget VulkanDevice::Target() const {
     {
         const auto stages = state->subgroup.supportedStages;
         std::uint32_t mask = 0;
-        if (stages & VK_SHADER_STAGE_COMPUTE_BIT) mask |= (1u << 0u) | (1u << 6u) | (1u << 7u); // compute, local, mesh
+        if (stages & VK_SHADER_STAGE_COMPUTE_BIT) mask |= (1u << 0u) | (1u << 6u) | (1u << 7u);
         if (stages & VK_SHADER_STAGE_VERTEX_BIT) mask |= 1u << 1u;
         if (stages & VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT) mask |= 1u << 2u;
         if (stages & VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT) mask |= 1u << 3u;
@@ -1061,7 +1031,7 @@ Graphics::Context VulkanDevice::graphicsContext() const {
         state->samplerCache
     };
     context.pipelineCacheOwner = state->pipelineCache.get();
-    static const bool noMirrors = std::getenv("ANYPS5_DEBUG_NO_MIRRORS") != nullptr; // diagnostics: copy every buffer per binding
+    static const bool noMirrors = std::getenv("ANYPS5_DEBUG_NO_MIRRORS") != nullptr;
     context.guestBufferCache = noMirrors ? nullptr : state->guestBufferCache.get();
     context.gds = state->gds.get();
     context.depthClamp = state->depthClamp;
@@ -1122,16 +1092,11 @@ void VulkanDevice::Dispatch(const ShaderRecompiler::RecompileResult& shader, std
     if (x > limit[0] || y > limit[1] || z > limit[2]) {
         throw std::runtime_error("Vulkan dispatch: workgroup count exceeds device limits");
     }
-    // The dispatch joins the draw batches: it executes after the draws recorded before it and
-    // its buffers are written back when the batch completes, like a draw's.
     try {
         auto resources = std::make_shared<Graphics::ShaderResources>(context, shaders[0], snapshots);
         timing.Mark("shader_resources");
         static const bool journalAllTextures = std::getenv("ANYPS5_JOURNAL_TEXTURES") != nullptr;
         if (journalAllTextures) GpuJournal::Record("  dispatch textures:" + resources->DescribeTextures());
-        // ANYPS5_DEBUG_GDS_INPUTS: what the textures of a GDS-binding program hold when it runs
-        // (the queue is drained first, so this changes the timing).
-        // ANYPS5_DEBUG_GDS_INPUTS=<seconds>: readbacks start that many seconds after the first dispatch.
         static const char* debugGdsInputsValue = std::getenv("ANYPS5_DEBUG_GDS_INPUTS");
         static const auto debugStart = std::chrono::steady_clock::now();
         const bool debugGdsInputs = debugGdsInputsValue != nullptr && std::chrono::duration<double>(std::chrono::steady_clock::now() - debugStart).count() >= std::atof(debugGdsInputsValue);
@@ -1160,7 +1125,6 @@ void VulkanDevice::Dispatch(const ShaderRecompiler::RecompileResult& shader, std
                 }
             }
         }
-        // The cache key: the SPIR-V (hashed, with its length) and the descriptor layout key.
         std::uint64_t hash = 1469598103934665603ull;
         for (const auto word : shader.spirv) hash = (hash ^ word) * 1099511628211ull;
         std::string key(reinterpret_cast<const char*>(&hash), sizeof(hash));

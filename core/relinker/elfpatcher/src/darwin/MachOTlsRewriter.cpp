@@ -15,7 +15,6 @@ TlsRewriteResult RewriteTlsAccesses(std::vector<std::uint8_t>& image, const std:
             const auto info = decoder.DecodeInstruction(bytes, header.FileSize - offset);
             if (info.SegmentPrefix != 0) {
                 const auto position = info.OpcodeOffset;
-                // 64 48 8b 04 25 00 00 00 00: mov %fs:0x0, %rax
                 const bool supported = info.SegmentPrefix == 0x64 && info.RexPrefix == 0x48 && info.Length - position == 7 && bytes[position] == 0x8b && bytes[position + 1] == 0x04 && bytes[position + 2] == 0x25 && bytes[position + 3] == 0 && bytes[position + 4] == 0 && bytes[position + 5] == 0 && bytes[position + 6] == 0;
                 if (!supported) throw Domain::RelinkerException("Unsupported macOS guest TLS instruction", header.Offset + offset);
                 if (requireTls && (tls == nullptr || tls->MemorySize == 0)) throw Domain::RelinkerException("Guest TLS access without a usable PT_TLS", header.Offset + offset);

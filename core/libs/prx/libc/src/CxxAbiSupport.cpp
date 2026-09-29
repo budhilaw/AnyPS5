@@ -26,7 +26,6 @@ void* APS5_VABI __cxa_demangle_nid_postfix(const char* mangled, char* buf, std::
 }
 
 #if defined(_LIBCPP_VERSION)
-// libc++abi exports the Itanium entry point but its cxxabi.h does not declare it.
 extern "C" int __cxa_thread_atexit(void (*)(void*), void*, void*) noexcept;
 #endif
 

@@ -45,8 +45,6 @@ static void FinishThread(PthreadPrivate* self, void* retval) {
     self->_join_cv.notify_all();
 }
 
-// The guest thread record of the calling host thread; host threads that never went through
-// scePthreadCreate (the main thread, host callbacks) get a record on first use of scePthreadSelf.
 static thread_local PthreadPrivate* currentThread = nullptr;
 
 #ifndef _WIN32
@@ -82,7 +80,7 @@ static void RunThread(std::unique_ptr<ThreadArgs> args) {
     args.reset();
 #ifdef __APPLE__
     GuestTls::InstallCurrentThread();
-    if (!self->name.empty() && std::getenv("ANYPS5_NO_THREAD_NAMES") == nullptr) pthread_setname_np(self->name.c_str()); // makes guest thread names visible to sample/lldb
+    if (!self->name.empty() && std::getenv("ANYPS5_NO_THREAD_NAMES") == nullptr) pthread_setname_np(self->name.c_str());
 #endif
 #ifndef _WIN32
     RecordHostStack(self);
@@ -163,7 +161,7 @@ int APS5_VABI scePthreadCreate(Pthread* thread, const PthreadAttr* attr, Pthread
     if (!thread || !entry) throw std::runtime_error("scePthreadCreate: null arg");
     if (attr && !*attr) throw std::runtime_error("scePthreadCreate: null attributes");
     auto p = std::make_unique<PthreadPrivate>();
-    if (name) p->name = name; // scePthreadGetname reads it back and the host thread is named on start
+    if (name) p->name = name;
     bool detached = false;
     if (attr && *attr) detached = ((*attr)->_detachstate == DETACH_DETACHED);
     p->_detached = detached;
@@ -198,8 +196,6 @@ int APS5_VABI scePthreadCreate(Pthread* thread, const PthreadAttr* attr, Pthread
     if (detached)
         ReleaseThread(published);
 #else
-    // The requested stack size is honoured: the console grants it exactly, and engine threads size
-    // their stacks for deep recursion that the host's default secondary-thread stack cannot hold.
     const auto page = static_cast<std::size_t>(sysconf(_SC_PAGESIZE));
     std::size_t stackSize = (p->stackSize + page - 1) / page * page;
     if (stackSize < static_cast<std::size_t>(PTHREAD_STACK_MIN)) stackSize = static_cast<std::size_t>(PTHREAD_STACK_MIN);
@@ -210,7 +206,6 @@ int APS5_VABI scePthreadCreate(Pthread* thread, const PthreadAttr* attr, Pthread
         throw std::runtime_error("scePthreadCreate: invalid stack size " + std::to_string(stackSize));
     }
 #if defined(__APPLE__)
-    // Real-time guest threads (FMOD's mixer and feeders run at 256-280) keep to performance cores.
     if (p->schedPriority <= 300) pthread_attr_set_qos_class_np(&nativeAttr, QOS_CLASS_USER_INTERACTIVE, 0);
 #endif
     auto native = std::make_unique<PosixThreadArgs>(PosixThreadArgs{std::move(args), start.get_future()});
@@ -295,14 +290,13 @@ int APS5_VABI scePthreadGetschedparam(Pthread thread, int* policy, KernelSchedPa
 
 int APS5_VABI scePthreadSetschedparam(Pthread thread, int policy, const KernelSchedParam* param) {
     if (!thread || !param) return SCE_KERNEL_ERROR_EINVAL;
-    if (policy < 1 || policy > 3) return SCE_KERNEL_ERROR_EINVAL; // SCHED_FIFO, SCHED_OTHER, SCHED_RR on the console
+    if (policy < 1 || policy > 3) return SCE_KERNEL_ERROR_EINVAL;
     if (param->sched_priority < 256 || param->sched_priority > 767) return SCE_KERNEL_ERROR_EINVAL;
     thread->schedPolicy = policy;
-    thread->schedPriority = param->sched_priority; // a hint; host scheduling stays time-shared
+    thread->schedPriority = param->sched_priority;
     return SCE_OK;
 }
 
-// The calling thread's record without adopting host threads; safe inside signal handlers.
 extern "C" Pthread KernelCurrentThreadRecord() {
     return currentThread;
 }
@@ -310,8 +304,6 @@ extern "C" Pthread KernelCurrentThreadRecord() {
 Pthread APS5_VABI scePthreadSelf() {
 #ifndef _WIN32
     if (currentThread == nullptr) {
-        // A host thread the guest never created (the main thread): adopt it with a record that
-        // lives as long as the process, as the console does for the initial thread.
         auto* adopted = new PthreadPrivate();
         adopted->_detached = true;
         adopted->native = pthread_self();
@@ -367,7 +359,7 @@ int APS5_VABI scePthreadRename(Pthread thread, const char* name) {
     if (!name) return SCE_KERNEL_ERROR_EINVAL;
     thread->name = name;
 #ifdef __APPLE__
-    if (thread == currentThread) pthread_setname_np(name); // the host only lets a thread name itself
+    if (thread == currentThread) pthread_setname_np(name);
 #endif
     return SCE_OK;
 }
@@ -375,7 +367,7 @@ int APS5_VABI scePthreadRename(Pthread thread, const char* name) {
 int APS5_VABI scePthreadSetaffinity(Pthread thread, KernelCpumask mask) {
     if (!thread) return SCE_KERNEL_ERROR_ESRCH;
     if (mask == 0) return SCE_KERNEL_ERROR_EINVAL;
-    thread->affinity = mask; // core placement is a hint the host scheduler does not honour
+    thread->affinity = mask;
     return SCE_OK;
 }
 
@@ -399,7 +391,7 @@ int APS5_VABI scePthreadSetcanceltype(int type, int* old_type) {
 
 int APS5_VABI scePthreadSetprio(Pthread thread, int prio) {
     if (!thread) return SCE_KERNEL_ERROR_ESRCH;
-    thread->schedPriority = prio; // priorities are hints the host scheduler does not take
+    thread->schedPriority = prio;
     return SCE_OK;
 }
 

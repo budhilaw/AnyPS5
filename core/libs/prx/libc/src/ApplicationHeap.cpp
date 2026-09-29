@@ -23,10 +23,7 @@ using PosixAlign = int (APS5_VABI *)(void**, std::size_t, std::size_t);
 using Initialize = void (APS5_VABI *)();
 
 std::mutex heapMutex;
-// Slot order of the SceLibcMallocReplace table from offset 0x20: malloc, free, calloc, realloc,
-// memalign, reallocalign, posix_memalign, malloc_stats, malloc_stats_fast, malloc_usable_size.
 std::array<void*, 10> heapApi{};
-// Registered once and never replaced: every allocation reads the table without the lock.
 std::atomic<bool> heapReady{false};
 std::once_flag heapInitialization;
 std::exception_ptr heapFailure;
@@ -70,8 +67,6 @@ TCallback callback(std::size_t index) {
             return result;
         }
     }
-    // Module initializers allocate before the executable's startup code registers the allocator.
-    // The process parameters already describe it, as they do for the console's loader.
     ApplicationHeapInitialize_nid_no_patch(ApplicationProcessParameters_nid_no_patch());
     std::lock_guard lock(heapMutex);
     if (heapFailure) std::rethrow_exception(heapFailure);

@@ -69,7 +69,6 @@ int main(const int argc, char* argv[]) {
         }
 
         auto elfReader = std::make_shared<Relinker::ElfReader>(sourceBytes);
-        // A module has no entry point to anchor reachability on; every import stays.
         if (sourceBytes.size() > 18 && sourceBytes[16] == 0x18 && sourceBytes[17] == 0xFE && args.unusedFilterLevel != 0) {
             std::cout << "Input is a module; unused-filter forced to 0\n";
             args.unusedFilterLevel = 0;

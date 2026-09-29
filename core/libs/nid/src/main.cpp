@@ -32,15 +32,12 @@ std::vector<std::string> _readNames(const std::string& path) {
     while (std::getline(f, line)) {
         while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
         if (line.empty()) continue;
-        // Mach-O user symbols carry a leading underscore that is not part of the exported name.
         if (line.front() == '_') line.erase(0, 1);
         names.push_back(line);
     }
     return names;
 }
 
-// Writes an ld64 -alias_list file mapping each Mach-O export to its NID name, so the library
-// exports both. Mach-O binaries are not patched in place (see docs/TechnicalDebt.md).
 int _writeAliasList(const std::string& libraryName, const std::string& namesPath, const std::string& outputPath, const std::unordered_set<std::string>& excludedExports) {
     const auto names = _readNames(namesPath);
     const auto resolved = Nid::ResolveNids(names, libraryName, excludedExports);

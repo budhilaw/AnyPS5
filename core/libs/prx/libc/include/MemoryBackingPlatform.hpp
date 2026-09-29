@@ -15,11 +15,9 @@ struct Mapping {
 
 Mapping Map(void* address, std::size_t bytes, std::size_t alignment, int protection);
 void Unmap(const Mapping& mapping);
-// Unmap in two steps: the guest view, then the alias (the GPU may still read the alias).
 void UnmapView(const Mapping& mapping);
 void UnmapAlias(const Mapping& mapping);
 void Deactivate(std::uint64_t address, std::size_t bytes);
-// Applies a guest protection (PROT_ bits) to part of a mapping, e.g. to commit a reserved range.
 void Protect(std::uint64_t address, std::size_t bytes, int protection);
 
 }

@@ -3,7 +3,6 @@
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 
-// POSIX thread-specific data over the scePthread implementations (errno results).
 extern "C" {
 int APS5_VABI scePthreadKeyCreate(PthreadKey* key, pthread_key_destructor_func_t destructor);
 int APS5_VABI scePthreadKeyDelete(PthreadKey key);

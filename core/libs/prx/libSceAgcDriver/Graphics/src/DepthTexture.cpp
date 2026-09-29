@@ -9,8 +9,6 @@ namespace AgcDriver::Graphics {
 
 namespace {
 
-// The single-channel format a depth image's depth aspect copies into through a buffer: the
-// same texel size, with the sampled value equal to the depth value.
 VkFormat SampledDepthFormat(VkFormat depthFormat, bool stencil) {
     if (stencil) return VK_FORMAT_R8_UINT;
     switch (depthFormat) {
@@ -72,8 +70,6 @@ Texture::Texture(const Context& context, const std::shared_ptr<DepthImage>& sour
         viewInfo.components = components;
         viewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
         Check(context.Function<PFN_vkCreateImageView>("vkCreateImageView")(context.device, &viewInfo, nullptr, &view), "vkCreateImageView depth texture");
-        // Depth and color formats cannot be copied image to image: the depth aspect goes through
-        // a buffer, where its texels are plain 16-bit or 32-bit values.
         const std::size_t bytes = static_cast<std::size_t>(descriptor.width) * descriptor.height * texelBytes;
         staging = std::make_unique<Buffer>(context, bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
         if (context.drawQueue) context.drawQueue->Flush();

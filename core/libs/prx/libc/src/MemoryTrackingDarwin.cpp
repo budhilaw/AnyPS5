@@ -21,8 +21,6 @@ namespace GuestMemoryTracking::Platform {
 namespace {
 
 FaultHandler faultHandler = nullptr;
-// XNU reports a protection violation on a mapped page as SIGBUS and an unmapped page as SIGSEGV,
-// so both signals are hooked and both previous dispositions are preserved for chaining.
 struct sigaction previousSegv{};
 struct sigaction previousBus{};
 
@@ -45,8 +43,6 @@ FaultKind classify(const ucontext_t* context) {
 #endif
 }
 
-// Async-signal-safe report of a fault nobody handles, so an unhandled guest crash leaves a trace
-// even when no crash report is written for a signal re-raised from inside a handler.
 void writeHex(std::uint64_t value) {
     char buffer[19] = "0x";
     static const char digits[] = "0123456789abcdef";
@@ -68,7 +64,6 @@ void report(int signal, const siginfo_t* info, const ucontext_t* context, FaultK
     writeHex(context->uc_mcontext->__ss.__pc);
 #endif
     {
-        // si_code and the page's current protection tell a protection fault from a paging failure.
         (void)!write(STDERR_FILENO, " code=", 6);
         writeHex(static_cast<std::uint64_t>(info->si_code));
         mach_vm_address_t region = reinterpret_cast<mach_vm_address_t>(info->si_addr);
@@ -87,7 +82,6 @@ void report(int signal, const siginfo_t* info, const ucontext_t* context, FaultK
     }
     (void)!write(STDERR_FILENO, "\n", 1);
 #if defined(__x86_64__)
-    // The process is about to die: naming the image is worth the non-signal-safe lookup.
     Dl_info image{};
     const auto pc = context->uc_mcontext->__ss.__rip;
     if (dladdr(reinterpret_cast<const void*>(pc), &image) != 0 && image.dli_fname != nullptr) {
@@ -97,14 +91,12 @@ void report(int signal, const siginfo_t* info, const ucontext_t* context, FaultK
         writeHex(pc - reinterpret_cast<std::uint64_t>(image.dli_fbase));
         (void)!write(STDERR_FILENO, "\n", 1);
     }
-    // The host frames above the fault (frame-pointer walk through the signal trampoline).
     {
         void* frames[32];
         const auto count = ::backtrace(frames, 32);
         ::backtrace_symbols_fd(frames, count, STDERR_FILENO);
     }
     GuestMemoryTracking::GuestMemoryTrackingDescribe_nid_postfix(reinterpret_cast<std::uint64_t>(info->si_addr) & ~0xffffull, 0x20000);
-    // General registers: a call through a null pointer shows which one carried it.
     {
         const auto& ss = context->uc_mcontext->__ss;
         const std::uint64_t values[] = {ss.__rax, ss.__rbx, ss.__rcx, ss.__rdx, ss.__rsi, ss.__rdi, ss.__rbp, ss.__r8, ss.__r9, ss.__r10, ss.__r11, ss.__r12, ss.__r13, ss.__r14, ss.__r15};
@@ -117,7 +109,6 @@ void report(int signal, const siginfo_t* info, const ucontext_t* context, FaultK
         }
         (void)!write(STDERR_FILENO, "\n", 1);
     }
-    // The top stack words: after a call through a bad pointer the first one is the return address.
     const auto* stack = reinterpret_cast<const std::uint64_t*>(context->uc_mcontext->__ss.__rsp);
     for (int index = 0; index < 12; ++index) {
         Dl_info owner{};
@@ -138,17 +129,12 @@ void report(int signal, const siginfo_t* info, const ucontext_t* context, FaultK
 #endif
 }
 
-// A guest exception handler (sceKernelInstallExceptionHandler) receives the faults that are not
-// memory-tracking events, as the console delivers hardware faults to titles: il2cpp turns a null
-// dereference into a managed NullReferenceException this way.
 std::atomic<bool (*)(int, siginfo_t*, void*)> guestFaultHandler{nullptr};
 
 void chain(const struct sigaction& previous, int signal, siginfo_t* info, void* context) {
     if (const auto deliver = guestFaultHandler.load(std::memory_order_acquire); deliver != nullptr && deliver(signal, info, context)) return;
     if (previous.sa_handler == SIG_DFL || previous.sa_handler == SIG_IGN) {
         report(signal, info, static_cast<const ucontext_t*>(context), classify(static_cast<const ucontext_t*>(context)));
-        // ANYPS5_HANG_ON_CRASH=1 keeps the crashed process alive so a debugger can be attached
-        // to the faulting thread with its registers and the other threads intact.
         static const bool hang = std::getenv("ANYPS5_HANG_ON_CRASH") != nullptr;
         if (hang) {
             (void)!write(STDERR_FILENO, "crash: hanging for a debugger (ANYPS5_HANG_ON_CRASH)\n", 53);
@@ -162,9 +148,6 @@ void chain(const struct sigaction& previous, int signal, siginfo_t* info, void* 
     else previous.sa_handler(signal);
 }
 
-// True when the page now permits the access: another thread changed its protection (a watch
-// destroyed or resolved) between the fault and this handler taking the registry lock, so the
-// instruction can simply run again.
 bool accessibleNow(std::uintptr_t address, bool write) {
     mach_vm_address_t region = address;
     mach_vm_size_t size = 0;
@@ -190,7 +173,6 @@ void handleFault(int signal, siginfo_t* info, void* context) {
         } catch (...) {
             std::terminate();
         }
-        // A bounded number of retries: a fault that keeps recurring on an accessible page is real.
         if (address != 0 && accessibleNow(address, kind.write)) {
             if (retriedAddress != address) { retriedAddress = address; retries = 0; }
             if (++retries <= 16) {

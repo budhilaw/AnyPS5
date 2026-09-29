@@ -28,7 +28,6 @@ public:
             VkInstanceCreateInfo info{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
             info.pApplicationInfo = &application;
 #if defined(__APPLE__)
-            // MoltenVK is a portability driver: the loader lists it only on request.
             const char* portability = "VK_KHR_portability_enumeration";
             info.flags = 0x00000001;
             info.enabledExtensionCount = 1;

@@ -383,8 +383,6 @@ RdnaInstruction DecodeRdnaSmem(std::uint32_t programCounter, std::span<const std
 
     instruction.destination = scalarDestination(sdst);
     if (sbase * 2u == 106u) {
-        // s[106:107] is VCC: compilers load through a 64-bit address held there. The translator
-        // reads scalar codes 106/107 as VCC.
         instruction.source0.kind = RdnaOperandKind::ScalarRegister;
         instruction.source0.reg = 106u;
     } else {

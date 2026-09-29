@@ -1,9 +1,6 @@
 #include <cstdint>
 #include "prx/libc/include/General.hpp"
 
-// Imports of PS5 titles beyond the documented libSceSystemService surface. The named ones are
-// host no-ops (there is no background music player or controller settings screen); the rest are
-// listed by NID and report themselves on first use (see docs/TechnicalDebt.md).
 
 extern "C" {
 

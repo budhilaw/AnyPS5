@@ -20,9 +20,7 @@ namespace AgcDriver::Graphics {
         TextureDetiler& operator=(const TextureDetiler&) = delete;
 
         void Dispatch(VkCommandBuffer commands, TextureTileMode tileMode, std::uint32_t elementBytes, VkBuffer source, std::uint64_t sourceOffset, VkBuffer destination, std::uint64_t destinationOffset, const TileMipLayout& layout, std::uint32_t arrayLayer);
-        // Resets every pool: the caller waited for all detiling it recorded.
         void BeginBatch();
-        // Full pools return for reuse once the work `queue` has recorded so far completes.
         void Retire(DrawQueue& queue);
 
     private:

@@ -6,9 +6,6 @@
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 
-// libSceNpManager for a local user who is signed out of PlayStation Network: state queries report
-// signed out, identity queries fail with SCE_NP_ERROR_SIGNED_OUT, callbacks are recorded but no
-// sign-in event ever fires, and requests complete immediately with the signed-out result.
 namespace {
 
 constexpr int SCE_NP_ERROR_INVALID_ARGUMENT = static_cast<int>(0x80550003);
@@ -52,7 +49,7 @@ int APS5_VABI sceNpPollAsync(int req_id, int* result) {
     if (result == nullptr) return SCE_NP_ERROR_INVALID_ARGUMENT;
     if (!validRequest(req_id)) return SCE_NP_ERROR_REQUEST_NOT_FOUND;
     *result = SCE_NP_ERROR_SIGNED_OUT;
-    return 0; // completed
+    return 0;
 }
 
 int APS5_VABI sceNpCheckCallback(void) { return 0; }

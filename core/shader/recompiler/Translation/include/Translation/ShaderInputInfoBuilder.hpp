@@ -7,8 +7,6 @@
 
 namespace ShaderRecompiler {
 
-// hostSubgroupSize: the device subgroup width; wave64 workgroup shaders on a 32-wide host run two
-// guest lanes per invocation (see SpirvEmitter laneCount).
 ShaderStageInputInfo BuildShaderStageInputInfo(ShaderStageKind stage, const GuestContext& context, std::uint32_t hostSubgroupSize = 64);
 
 }

@@ -22,29 +22,17 @@ public:
     ShaderRecompiler::SpirvTarget Target() const;
     void WaitIdle();
     void WaitDraws();
-    // Submits the work queued so far without waiting for it (a flip: presentation waits for it).
     void FlushDraws();
-    // Submits the work queued so far; WaitTicket waits for it to complete without holding the
-    // device's locks, so the driver keeps recording meanwhile.
     std::uint64_t SubmitTicket();
     void WaitTicket(std::uint64_t ticket);
-    // Runs `action` when the GPU work queued so far completes (see DrawQueue::EnqueueCompletion).
     void Defer(std::function<void()> action);
     bool HasPendingWork();
-    // Retires completed GPU work (runs its write-backs and completion actions) without waiting.
     void Collect();
-    // A GPU-side cache/pipeline barrier between the work recorded before and after it.
     void RecordBarrier();
-    // Waits for pending GPU work only if it writes [address, address + bytes).
     void ResolveGpuWrites(std::uint64_t address, std::size_t bytes);
-    // A DMA_DATA packet with a GDS source or destination: completes the GPU work recorded so far
-    // (GDS holds counters that work updates) and copies through the host-visible GDS buffer.
     void GdsTransfer(std::span<const std::uint32_t> packet);
     void AcquireGpuMemory();
     void ResolveMemory(std::uint64_t address, std::size_t bytes, bool writable);
-    // Whether a host access to the range may need ResolveMemory (queued GPU writes or resident
-    // render targets overlap it), without the device's lock: a list published as they change. An
-    // access racing a change reaches the memory tracking (a protected page faults and resolves).
     bool NeedsResolve(std::uint64_t address, std::size_t bytes) const;
     void* Window() const;
     void Resize(std::uint32_t width, std::uint32_t height);

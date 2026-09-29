@@ -13,11 +13,8 @@
 
 namespace AgcDriver {
 
-// The shader cache key's hash of a program's code (never zero).
 std::uint64_t ShaderCodeHash(std::span<const std::uint32_t> code);
 
-// Shader requests that needed a compile, kept next to the pipeline cache: the next run replays
-// them in the background, so its draws find their shaders already compiled.
 class ShaderWarmup {
 public:
     ShaderWarmup();
@@ -25,7 +22,6 @@ public:
     ShaderWarmup(const ShaderWarmup&) = delete;
     ShaderWarmup& operator=(const ShaderWarmup&) = delete;
     void Record(const ShaderRecompiler::RecompileRequest& request);
-    // Ends the replay: the recompiler's caches do not outlive process shutdown.
     void Stop();
 
 private:

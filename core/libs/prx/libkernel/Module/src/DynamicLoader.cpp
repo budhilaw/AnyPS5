@@ -50,7 +50,6 @@ void* FindSymbol(Module& module, const char* name) {
     const auto nid = Nid::ComputeNid(name, "");
     if (auto* symbol = Symbol(module, nid.c_str())) return symbol;
 #ifdef __APPLE__
-    // Mach-O modules are not NID-patched (see docs/TechnicalDebt.md), so their exports keep the source suffix.
     return Symbol(module, (std::string(name) + "_nid_postfix").c_str());
 #else
     return nullptr;

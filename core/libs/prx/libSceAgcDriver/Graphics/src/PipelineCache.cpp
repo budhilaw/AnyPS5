@@ -49,7 +49,6 @@ PipelineCache::PipelineCache(const Context& context) : context(context) {
     info.initialDataSize = initial.size();
     info.pInitialData = initial.empty() ? nullptr : initial.data();
     if (context.Function<PFN_vkCreatePipelineCache>("vkCreatePipelineCache")(context.device, &info, nullptr, &cache) != VK_SUCCESS) {
-        // Stale or foreign data: start empty.
         info.initialDataSize = 0;
         info.pInitialData = nullptr;
         Check(context.Function<PFN_vkCreatePipelineCache>("vkCreatePipelineCache")(context.device, &info, nullptr, &cache), "vkCreatePipelineCache");

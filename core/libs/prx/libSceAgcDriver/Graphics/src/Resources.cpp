@@ -72,7 +72,6 @@ Buffer::Buffer(const Context& context, HostImport, void* host, std::size_t impor
         Check(context.Function<PFN_vkAllocateMemory>("vkAllocateMemory")(context.device, &allocation, nullptr, &memory), "vkAllocateMemory host import");
         Check(context.Function<PFN_vkBindBufferMemory>("vkBindBufferMemory")(context.device, buffer, memory, offset), "vkBindBufferMemory host import");
         initializeAddress(usage);
-        // The memory is the host's own: no vkMapMemory, the CPU view is the imported pointer.
         mapping = static_cast<std::byte*>(host) + offset;
         imported = true;
     } catch (...) {
@@ -112,7 +111,6 @@ void Buffer::Invalidate() {
     Check(context.Function<PFN_vkInvalidateMappedMemoryRanges>("vkInvalidateMappedMemoryRanges")(context.device, 1, &range), "vkInvalidateMappedMemoryRanges");
 }
 
-// The linear (non-sRGB) counterpart of a color format: storage views cannot be sRGB.
 VkFormat StorageFormat(VkFormat format) {
     switch (format) {
         case VK_FORMAT_R8_SRGB: return VK_FORMAT_R8_UNORM;
@@ -129,8 +127,6 @@ RenderTarget::RenderTarget(const Context& context, const ColorTarget& target, bo
     context.formatProperties(context.physical, target.format, &properties);
     const VkFormatFeatureFlags required = VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT | VK_FORMAT_FEATURE_TRANSFER_SRC_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT | (blending ? VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT : 0u);
     Require((properties.optimalTilingFeatures & required) == required, "render-target format does not support required operations");
-    // Shaders view the target directly (sampled, and stored to when the format allows), through
-    // any format of the same texel size.
     VkFormatProperties linearProperties{};
     context.formatProperties(context.physical, StorageFormat(target.format), &linearProperties);
     storageCapable = (linearProperties.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) != 0;

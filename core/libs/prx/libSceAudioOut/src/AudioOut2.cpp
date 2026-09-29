@@ -14,10 +14,6 @@
 #include "SDL.h"
 #include "SceTypes.hpp"
 
-// The PS5 audio output API (AudioOut2). A context owns ports; each grain (256 frames) the title
-// sets every port's data attribute and pushes the context. All ports are mixed to one stereo
-// float stream on the host's default SDL audio device; pushes pace themselves against the
-// device queue so the title's mixer runs in real time.
 namespace {
 
 constexpr int SCE_AUDIO_OUT2_ERROR_INVALID_PARAM = static_cast<int>(0x80260001);
@@ -32,10 +28,8 @@ constexpr std::uint32_t MinLatencyGrains = 8;
 constexpr std::uint32_t MaxLatencyGrains = 32;
 constexpr std::uint32_t PORT_TYPE_VIBRATION = 10;
 constexpr std::uint32_t PORT_TYPE_PADSPK = 4;
-constexpr std::uint32_t PORT_TYPE_HAPTICS = 6;  // DualSense haptics as two-channel audio: not for speakers
+constexpr std::uint32_t PORT_TYPE_HAPTICS = 6;
 
-// Port attribute ids of the console's API: the data attribute's value is the address of a
-// pointer variable holding the grain buffer.
 constexpr std::uint32_t ATTRIBUTE_DATA = 0;
 constexpr std::uint32_t ATTRIBUTE_VOLUME = 1;
 
@@ -56,7 +50,7 @@ struct Context {
     AudioOut2ContextParam param;
     std::set<AudioOut2PortHandle> ports;
     std::vector<float> mix;
-    std::chrono::steady_clock::time_point nextGrain{};  // pacing without the device queue
+    std::chrono::steady_clock::time_point nextGrain{};
 };
 
 std::mutex mutex;
@@ -66,13 +60,11 @@ std::map<AudioOut2PortHandle, Port> ports;
 std::uint64_t nextHandle = 0x10;
 SDL_AudioDeviceID device = 0;
 
-// The mix waiting for the device, which pulls it from its own thread. A pull that finds too little
-// (Bluetooth outputs pull large, irregular chunks) deepens the buffer for the rest of the run.
 struct Output {
     std::mutex mutex;
     std::vector<float> ring = std::vector<float>(OutputRate * OutputChannels);
     std::size_t read = 0, fill = 0;
-    bool primed = false;  // filled to the target once: shortages before that are the start
+    bool primed = false;
     std::atomic<std::uint32_t> targetGrains{MinLatencyGrains};
     std::atomic<std::uint64_t> shortages{0};
 };
@@ -111,8 +103,6 @@ void queueMix(const std::vector<float>& mix) {
 std::set<std::uint32_t> reportedAttributes;
 
 bool decodeFormat(std::uint32_t format, std::uint32_t& channels, bool& isFloat) {
-    // The PS5 encoding carries the channel count in bits 8-11 (0x800: eight channels); the sample
-    // type is settled from the data itself. Older single-byte codes are the PS4 enumeration.
     if ((format >> 8) != 0) {
         channels = (format >> 8) & 0xfu;
         isFloat = true;
@@ -148,7 +138,6 @@ bool openDevice() {
     return true;
 }
 
-// Reads frame `frame`, channel `channel` of a port's grain as a float sample.
 float sample(const Port& port, std::uint32_t frame, std::uint32_t channel) {
     const auto index = frame * port.channels + channel;
     if (port.isFloat) {
@@ -160,15 +149,12 @@ float sample(const Port& port, std::uint32_t frame, std::uint32_t channel) {
     return static_cast<float>(value) / 32768.0f;
 }
 
-// Rounds peaks above 0.8 off towards full scale: hard clipping a loud mix crackles.
 float limit(float value) {
     const float magnitude = std::fabs(value);
     if (magnitude <= 0.8f) return value;
     return std::copysign(0.8f + 0.2f * std::tanh((magnitude - 0.8f) / 0.2f), value);
 }
 
-// Device pulls that found too little since the last report, and the buffer depth they led to
-// (reported at most every ten seconds).
 void reportUnderrun() {
     static std::uint64_t reported = 0;
     static auto last = std::chrono::steady_clock::now();
@@ -180,12 +166,9 @@ void reportUnderrun() {
     last = now;
 }
 
-// Mixes a port's grain into a stereo buffer: 7.1 layouts fold their surround channels down.
 void mixPort(Port& port, std::vector<float>& mix) {
     if (port.data == nullptr || port.type == PORT_TYPE_VIBRATION || port.type == PORT_TYPE_HAPTICS) return;
     if (!port.typeSettled) {
-        // Float samples of a mix stay within a few units; the same bytes read as floats from 16-bit
-        // data are mostly denormals, huge values or NaNs. A fade-in has some tiny floats too: count.
         const auto count = GrainFrames * port.channels;
         std::uint32_t plausible = 0, garbage = 0;
         for (std::uint32_t index = 0; index < count; ++index) {
@@ -205,7 +188,6 @@ void mixPort(Port& port, std::vector<float>& mix) {
         if (port.channels == 1) { left = right = sample(port, frame, 0); }
         else if (port.channels == 2) { left = sample(port, frame, 0); right = sample(port, frame, 1); }
         else {
-            // L R C LFE Ls Rs Lb Rb, folded as ITU does: without the LFE (the console's order swaps the pairs, both fold alike)
             const float center = sample(port, frame, 2) * 0.7071f;
             left = sample(port, frame, 0) + center + (sample(port, frame, 4) + sample(port, frame, 6)) * 0.7071f;
             right = sample(port, frame, 1) + center + (sample(port, frame, 5) + sample(port, frame, 7)) * 0.7071f;
@@ -228,7 +210,7 @@ int APS5_VABI sceAudioOut2Initialize(void) {
 int APS5_VABI sceAudioOut2GetSystemState(AudioOut2SystemState* state) {
     if (state == nullptr) return SCE_AUDIO_OUT2_ERROR_INVALID_PARAM;
     *state = AudioOut2SystemState{};
-    state->loudness = -24.0f; // LKFS of the system mix, the console's default target
+    state->loudness = -24.0f;
     return 0;
 }
 
@@ -325,11 +307,8 @@ int APS5_VABI sceAudioOut2ContextPush(AudioOut2ContextHandle ctx, uint32_t block
             mixPort(port->second, context.mix);
             audible = audible || (port->second.data != nullptr && port->second.type != PORT_TYPE_VIBRATION && port->second.type != PORT_TYPE_HAPTICS);
         }
-        // Titles push a haptics-only context of their own: its silent grains would cut into the
-        // speakers' queue between the audible context's grains.
         if (audible) {
             for (auto& value : context.mix) value = limit(value);
-            // ANYPS5_DUMP_AUDIO=<directory>: the mix sent to the device, as raw stereo float (diagnostics).
             static FILE* dump = [] { const char* directory = std::getenv("ANYPS5_DUMP_AUDIO"); return directory != nullptr ? std::fopen((std::string(directory) + "/mix.f32").c_str(), "wb") : nullptr; }();
             if (dump != nullptr) std::fwrite(context.mix.data(), sizeof(float), context.mix.size(), dump);
             if (device != 0) {
@@ -341,8 +320,6 @@ int APS5_VABI sceAudioOut2ContextPush(AudioOut2ContextHandle ctx, uint32_t block
         context.nextGrain = std::max(context.nextGrain, now - std::chrono::milliseconds(50)) + std::chrono::microseconds(1000000ull * GrainFrames / OutputRate);
         due = context.nextGrain;
     }
-    // Pace the caller: keep the target number of grains queued for the device, or real time for a
-    // context that queues nothing (a thread pushing both then waits once).
     const auto grainFloats = GrainFrames * OutputChannels;
     if (device != 0 && audible) {
         while (queuedFloats() > output.targetGrains.load() * grainFloats) {
@@ -391,7 +368,7 @@ int APS5_VABI sceAudioOut2PortGetState(AudioOut2PortHandle port, AudioOut2PortSt
     const auto found = ports.find(port);
     if (found == ports.end()) return SCE_AUDIO_OUT2_ERROR_INVALID_HANDLE;
     *state = AudioOut2PortState{};
-    state->output = found->second.type == PORT_TYPE_PADSPK ? 0 : 1; // 1: the primary output (TV / headphones)
+    state->output = found->second.type == PORT_TYPE_PADSPK ? 0 : 1;
     state->num_channels = static_cast<std::uint8_t>(found->second.channels);
     state->volume = 32767;
     return 0;
@@ -440,7 +417,6 @@ int APS5_VABI sceAudioOut2SpeakerArrayDestroy(AudioOut2SpeakerArrayHandle handle
 int APS5_VABI sceAudioOut2GetSpeakerArrayCoefficients(AudioOut2SpeakerArrayHandle handle, AudioOut2Position pos, float spread, float* coefficients, uint32_t num_coefficients, uint8_t height_aware, float downmix_spread_radius) {
     (void)spread; (void)height_aware; (void)downmix_spread_radius;
     if (handle == nullptr || coefficients == nullptr || num_coefficients == 0) return SCE_AUDIO_OUT2_ERROR_INVALID_PARAM;
-    // Constant-power pan across the first two coefficients (left, right); the rest are silent.
     const auto length = std::sqrt(pos.x * pos.x + pos.y * pos.y + pos.z * pos.z);
     const float x = length > 0.0001f ? pos.x / length : 0.0f;
     const float angle = (x + 1.0f) * 0.25f * 3.14159265f;
@@ -461,8 +437,8 @@ int APS5_VABI sceAudioOut2GetSpeakerInfo(AudioOut2SpeakerInfo* info, uint32_t fl
     (void)flags;
     if (info == nullptr) return SCE_AUDIO_OUT2_ERROR_INVALID_PARAM;
     *info = AudioOut2SpeakerInfo{};
-    info->type = 1; // stereo
-    info->available_bits = 0x3; // left and right
+    info->type = 1;
+    info->available_bits = 0x3;
     info->speaker_angle[0] = AudioOut2SpeakerAngle{-30, 0};
     info->speaker_angle[1] = AudioOut2SpeakerAngle{30, 0};
     return 0;

@@ -2,7 +2,6 @@
 #include <cmath>
 #include <limits>
 
-// Dinkumware math helpers imported by guest code: classification codes and scaled hyperbolics.
 namespace {
 constexpr short Denormal = -2, Finite = -1, Zero = 0, Infinite = 1, NotANumber = 2;
 }
@@ -23,7 +22,6 @@ short APS5_VABI _Dtest_nid_postfix(const double* value) {
 double APS5_VABI _Cosh_nid_postfix(double x, double y) { return y * std::cosh(x); }
 double APS5_VABI _Sinh_nid_postfix(double x, double y) { return y * std::sinh(x); }
 
-// _Inf is a data object (union _Dconst) holding +infinity.
 extern const double _Inf_nid_postfix = std::numeric_limits<double>::infinity();
 
 double APS5_VABI modf_nid_postfix(double x, double* integral) { return std::modf(x, integral); }

@@ -4,8 +4,6 @@
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 
-// Entitlement access answers as a full retail installation with no additional content: the
-// host has no PSN entitlements to consult, and titles only read these at start-up.
 
 static constexpr int NP_ENTITLEMENT_ACCESS_OK = 0;
 static constexpr int NP_ENTITLEMENT_ACCESS_ERROR_INVALID_ARGUMENT = static_cast<int>(0x80D25002u);
@@ -19,7 +17,7 @@ int APS5_VABI sceNpEntitlementAccessGetAddcontEntitlementInfo(uint32_t service_l
     (void)service_label;
     if (entitlement_label == nullptr || info == nullptr) return NP_ENTITLEMENT_ACCESS_ERROR_INVALID_ARGUMENT;
     std::memset(info, 0, sizeof(*info));
-    return NP_ENTITLEMENT_ACCESS_ERROR_NOT_FOUND; // no additional content is installed
+    return NP_ENTITLEMENT_ACCESS_ERROR_NOT_FOUND;
 }
 
 int APS5_VABI sceNpEntitlementAccessGetAddcontEntitlementInfoList(uint32_t service_label, NpEntitlementAccessAddcontEntitlementInfo* list, uint32_t list_num, uint32_t* hit_num) {

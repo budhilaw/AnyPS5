@@ -25,9 +25,6 @@
 #include <mach-o/loader.h>
 #endif
 
-// Titles load their own PRX modules (plugins, IL2CPP assemblies) at run time. A module is used in
-// its relinked form: the host library that the relinker produced from the PRX, placed next to the
-// system libraries under the executable's `libs` directory and named like the PRX.
 namespace {
 
 constexpr int SCE_KERNEL_ERROR_EINVAL = 0x80020016;
@@ -71,17 +68,12 @@ using ModuleEntry = int (APS5_VABI *)(std::size_t, const void*);
 #if defined(__APPLE__)
 using ModuleInit = int (APS5_VABI *)(std::size_t, const void*, ModuleEntry);
 
-// Runs a relinked module's `_init(args, argp, start)`: its constructors, then module_start.
 int startModule(void* native, const std::string& path, std::size_t args, const void* argp) {
     auto* start = nativeSymbol(native, Nid::ComputeNid("module_start", ""));
     if (auto* init = GuestImage::FindModuleInit(path.c_str())) return reinterpret_cast<ModuleInit>(init)(args, argp, reinterpret_cast<ModuleEntry>(start));
     return start != nullptr ? reinterpret_cast<ModuleEntry>(start)(args, argp) : 0;
 }
 
-// Guest modules that dyld loaded as dependencies of another module never went through the
-// loader, so their constructors have not run. The console's loader starts every module it maps,
-// dependencies first, with empty arguments; this does the same for the images that are new.
-// Requires modulesMutex to be held.
 void startDependencies(const std::string& skipName) {
     std::map<std::string, std::uint32_t> images;
     const auto count = _dyld_image_count();
@@ -131,8 +123,6 @@ KernelModule APS5_VABI sceKernelLoadStartModule(const char* module_file_name, si
     if (flags != 0) throw std::runtime_error("sceKernelLoadStartModule: unsupported flags");
     const auto name = std::filesystem::path(module_file_name).filename().string();
     {
-        // Loading a module that is already loaded returns its handle; the console does not start
-        // it again (a plugin's module_start loads its own dependencies this way).
         std::lock_guard lock(modulesMutex);
         for (auto& [handle, module] : modules) {
             if (module.name != name) continue;
@@ -148,13 +138,9 @@ KernelModule APS5_VABI sceKernelLoadStartModule(const char* module_file_name, si
     void* native = LoadLibraryW(candidate.wstring().c_str());
     if (native == nullptr) throw std::runtime_error("sceKernelLoadStartModule: cannot load " + candidate.string());
 #else
-    // Global: the console makes every loaded module's exports visible to modules loaded later.
     void* native = ::dlopen(candidate.c_str(), RTLD_NOW | RTLD_GLOBAL);
     if (native == nullptr) throw std::runtime_error(std::string("sceKernelLoadStartModule: ") + ::dlerror());
 #endif
-    // The console's loader calls the module's `_init(args, argp, start)`, which runs the
-    // constructors and then module_start with the caller's arguments. dyld cannot pass them, so
-    // the relinker publishes `_init` and it is called here; modules without one start directly.
     int startResult = 0;
 #if defined(__APPLE__)
     {

@@ -348,7 +348,6 @@ int APS5_VABI sceAudioOutOutput(int handle, const void* ptr) {
         nanosleep(&req, nullptr);
     }
 
-    // ANYPS5_DUMP_AUDIO=<directory>: each port's raw output (diagnostics).
     if (static const char* directory = std::getenv("ANYPS5_DUMP_AUDIO"); directory != nullptr && ptr != nullptr) {
         static std::map<int, FILE*> files;
         auto& file = files[handle];

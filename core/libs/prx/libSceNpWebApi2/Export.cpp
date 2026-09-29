@@ -5,8 +5,6 @@
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 
-// The PSN web API on the host behaves like a console whose user is signed out: the library and
-// its push-event objects initialize, but no user context (and so no request) can be created.
 namespace {
 
 constexpr int SCE_NP_ERROR_INVALID_ARGUMENT = static_cast<int>(0x80550003);

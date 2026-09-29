@@ -49,8 +49,6 @@ bool ShaderMemory::read(void* context, std::uint64_t address, std::uint32_t* val
         *value = slot->second;
         return true;
     }
-    // A page no queued GPU work touches needs one check per draw: tracking that protects it
-    // later faults and resolves, and nothing is queued before the draw is.
     constexpr std::uint64_t pageBytes = 4096;
     const auto page = address / pageBytes;
     if (std::find(self.checkedPages.begin(), self.checkedPages.end(), page) != self.checkedPages.end()) {

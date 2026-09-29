@@ -872,7 +872,6 @@ DescriptorBindingKind DescriptorBindingForImage(const ImageResource& image) {
             dimension = 2u;
             break;
         case RdnaImageDimension::Dim2DArray:
-            // Cube maps are sampled through 2D array instructions; they need their own image type.
             dimension = sampled && image.cube ? 7u : 3u;
             break;
         case RdnaImageDimension::Dim2DMsaa:

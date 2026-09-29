@@ -30,7 +30,6 @@ void perform(void* context) {
             task->failure = std::current_exception();
         }
     } @catch (NSException* exception) {
-        // AppKit raises NSException; carry its reason as a C++ error so the driver reports it.
         task->failure = std::make_exception_ptr(std::runtime_error(std::string("Cocoa: ") + [[exception name] UTF8String] + ": " + [[exception reason] UTF8String]));
     }
 }

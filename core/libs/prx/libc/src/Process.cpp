@@ -74,7 +74,6 @@ void APS5_VABI exit_nid_postfix(int code) {
 ) {
     (void)arg0; (void)arg1; (void)arg2;
     (void)arg3; (void)arg4; (void)arg5;
-    // The title gave up: leave the call chain behind (guest frames show as image offsets).
     void* frames[32];
     const int count = ::backtrace(frames, 32);
     std::fprintf(stderr, "guest abort() called from %p\n", __builtin_return_address(0));
