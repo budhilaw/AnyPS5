@@ -58,9 +58,17 @@ Mapping Map(void* address, std::size_t bytes, std::size_t alignment, int protect
     }
 }
 
-void Unmap(const Mapping& mapping) {
+void UnmapView(const Mapping& mapping) {
     check(munmap(reinterpret_cast<void*>(mapping.address), mapping.bytes) == 0, "munmap guest view");
+}
+
+void UnmapAlias(const Mapping& mapping) {
     check(munmap(mapping.alias, mapping.bytes) == 0, "munmap guest alias");
+}
+
+void Unmap(const Mapping& mapping) {
+    UnmapView(mapping);
+    UnmapAlias(mapping);
 }
 
 void Protect(std::uint64_t address, std::size_t bytes, int protection) {

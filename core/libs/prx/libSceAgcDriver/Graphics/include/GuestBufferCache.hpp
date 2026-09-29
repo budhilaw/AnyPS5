@@ -110,6 +110,7 @@ private:
         std::shared_ptr<Buffer> buffer;
     };
     std::map<std::uint64_t, HostMapping> hostMappings;  // keyed by guest mapping address
+    std::uint64_t unmapGeneration = 0;  // GuestMemoryBackingUnmapGeneration at the last sweep
     std::map<const GuestAllocations::Range*, std::pair<std::shared_ptr<const GuestAllocations::Range>, std::shared_ptr<Buffer>>> imageCopies;
     std::uint64_t copiedBytes = 0;
     std::uint64_t reusedBytes = 0;

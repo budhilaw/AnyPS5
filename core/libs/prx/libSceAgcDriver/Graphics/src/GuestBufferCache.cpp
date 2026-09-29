@@ -237,7 +237,14 @@ std::shared_ptr<GuestBufferCache::Mirror> GuestBufferCache::import(std::uint64_t
     // A range that failed to import once is mirrored from then on.
     static std::set<std::pair<std::uint64_t, std::uint64_t>> refused;
     if (refused.count({begin, end}) != 0) return nullptr;
-    void* alias = GuestMemoryBacking::GuestMemoryBackingAlias_nid_postfix(first, static_cast<std::size_t>(last - first));
+    // An import of a shared mapping keeps its alias alive (the guest may unmap it meanwhile).
+    void* alias = nullptr;
+    void* retained = nullptr;
+    GuestMemoryBacking::GuestMemoryBackingExtentInfo extent{};
+    if (GuestMemoryBacking::GuestMemoryBackingExtent_nid_postfix(first, static_cast<std::size_t>(last - first), &extent)) {
+        retained = GuestMemoryBacking::GuestMemoryBackingRetainAlias_nid_postfix(extent.address, extent.serial);
+        if (retained != nullptr) alias = static_cast<std::byte*>(retained) + (first - extent.address);
+    }
     static int reported = 0;
     if (alias == nullptr) {
         // Memory outside the shared guest mappings (the executable's own data and bss) is plain
@@ -252,7 +259,17 @@ std::shared_ptr<GuestBufferCache::Mirror> GuestBufferCache::import(std::uint64_t
         }
     }
     try {
-        auto buffer = std::make_shared<Buffer>(context, Buffer::HostImport{}, alias, static_cast<std::size_t>(last - first), static_cast<std::size_t>(begin - first), static_cast<std::size_t>(end - begin), usage | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+        std::unique_ptr<Buffer> imported;
+        try {
+            imported = std::make_unique<Buffer>(context, Buffer::HostImport{}, alias, static_cast<std::size_t>(last - first), static_cast<std::size_t>(begin - first), static_cast<std::size_t>(end - begin), usage | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+        } catch (...) {
+            if (retained != nullptr) GuestMemoryBacking::GuestMemoryBackingReleaseAlias_nid_postfix(retained);
+            throw;
+        }
+        auto buffer = std::shared_ptr<Buffer>(imported.release(), [retained](Buffer* released) {
+            delete released;
+            if (retained != nullptr) GuestMemoryBacking::GuestMemoryBackingReleaseAlias_nid_postfix(retained);
+        });
         if (reported++ < 4) APS5_LOG_OUT("guest range 0x%llx+%.1f MiB bound in place (host import)", static_cast<unsigned long long>(begin), (end - begin) / 1048576.0);
         auto mirror = std::make_shared<Mirror>(Mirror{begin, end, std::move(buffer), 0, 0});
         mirror->imported = true;
@@ -278,12 +295,40 @@ GuestBufferCache::HostView GuestBufferCache::HostRange(std::uint64_t address, st
         if (trace && bytes >= (1u << 20) && reported++ < 20) APS5_LOG_OUT("host range 0x%llx+0x%llx unavailable: extent %d 0x%llx+0x%llx alias %p", static_cast<unsigned long long>(address), static_cast<unsigned long long>(bytes), found ? 1 : 0, static_cast<unsigned long long>(extent.address), static_cast<unsigned long long>(extent.bytes), extent.alias);
         return {};
     }
+    std::lock_guard registryLock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
     std::lock_guard lock(mutex);
+    // Imports of mappings the guest unmapped go (their users keep the buffer until their work
+    // completes; the backing keeps the alias until every import is gone).
+    if (const auto generation = GuestMemoryBacking::GuestMemoryBackingUnmapGeneration_nid_postfix(); generation != unmapGeneration) {
+        unmapGeneration = generation;
+        for (auto it = hostMappings.begin(); it != hostMappings.end();) {
+            GuestMemoryBacking::GuestMemoryBackingExtentInfo current{};
+            const bool live = GuestMemoryBacking::GuestMemoryBackingExtent_nid_postfix(it->first, 1, &current) && current.address == it->first && current.serial == it->second.serial;
+            static int reported = 0;
+            if (!live && reported++ < 16) APS5_LOG_OUT("guest mapping 0x%llx was unmapped: its import goes once its users finish", static_cast<unsigned long long>(it->first));
+            it = live ? std::next(it) : hostMappings.erase(it);
+        }
+    }
     auto& mapping = hostMappings[extent.address];
     if (!mapping.buffer || mapping.serial != extent.serial || mapping.bytes != importBytes) {
+        void* alias = GuestMemoryBacking::GuestMemoryBackingRetainAlias_nid_postfix(extent.address, extent.serial);
+        if (alias == nullptr) {
+            hostMappings.erase(extent.address);
+            return {};
+        }
         try {
             const VkBufferUsageFlags usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | (context.bufferDeviceAddress ? VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT : 0u);
-            mapping.buffer = std::make_shared<Buffer>(context, Buffer::HostImport{}, extent.alias, static_cast<std::size_t>(importBytes), 0, static_cast<std::size_t>(importBytes), usage);
+            std::unique_ptr<Buffer> imported;
+            try {
+                imported = std::make_unique<Buffer>(context, Buffer::HostImport{}, alias, static_cast<std::size_t>(importBytes), 0, static_cast<std::size_t>(importBytes), usage);
+            } catch (...) {
+                GuestMemoryBacking::GuestMemoryBackingReleaseAlias_nid_postfix(alias);
+                throw;
+            }
+            mapping.buffer = std::shared_ptr<Buffer>(imported.release(), [alias](Buffer* buffer) {
+                delete buffer;
+                GuestMemoryBacking::GuestMemoryBackingReleaseAlias_nid_postfix(alias);
+            });
             mapping.serial = extent.serial;
             mapping.bytes = importBytes;
             static int reported = 0;

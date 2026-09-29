@@ -27,6 +27,12 @@ void GuestMemoryBackingWrite_nid_postfix(std::uint64_t address, const void* sour
 void* GuestMemoryBackingAlias_nid_postfix(std::uint64_t address, std::size_t bytes);
 // The shared mapping holding [address, address + bytes) (false when there is none).
 bool GuestMemoryBackingExtent_nid_postfix(std::uint64_t address, std::size_t bytes, GuestMemoryBackingExtentInfo* info);
+// Keeps the alias of the mapping at `address` (with that serial) for a GPU import: unmapping the
+// mapping leaves the alias until every import is released. Null when the mapping is gone.
+void* GuestMemoryBackingRetainAlias_nid_postfix(std::uint64_t address, std::uint64_t serial);
+void GuestMemoryBackingReleaseAlias_nid_postfix(void* alias);
+// Counts whole mappings unmapped so far: importers compare it to find stale imports.
+std::uint64_t GuestMemoryBackingUnmapGeneration_nid_postfix();
 }
 
 }

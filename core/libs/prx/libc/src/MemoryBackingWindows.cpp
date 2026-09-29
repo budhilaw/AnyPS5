@@ -58,10 +58,18 @@ Mapping Map(void* address, std::size_t bytes, std::size_t alignment, int protect
     }
 }
 
-void Unmap(const Mapping& mapping) {
+void UnmapView(const Mapping& mapping) {
     check(UnmapViewOfFile(reinterpret_cast<void*>(mapping.address)) != FALSE, "UnmapViewOfFile guest view");
+}
+
+void UnmapAlias(const Mapping& mapping) {
     check(UnmapViewOfFile(mapping.alias) != FALSE, "UnmapViewOfFile guest alias");
     check(CloseHandle(reinterpret_cast<HANDLE>(mapping.handle)) != FALSE, "CloseHandle guest backing");
+}
+
+void Unmap(const Mapping& mapping) {
+    UnmapView(mapping);
+    UnmapAlias(mapping);
 }
 
 void Protect(std::uint64_t address, std::size_t bytes, int protection) {

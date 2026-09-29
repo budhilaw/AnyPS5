@@ -2,11 +2,14 @@
 #include "prx/libc/include/MemoryBackingPlatform.hpp"
 #include "prx/libc/include/GuestMemoryTracking.hpp"
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cstring>
 #include <iterator>
 #include <limits>
 #include <map>
 #include <stdexcept>
+#include <vector>
 
 namespace GuestMemoryBacking {
 namespace {
@@ -15,9 +18,38 @@ struct Allocation {
     Platform::Mapping mapping;
     std::map<std::uint64_t, std::uint64_t> ranges;
     std::uint64_t serial = 0;  // distinguishes a mapping from a later one at the same address
+    std::size_t imports = 0;   // GPU buffers made of the alias (GuestMemoryBackingRetainAlias)
+    std::chrono::steady_clock::time_point released{};  // when the last import went
 };
 
 std::uint64_t nextSerial = 1;
+std::atomic<std::uint64_t> unmapGeneration{0};
+
+// Aliases of unmapped allocations the GPU still imports. Command buffers that made an import
+// resident may run after its release, so the memory stays two seconds longer.
+struct RetiredAlias {
+    Platform::Mapping mapping;
+    std::size_t imports;
+    std::chrono::steady_clock::time_point released{};
+};
+
+std::vector<RetiredAlias>& retired() {
+    static auto* value = new std::vector<RetiredAlias>;
+    return *value;
+}
+
+void collectRetired() {
+    const auto now = std::chrono::steady_clock::now();
+    auto& list = retired();
+    for (auto it = list.begin(); it != list.end();) {
+        if (it->imports != 0 || now - it->released < std::chrono::seconds(2)) {
+            ++it;
+            continue;
+        }
+        Platform::UnmapAlias(it->mapping);
+        it = list.erase(it);
+    }
+}
 
 std::map<std::uint64_t, Allocation>& allocations() {
     static auto* value = new std::map<std::uint64_t, Allocation>;
@@ -49,6 +81,7 @@ void* GuestMemoryBackingMap_nid_postfix(void* address, std::size_t bytes, std::s
     if (bytes == 0 || bytes % pageSize != 0 || alignment < pageSize || (alignment & (alignment - 1)) != 0 || (protection & ~7) != 0) throw std::invalid_argument("invalid shared guest memory mapping");
     if (address != nullptr && reinterpret_cast<std::uintptr_t>(address) % alignment != 0) throw std::invalid_argument("misaligned fixed guest memory mapping");
     std::lock_guard lock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
+    collectRetired();
     const auto mapping = Platform::Map(address, bytes, alignment, protection);
     try {
         if (mapping.bytes > std::numeric_limits<std::uint64_t>::max() - mapping.address) throw std::overflow_error("guest backing mapping overflow");
@@ -83,8 +116,14 @@ void GuestMemoryBackingUnmap_nid_postfix(void* pointer, std::size_t bytes) {
     GuestMemoryTracking::GuestMemoryTrackingInvalidate_nid_postfix(address, bytes);
     if (replacement.empty()) {
         const auto base = allocation.mapping.address;
-        Platform::Unmap(allocation.mapping);
+        if (allocation.imports != 0 || std::chrono::steady_clock::now() - allocation.released < std::chrono::seconds(2)) {
+            Platform::UnmapView(allocation.mapping);
+            retired().push_back({allocation.mapping, allocation.imports, allocation.released});
+        } else {
+            Platform::Unmap(allocation.mapping);
+        }
         allocations().erase(base);
+        unmapGeneration.fetch_add(1, std::memory_order_release);
     } else {
         Platform::Deactivate(address, bytes);
         allocation.ranges.swap(replacement);
@@ -121,6 +160,35 @@ bool GuestMemoryBackingExtent_nid_postfix(std::uint64_t address, std::size_t byt
     info->alias = allocation->mapping.alias;
     info->serial = allocation->serial;
     return true;
+}
+
+void* GuestMemoryBackingRetainAlias_nid_postfix(std::uint64_t address, std::uint64_t serial) {
+    std::lock_guard lock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
+    const auto found = allocations().find(address);
+    if (found == allocations().end() || found->second.serial != serial) return nullptr;
+    ++found->second.imports;
+    return found->second.mapping.alias;
+}
+
+void GuestMemoryBackingReleaseAlias_nid_postfix(void* alias) {
+    std::lock_guard lock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
+    bool found = false;
+    for (auto& [base, allocation] : allocations()) {
+        if (allocation.mapping.alias != alias || allocation.imports == 0) continue;
+        if (--allocation.imports == 0) allocation.released = std::chrono::steady_clock::now();
+        found = true;
+        break;
+    }
+    for (auto& entry : retired()) {
+        if (found || entry.mapping.alias != alias || entry.imports == 0) continue;
+        if (--entry.imports == 0) entry.released = std::chrono::steady_clock::now();
+        found = true;
+    }
+    collectRetired();
+}
+
+std::uint64_t GuestMemoryBackingUnmapGeneration_nid_postfix() {
+    return unmapGeneration.load(std::memory_order_acquire);
 }
 
 void GuestMemoryBackingWrite_nid_postfix(std::uint64_t address, const void* source, std::size_t bytes) {

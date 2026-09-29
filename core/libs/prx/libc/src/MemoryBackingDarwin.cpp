@@ -56,9 +56,17 @@ Mapping Map(void* address, std::size_t bytes, std::size_t alignment, int protect
     }
 }
 
-void Unmap(const Mapping& mapping) {
+void UnmapView(const Mapping& mapping) {
     check(mach_vm_deallocate(mach_task_self(), mapping.address, mapping.bytes), "mach_vm_deallocate guest view");
+}
+
+void UnmapAlias(const Mapping& mapping) {
     check(mach_vm_deallocate(mach_task_self(), reinterpret_cast<mach_vm_address_t>(mapping.alias), mapping.bytes), "mach_vm_deallocate guest alias");
+}
+
+void Unmap(const Mapping& mapping) {
+    UnmapView(mapping);
+    UnmapAlias(mapping);
 }
 
 void Protect(std::uint64_t address, std::size_t bytes, int protection) {
