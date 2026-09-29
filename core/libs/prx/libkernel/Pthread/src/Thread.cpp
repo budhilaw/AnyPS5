@@ -168,6 +168,8 @@ int APS5_VABI scePthreadCreate(Pthread* thread, const PthreadAttr* attr, Pthread
     if (attr && *attr) detached = ((*attr)->_detachstate == DETACH_DETACHED);
     p->_detached = detached;
     p->stackSize = attr ? (*attr)->_stacksize : DEFAULT_STACK_SIZE;
+    if (attr && *attr) p->schedPriority = (*attr)->_schedpriority;
+    APS5_LOG_OUT("thread '%s' created with priority %d", name != nullptr ? name : "", attr && *attr ? (*attr)->_schedpriority : -1);
     std::promise<bool> start;
     auto args = std::make_unique<ThreadArgs>(ThreadArgs{entry, arg, p.get()});
 #ifdef _WIN32
@@ -207,6 +209,10 @@ int APS5_VABI scePthreadCreate(Pthread* thread, const PthreadAttr* attr, Pthread
         pthread_attr_destroy(&nativeAttr);
         throw std::runtime_error("scePthreadCreate: invalid stack size " + std::to_string(stackSize));
     }
+#if defined(__APPLE__)
+    // Real-time guest threads (FMOD's mixer and feeders run at 256-280) keep to performance cores.
+    if (p->schedPriority <= 300) pthread_attr_set_qos_class_np(&nativeAttr, QOS_CLASS_USER_INTERACTIVE, 0);
+#endif
     auto native = std::make_unique<PosixThreadArgs>(PosixThreadArgs{std::move(args), start.get_future()});
     const int created = pthread_create(&p->native, &nativeAttr, StartPosixThread, native.get());
     pthread_attr_destroy(&nativeAttr);
