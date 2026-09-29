@@ -14,6 +14,7 @@
 namespace AgcDriver {
 
 ShaderMemory::ShaderMemory(std::span<const ShaderRecompiler::MemoryRegion> regions, std::vector<std::shared_ptr<const void>> keep) : owners(std::move(keep)) {
+    dwords.reserve(128);
     const ShaderRecompiler::RequestMemoryView validated(regions);
     for (const auto& region : regions) {
         const auto same = std::find_if(initial.begin(), initial.end(), [&](const auto& other) { return other.guestAddress == region.guestAddress; });
@@ -42,8 +43,9 @@ bool ShaderMemory::read(void* context, std::uint64_t address, std::uint32_t* val
     if (next != self.initial.end() && next->guestAddress - address < sizeof(*value)) {
         throw std::runtime_error("AGC driver: shader memory read overlaps a snapshot boundary");
     }
-    if (const auto found = self.dwords.find(address); found != self.dwords.end()) {
-        *value = found->second;
+    const auto slot = std::lower_bound(self.dwords.begin(), self.dwords.end(), address, [](const auto& entry, std::uint64_t value) { return entry.first < value; });
+    if (slot != self.dwords.end() && slot->first == address) {
+        *value = slot->second;
         return true;
     }
     // A page checked earlier in this capture needs no range check: tracking that protects it
@@ -56,7 +58,7 @@ bool ShaderMemory::read(void* context, std::uint64_t address, std::uint32_t* val
         GuestMemory::Read(address, std::as_writable_bytes(std::span(value, 1)), alignof(std::uint32_t));
         self.checkedPage = address / pageBytes;
     }
-    self.dwords.emplace(address, *value);
+    self.dwords.insert(slot, {address, *value});
     return true;
 }
 

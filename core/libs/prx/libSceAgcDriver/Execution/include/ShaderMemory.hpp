@@ -24,7 +24,8 @@ private:
     static bool read(void* context, std::uint64_t address, std::uint32_t* value);
     std::vector<ShaderRecompiler::MemoryRegion> initial;  // by address
     std::vector<std::shared_ptr<const void>> owners;
-    std::map<std::uint64_t, std::uint32_t> dwords;  // guest memory the captures read
+    // Guest memory the captures read, by address: spans into it stay valid once capturing ends.
+    std::vector<std::pair<std::uint64_t, std::uint32_t>> dwords;
     std::uint64_t checkedPage = ~0ull;
     ShaderRecompiler::ResourceSnapshot snapshot;
     ShaderRecompiler::ResourceSpecialization specialization;
