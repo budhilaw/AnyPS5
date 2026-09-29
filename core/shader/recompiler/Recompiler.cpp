@@ -311,7 +311,7 @@ RecompileResult RecompileImpl(const RecompileRequest& request) {
         const auto variant = compileVariant(request, std::move(program), snapshot, specialization);
         return materializeResult(variant, request, snapshot);
     }
-    const auto source = getSource(request);
+    const auto source = request.source != nullptr ? std::static_pointer_cast<SourceEntry>(request.source) : getSource(request);
     const auto* snapshotUsed = request.materializedSnapshot;
     const auto* specializationUsed = request.materializedSpecialization;
     if (snapshotUsed == nullptr || specializationUsed == nullptr) {
@@ -346,8 +346,13 @@ RecompileResult RecompileImpl(const RecompileRequest& request) {
 
 }
 
-std::shared_ptr<const IrResourcePlan> GetResourcePlan(const RecompileRequest& request) {
-    if (request.useCache) return getSource(request)->plan;
+std::shared_ptr<const IrResourcePlan> GetResourcePlan(const RecompileRequest& request, std::shared_ptr<void>* source) {
+    if (request.useCache) {
+        auto entry = getSource(request);
+        auto plan = entry->plan;
+        if (source != nullptr) *source = std::move(entry);
+        return plan;
+    }
     static_cast<void>(BuildShaderStageInputInfo(toShaderStageKind(request.shader.stage), request.context, request.target.subgroupSize));
     return makeResourcePlan(request);
 }

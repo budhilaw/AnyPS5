@@ -623,6 +623,7 @@ private:
         request.context.memory = captured;
         request.materializedSnapshot = &shaderMemory.Snapshot();
         request.materializedSpecialization = &shaderMemory.Specialization();
+        request.source = shaderMemory.Source();
         timing.Mark("request_memory");
         auto compiled = ShaderRecompiler::Recompile(request);
         if (!compiled.cacheHit) warmup.Record(request);
@@ -886,6 +887,7 @@ private:
             request.context.memory = memory;
             request.materializedSnapshot = &shaderMemory.Snapshot();
             request.materializedSpecialization = &shaderMemory.Specialization();
+            request.source = shaderMemory.Source();
             shaderTiming.Mark("request_memory");
             results.push_back(ShaderRecompiler::Recompile(request));
             if (!results.back().cacheHit) warmup.Record(request);

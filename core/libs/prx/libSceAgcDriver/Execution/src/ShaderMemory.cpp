@@ -64,7 +64,7 @@ bool ShaderMemory::read(void* context, std::uint64_t address, std::uint32_t* val
 }
 
 void ShaderMemory::Capture(const ShaderRecompiler::RecompileRequest& request) {
-    const auto plan = ShaderRecompiler::GetResourcePlan(request);
+    const auto plan = ShaderRecompiler::GetResourcePlan(request, &source);
     constexpr ShaderRecompiler::ResourceMaterializer materializer;
     ShaderRecompiler::SrtRuntime runtime;
     runtime.userData = request.context.userData;

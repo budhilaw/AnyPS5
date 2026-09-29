@@ -18,6 +18,7 @@ public:
     void Capture(const ShaderRecompiler::RecompileRequest& request);
     const ShaderRecompiler::ResourceSnapshot& Snapshot() const { return snapshot; }
     const ShaderRecompiler::ResourceSpecialization& Specialization() const { return specialization; }
+    const std::shared_ptr<void>& Source() const { return source; }
     [[nodiscard]] std::vector<ShaderRecompiler::MemoryRegion> Regions() const;
 
 private:
@@ -29,6 +30,7 @@ private:
     std::vector<std::uint64_t> checkedPages;
     ShaderRecompiler::ResourceSnapshot snapshot;
     ShaderRecompiler::ResourceSpecialization specialization;
+    std::shared_ptr<void> source;
 };
 
 }

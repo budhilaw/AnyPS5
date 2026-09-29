@@ -214,6 +214,8 @@ struct RecompileRequest {
     // them is how it captured that memory): a cached compile skips evaluating its plan again.
     const ResourceSnapshot* materializedSnapshot = nullptr;
     const ResourceSpecialization* materializedSpecialization = nullptr;
+    // The cache entry GetResourcePlan found for this request: the compile skips looking it up.
+    std::shared_ptr<void> source;
 };
 
 enum class DescriptorKind {
