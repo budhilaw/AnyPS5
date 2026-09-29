@@ -4,6 +4,7 @@
 #include "prx/libkernel/DirectMemory/DirectMemory.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
 #include "prx/libc/include/GuestMemoryBacking.hpp"
+#include "prx/libc/include/General.hpp"
 #include <cerrno>
 #include <cstdio>
 #include <string>
@@ -72,7 +73,7 @@ int LinuxProtFromSce(int prot) {
     }
     int result = PROT_NONE;
     if (prot & 1) result |= PROT_READ;
-    if (prot & 2) result |= PROT_WRITE;
+    if (prot & 2) result |= PROT_READ | PROT_WRITE;
     if (prot & 4) result |= PROT_EXEC;
     return result;
 }
@@ -85,8 +86,9 @@ void* MapAligned(void* addr, size_t len, int prot, int flags, size_t alignment) 
     ValidateLength(len);
     alignment = ValidateAlignment(alignment);
     constexpr int guestMapFixed = 0x10;
+    constexpr int guestMapNoOverwrite = 0x80;
     constexpr int guestMapNoCoalesce = 0x400000;
-    if ((flags & ~(guestMapFixed | guestMapNoCoalesce)) != 0) throw std::invalid_argument("Unsupported memory mapping flags");
+    if ((flags & ~(guestMapFixed | guestMapNoOverwrite | guestMapNoCoalesce)) != 0) throw std::invalid_argument("Unsupported memory mapping flags " + std::to_string(flags));
     if ((flags & guestMapFixed) != 0) ValidateRange(addr, len, alignment);
     else if (addr != nullptr) throw std::invalid_argument("Non-fixed mapping address hints are not implemented");
     return GuestMemoryBacking::GuestMemoryBackingMap_nid_postfix(addr, len, alignment, prot);
@@ -121,7 +123,15 @@ int DoMapDirect(void** addr, size_t len, int prot, int flags, int64_t physStart,
     GuestAllocations::Mutation mutation;
     if (*addr != nullptr && CommitReserved(mutation, *addr, len, prot, flags, alignment)) return 0;
     if (*addr != nullptr) mutation.RequireAvailable(*addr, len);
-    void* mapped = MapAligned(*addr, len, LinuxProtFromSce(prot), flags, alignment);
+    void* mapped = nullptr;
+    try {
+        mapped = MapAligned(*addr, len, LinuxProtFromSce(prot), flags, alignment);
+    } catch (const std::runtime_error& error) {
+        constexpr int guestMapNoOverwrite = 0x80;
+        if (*addr == nullptr || (flags & guestMapNoOverwrite) == 0) throw;
+        APS5_LOG_OUT("fixed direct mapping %p+0x%zx is unavailable on this host: %s", *addr, len, error.what());
+        return SCE_KERNEL_ERROR_ENOMEM;
+    }
     try {
         mutation.Add(mapped, len, (prot & 3) != 0, (prot & 2) != 0);
     } catch (...) {
