@@ -17,8 +17,8 @@ void TranslationContext::sSubvectorLoop(const RdnaInstruction& inst, bool begin)
 void TranslationContext::sSaveexec(const RdnaInstruction& inst, IrOpcode operation, bool negateExec, bool negateSource, bool write64) {
     if (write64) {
         const std::array<IrU32, 2> oldExec{IrU32(ir.GetExecLo()), IrU32(ir.GetExecHi())};
-        writeU32Pair(inst.destination, oldExec);
         const std::array<IrU32, 2> source = readU32Pair(sourceAt(inst, 0u));
+        writeU32Pair(inst.destination, oldExec);
         IrValue& lowExecOperand = negateExec ? ir.BitwiseNot(oldExec[0].Value()) : oldExec[0].Value();
         IrValue& lowSourceOperand = negateSource ? ir.BitwiseNot(source[0].Value()) : source[0].Value();
         IrValue& highExecOperand = negateExec ? ir.BitwiseNot(oldExec[1].Value()) : oldExec[1].Value();
@@ -33,8 +33,8 @@ void TranslationContext::sSaveexec(const RdnaInstruction& inst, IrOpcode operati
         return;
     }
     const IrU32 oldExec(ir.GetExecLo());
-    writeRawU32(inst.destination, oldExec);
     const IrU32 source = readU32(sourceAt(inst, 0u));
+    writeRawU32(inst.destination, oldExec);
     IrValue& execOperand = negateExec ? ir.BitwiseNot(oldExec.Value()) : oldExec.Value();
     IrValue& sourceOperand = negateSource ? ir.BitwiseNot(source.Value()) : source.Value();
     const IrU32 newExec(ir.Emit(operation, IrType::U32, {&execOperand, &sourceOperand}));
