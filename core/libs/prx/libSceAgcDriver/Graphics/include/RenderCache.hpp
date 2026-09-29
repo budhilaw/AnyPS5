@@ -4,6 +4,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/GpuColorTransfer.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Resources.hpp"
 #include "prx/libc/include/GuestMemoryTracking.hpp"
+#include <functional>
 #include <map>
 
 namespace AgcDriver::Graphics {
@@ -33,6 +34,7 @@ public:
     const ColorTarget& Description() const { return color; }
     bool Valid() const { return valid; }
     bool Dirty() const { return dirty; }
+    bool Watched() const { return memoryWatch != nullptr; }
     std::uint64_t lastUse = 0; // RenderCache use counter at the last lookup, for LRU eviction
     std::uint64_t Generation() const { return generation; }
     void Invalidate();
@@ -73,6 +75,8 @@ public:
     // The parts of [begin, end) whose watchers need to hear of an in-place GPU write by the
     // queued work numbered `sequence` (resident targets that adopted it are left out).
     std::vector<std::pair<std::uint64_t, std::uint64_t>> UnadoptedRanges(std::uint64_t begin, std::uint64_t end, std::uint64_t sequence) const;
+    // The parts of [begin, end) outside the pages of every target that watches its memory.
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> UnwatchedRanges(std::uint64_t begin, std::uint64_t end) const;
     // Depth targets are keyed by their Z base address; a changed extent or format replaces the image.
     std::shared_ptr<DepthImage> GetDepth(const DepthTarget& depth);
     std::shared_ptr<ResidentColor> Find(std::uint64_t address) const;
@@ -92,6 +96,7 @@ public:
     void Flush();
 
 private:
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> excluding(std::uint64_t begin, std::uint64_t end, const std::function<bool(const ResidentColor&)>& excluded) const;
     Context context;
     std::map<std::uint64_t, std::shared_ptr<ResidentColor>> entries;
     std::uint64_t useCounter = 0;

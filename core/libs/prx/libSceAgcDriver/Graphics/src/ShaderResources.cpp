@@ -238,7 +238,10 @@ std::size_t ShaderResources::addGuestBuffer(std::span<const std::uint32_t> words
         // Only whether the range is mapped matters here: the device resolves the access when the
         // guest memory uploads, knowing whether the GPU reads it in place.
         const GuestMemory::MemoryAccessScope deferred(nullptr, nullptr);
-        GuestMemory::CheckRange(reinterpret_cast<const void*>(address), size, 1, true);
+        // Render target pages are left to the upload too: a CPU resolve here flips the
+        // protection of megabytes, and the target's next use flips it back.
+        if (context.renderCache == nullptr) GuestMemory::CheckRange(reinterpret_cast<const void*>(address), size, 1, written);
+        else for (const auto& [from, to] : context.renderCache->UnwatchedRanges(address, address + size)) GuestMemory::CheckRange(reinterpret_cast<const void*>(from), static_cast<std::size_t>(to - from), 1, written);
     } catch (const std::exception& error) {
         // A descriptor over unmapped memory (a null descriptor with a baked-in offset): the
         // console's GPU reads zeros there and drops writes, so the shader gets a zeroed buffer.

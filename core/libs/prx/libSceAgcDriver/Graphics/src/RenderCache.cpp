@@ -153,10 +153,19 @@ void ResidentColor::Commit() {
 }
 
 std::vector<std::pair<std::uint64_t, std::uint64_t>> RenderCache::UnadoptedRanges(std::uint64_t begin, std::uint64_t end, std::uint64_t sequence) const {
+    return excluding(begin, end, [sequence](const ResidentColor& entry) { return entry.Adopted(sequence); });
+}
+
+std::vector<std::pair<std::uint64_t, std::uint64_t>> RenderCache::UnwatchedRanges(std::uint64_t begin, std::uint64_t end) const {
+    return excluding(begin, end, [](const ResidentColor& entry) { return entry.Watched(); });
+}
+
+std::vector<std::pair<std::uint64_t, std::uint64_t>> RenderCache::excluding(std::uint64_t begin, std::uint64_t end, const std::function<bool(const ResidentColor&)>& excluded) const {
     std::vector<std::pair<std::uint64_t, std::uint64_t>> result{{begin, end}};
     const auto pageSize = GuestMemoryTracking::GuestMemoryTrackingPageSize_nid_postfix();
     for (const auto& [address, entry] : entries) {
-        if (!entry->Adopted(sequence)) continue;
+        if (address >= end + pageSize) break;
+        if (!excluded(*entry)) continue;
         // The target's watch covers whole pages; none of them belong to another watcher.
         const auto& color = entry->Description();
         const auto first = color.address - color.address % pageSize;
