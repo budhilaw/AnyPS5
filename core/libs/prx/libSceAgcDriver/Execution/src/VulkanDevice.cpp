@@ -141,6 +141,7 @@ struct VulkanDevice::State {
     bool samplerAnisotropy = false;
     bool textureCompressionBC = false;
     bool storageImages = false;
+    bool imageViewMinLod = false;
     std::unique_ptr<Graphics::TextureDetiler> detiler;
     std::unique_ptr<Graphics::GpuColorTransfer> colorTransfer;
     std::shared_ptr<Graphics::BufferPool> bufferPool;
@@ -568,6 +569,13 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
         state->depthClipControl = depthClipFeatures.depthClipControl == VK_TRUE;
         if (state->depthClipControl) deviceExtensions.push_back(VK_EXT_DEPTH_CLIP_CONTROL_EXTENSION_NAME);
     }
+    VkPhysicalDeviceImageViewMinLodFeaturesEXT minLodFeatures{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_VIEW_MIN_LOD_FEATURES_EXT};
+    if (hasExtension(VK_EXT_IMAGE_VIEW_MIN_LOD_EXTENSION_NAME)) {
+        VkPhysicalDeviceFeatures2 features{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &minLodFeatures};
+        state->InstanceFunction<PFN_vkGetPhysicalDeviceFeatures2>("vkGetPhysicalDeviceFeatures2")(selected, &features);
+        state->imageViewMinLod = minLodFeatures.minLod == VK_TRUE;
+        if (state->imageViewMinLod) deviceExtensions.push_back(VK_EXT_IMAGE_VIEW_MIN_LOD_EXTENSION_NAME);
+    }
     if (state->meshShader) {
         deviceExtensions.insert(deviceExtensions.end(), meshExtensions.begin(), meshExtensions.end());
         state->capabilities.push_back(5283);
@@ -616,6 +624,10 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
     if (state->depthClipControl) {
         depthClipFeatures.pNext = const_cast<void*>(deviceInfo.pNext);
         deviceInfo.pNext = &depthClipFeatures;
+    }
+    if (state->imageViewMinLod) {
+        minLodFeatures.pNext = const_cast<void*>(deviceInfo.pNext);
+        deviceInfo.pNext = &minLodFeatures;
     }
     byteFeatures.pNext = const_cast<void*>(deviceInfo.pNext);
     if (state->fragmentShaderBarycentric) {
@@ -1230,6 +1242,7 @@ Graphics::Context VulkanDevice::graphicsContext() const {
     context.hostPointerImport = state->hostPointerImport;
     context.hostPointerAlignment = state->hostPointerAlignment;
     context.releaseQueue = state->releaseQueue;
+    context.imageViewMinLod = state->imageViewMinLod;
     return context;
 }
 

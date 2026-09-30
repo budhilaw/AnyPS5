@@ -107,6 +107,7 @@ struct Context {
     bool hostPointerImport = false;
     VkDeviceSize hostPointerAlignment = 0;
     std::shared_ptr<ReleaseQueue> releaseQueue;
+    bool imageViewMinLod = false;
 };
 
 }

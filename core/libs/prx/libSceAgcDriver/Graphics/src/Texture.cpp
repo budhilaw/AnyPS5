@@ -289,6 +289,15 @@ void Texture::createGuestViews(const GuestTextureResource& descriptor, VkCompone
         viewInfo.format = vkFormat;
         viewInfo.components = components;
         viewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, descriptor.baseLevel, viewLevelCount, descriptor.baseArray, viewLayerCount};
+        VkImageViewMinLodCreateInfoEXT minLod{VK_STRUCTURE_TYPE_IMAGE_VIEW_MIN_LOD_CREATE_INFO_EXT};
+        minLod.minLod = std::clamp(descriptor.minLod, static_cast<float>(descriptor.baseLevel), static_cast<float>(descriptor.lastLevel));
+        if (minLod.minLod > static_cast<float>(descriptor.baseLevel)) {
+            if (context.imageViewMinLod) viewInfo.pNext = &minLod;
+            else {
+                static std::once_flag once;
+                std::call_once(once, [&] { APS5_LOG_OUT("the device cannot clamp image views to a minimum LOD; guest textures with a minimum LOD (%.2f) sample their full mip range", descriptor.minLod); });
+            }
+        }
         Check(context.Function<PFN_vkCreateImageView>("vkCreateImageView")(context.device, &viewInfo, nullptr, &view), "vkCreateImageView");
         if (storageCapable) {
             storageFormat = LinearFormat(vkFormat);
