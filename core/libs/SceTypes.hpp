@@ -256,21 +256,10 @@ struct VaList {
 };
 #pragma pack(pop)
 
-using FiberEntry = void* (*)(std::uint64_t, void*);
+using FiberEntry = void (APS5_VABI *)(std::uint64_t, std::uint64_t);
 
 struct FiberOptParam {
     std::uint32_t magic;
-};
-
-struct FiberCpuContext {
-    std::uint64_t rip;
-    std::uint64_t rsp;
-    std::uint64_t rbp;
-    std::uint64_t rbx;
-    std::uint64_t r12;
-    std::uint64_t r13;
-    std::uint64_t r14;
-    std::uint64_t r15;
 };
 
 constexpr std::uint32_t FIBER_MAX_NAME_LENGTH = 31;
@@ -283,15 +272,8 @@ struct FiberObject {
     void* addr_context;
     std::uint64_t size_context;
     char name[FIBER_MAX_NAME_LENGTH + 1];
-    void* context;
+    std::uint64_t saved_stack;
     std::uint32_t flags;
-    std::uint32_t padding;
-    void* context_start;
-    void* context_end;
-    FiberCpuContext saved_context;
-    std::uint64_t arg_on_run;
-    std::uint64_t arg_on_return;
-    bool context_valid;
     std::uint32_t magic_end;
 };
 
