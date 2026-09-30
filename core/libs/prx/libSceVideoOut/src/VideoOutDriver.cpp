@@ -22,6 +22,7 @@
 #include "prx/libSceAgcDriver/Submit/include/Dcb.hpp"
 #include "prx/libc/include/Shutdown.hpp"
 #include "prx/libc/include/General.hpp"
+#include "prx/libc/include/PreciseWait.hpp"
 
 namespace {
 
@@ -552,7 +553,7 @@ void VideoOutDriver::vblankLoop(std::stop_token token) {
             const auto next = start + std::chrono::duration_cast<std::chrono::steady_clock::duration>(Frame(frame));
             {
                 std::unique_lock lock(flipQueue->mutex);
-                flipQueue->changed.wait_until(lock, next, [&] { return token.stop_requested() || flipQueue->failure; });
+                PreciseWait::Until(flipQueue->changed, lock, next, [&] { return token.stop_requested() || flipQueue->failure; });
                 if (token.stop_requested() || flipQueue->failure) return;
             }
             vblankEnd();
