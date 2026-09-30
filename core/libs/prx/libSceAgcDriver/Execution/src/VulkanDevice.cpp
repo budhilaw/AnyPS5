@@ -25,6 +25,7 @@
 #include "prx/libSceAgcDriver/Execution/include/DisplayBuffer.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/SlowPipeline.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Pipeline.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/ShaderResources.hpp"
 #include <chrono>
 #include "prx/libc/include/General.hpp"
 #include "prx/libc/include/PreciseSleep.hpp"
@@ -41,6 +42,8 @@
 #include <stdexcept>
 #include <string>
 #include <filesystem>
+#include <mutex>
+#include <span>
 #include <vector>
 #include <utility>
 #include <unordered_map>
@@ -143,18 +146,86 @@ struct VulkanDevice::State {
         VkShaderModule module = VK_NULL_HANDLE;
         VkPipelineLayout layout = VK_NULL_HANDLE;
         VkPipeline pipeline = VK_NULL_HANDLE;
+        VkDescriptorSetLayout setLayout = VK_NULL_HANDLE;
     };
+    static constexpr std::size_t ComputePipelineLimit = 1024;
+    std::mutex computePipelineMutex;
     std::unordered_map<std::string, ComputePipeline> computePipelines;
+    void destroyComputePipeline(const ComputePipeline& entry) const {
+        if (entry.pipeline) reinterpret_cast<PFN_vkDestroyPipeline>(deviceProc(device, "vkDestroyPipeline"))(device, entry.pipeline, nullptr);
+        if (entry.layout) reinterpret_cast<PFN_vkDestroyPipelineLayout>(deviceProc(device, "vkDestroyPipelineLayout"))(device, entry.layout, nullptr);
+        if (entry.module) reinterpret_cast<PFN_vkDestroyShaderModule>(deviceProc(device, "vkDestroyShaderModule"))(device, entry.module, nullptr);
+        if (entry.setLayout) reinterpret_cast<PFN_vkDestroyDescriptorSetLayout>(deviceProc(device, "vkDestroyDescriptorSetLayout"))(device, entry.setLayout, nullptr);
+    }
     void destroyComputePipelines() {
-        const auto destroyModule = reinterpret_cast<PFN_vkDestroyShaderModule>(deviceProc(device, "vkDestroyShaderModule"));
-        const auto destroyLayout = reinterpret_cast<PFN_vkDestroyPipelineLayout>(deviceProc(device, "vkDestroyPipelineLayout"));
-        const auto destroyPipeline = reinterpret_cast<PFN_vkDestroyPipeline>(deviceProc(device, "vkDestroyPipeline"));
-        for (auto& [key, entry] : computePipelines) {
-            if (entry.pipeline) destroyPipeline(device, entry.pipeline, nullptr);
-            if (entry.layout) destroyLayout(device, entry.layout, nullptr);
-            if (entry.module) destroyModule(device, entry.module, nullptr);
-        }
+        for (auto& [key, entry] : computePipelines) destroyComputePipeline(entry);
         computePipelines.clear();
+    }
+    ComputePipeline createComputePipeline(std::span<const Graphics::CompiledShader> shaders, VkPipelineCache cache, VkDescriptorSetLayout setLayout, bool push) {
+        const auto& shader = *shaders.front().program;
+        ComputePipeline entry;
+        try {
+            VkShaderModuleCreateInfo moduleInfo{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+            moduleInfo.codeSize = shader.spirv.size() * sizeof(std::uint32_t);
+            moduleInfo.pCode = shader.spirv.data();
+            check(DeviceFunction<PFN_vkCreateShaderModule>("vkCreateShaderModule")(device, &moduleInfo, nullptr, &entry.module), "vkCreateShaderModule");
+            const VkPushConstantRange pushRange{VK_SHADER_STAGE_COMPUTE_BIT, 0, Graphics::PipelinePushConstantBytes};
+            VkPipelineLayoutCreateInfo layoutInfo{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+            layoutInfo.setLayoutCount = 1;
+            layoutInfo.pSetLayouts = &setLayout;
+            layoutInfo.pushConstantRangeCount = push ? 1 : 0;
+            layoutInfo.pPushConstantRanges = push ? &pushRange : nullptr;
+            check(DeviceFunction<PFN_vkCreatePipelineLayout>("vkCreatePipelineLayout")(device, &layoutInfo, nullptr, &entry.layout), "vkCreatePipelineLayout");
+            VkComputePipelineCreateInfo pipelineInfo{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+            pipelineInfo.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+            pipelineInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+            pipelineInfo.stage.module = entry.module;
+            pipelineInfo.stage.pName = "main";
+            pipelineInfo.layout = entry.layout;
+            const auto creationStart = std::chrono::steady_clock::now();
+            check(DeviceFunction<PFN_vkCreateComputePipelines>("vkCreateComputePipelines")(device, cache, 1, &pipelineInfo, nullptr, &entry.pipeline), "vkCreateComputePipelines");
+            Graphics::ReportSlowPipeline("compute", creationStart, shaders);
+            if (pipelineCache) pipelineCache->NoteCreated();
+            if (pipelineCache && std::chrono::steady_clock::now() - creationStart > std::chrono::milliseconds(100)) pipelineCache->Save();
+        } catch (...) {
+            destroyComputePipeline(entry);
+            throw;
+        }
+        return entry;
+    }
+    void precompileComputePipeline(std::span<const Graphics::CompiledShader> shaders, VkPipelineCache cache, bool push) {
+        const auto bindings = Graphics::ShaderResources::LayoutBindings(shaders);
+        if (!bindings) return;
+        const auto key = computePipelineKey(*shaders.front().program, push, Graphics::ShaderResources::KeyOf(*bindings));
+        {
+            std::lock_guard lock(computePipelineMutex);
+            if (computePipelines.size() >= ComputePipelineLimit || computePipelines.contains(key)) return;
+        }
+        VkDescriptorSetLayoutCreateInfo info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+        info.bindingCount = static_cast<std::uint32_t>(bindings->size());
+        info.pBindings = bindings->data();
+        VkDescriptorSetLayout setLayout = VK_NULL_HANDLE;
+        check(DeviceFunction<PFN_vkCreateDescriptorSetLayout>("vkCreateDescriptorSetLayout")(device, &info, nullptr, &setLayout), "vkCreateDescriptorSetLayout");
+        ComputePipeline entry;
+        try {
+            entry = createComputePipeline(shaders, cache, setLayout, push);
+        } catch (...) {
+            DeviceFunction<PFN_vkDestroyDescriptorSetLayout>("vkDestroyDescriptorSetLayout")(device, setLayout, nullptr);
+            throw;
+        }
+        entry.setLayout = setLayout;
+        std::lock_guard lock(computePipelineMutex);
+        if (!computePipelines.emplace(key, entry).second) destroyComputePipeline(entry);
+    }
+    static std::string computePipelineKey(const ShaderRecompiler::RecompileResult& shader, bool push, std::span<const std::uint32_t> layoutKey) {
+        std::uint64_t hash = 1469598103934665603ull;
+        for (const auto word : shader.spirv) hash = (hash ^ word) * 1099511628211ull;
+        std::string key(reinterpret_cast<const char*>(&hash), sizeof(hash));
+        const auto spirvWords = static_cast<std::uint64_t>(shader.spirv.size());
+        key.append(reinterpret_cast<const char*>(&spirvWords), sizeof(spirvWords));
+        key.push_back(push ? '\1' : '\0');
+        key.append(reinterpret_cast<const char*>(layoutKey.data()), layoutKey.size() * sizeof(std::uint32_t));
+        return key;
     }
     std::unique_ptr<Graphics::DrawQueue> drawQueue;
     std::unique_ptr<Graphics::RenderCache> renderCache;
@@ -1158,12 +1229,6 @@ void VulkanDevice::EnqueueDraw(const Graphics::State& graphics, const Pm4::DrawP
 
 void VulkanDevice::Dispatch(const ShaderRecompiler::RecompileResult& shader, std::uint32_t x, std::uint32_t y, std::uint32_t z, std::span<const Graphics::GuestMemorySnapshot> snapshots) {
     SlowOperationTimer slowTimer("device dispatch");
-    std::lock_guard memoryLock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
-    slowTimer.Split("device dispatch lock wait");
-    PerformanceTimer timing("Vulkan.Dispatch");
-    const GuestMemory::MemoryAccessScope memoryScope(this, [](void* context, std::uint64_t address, std::size_t bytes, bool writable) {
-        static_cast<VulkanDevice*>(context)->ResolveMemory(address, bytes, writable);
-    });
     if (shader.spirv.size() < 5 || shader.spirv[0] != 0x07230203u) {
         throw std::runtime_error("Vulkan dispatch: invalid SPIR-V");
     }
@@ -1172,8 +1237,16 @@ void VulkanDevice::Dispatch(const ShaderRecompiler::RecompileResult& shader, std
     if (pushStages != 0 && state->properties.limits.maxPushConstantsSize < Graphics::PipelinePushConstantBytes) {
         throw std::runtime_error("Vulkan dispatch: compute push constant range exceeds device limit");
     }
-    const auto pushBytes = Graphics::AssemblePushConstants(shaders);
     const auto context = graphicsContext();
+    state->precompileComputePipeline(shaders, context.pipelineCache, pushStages != 0);
+    slowTimer.Split("device dispatch precompile");
+    std::lock_guard memoryLock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
+    slowTimer.Split("device dispatch lock wait");
+    PerformanceTimer timing("Vulkan.Dispatch");
+    const GuestMemory::MemoryAccessScope memoryScope(this, [](void* context, std::uint64_t address, std::size_t bytes, bool writable) {
+        static_cast<VulkanDevice*>(context)->ResolveMemory(address, bytes, writable);
+    });
+    const auto pushBytes = Graphics::AssemblePushConstants(shaders);
     const auto* limit = state->properties.limits.maxComputeWorkGroupCount;
     if (x > limit[0] || y > limit[1] || z > limit[2]) {
         throw std::runtime_error("Vulkan dispatch: workgroup count exceeds device limits");
@@ -1216,60 +1289,32 @@ void VulkanDevice::Dispatch(const ShaderRecompiler::RecompileResult& shader, std
                 }
             }
         }
-        std::uint64_t hash = 1469598103934665603ull;
-        for (const auto word : shader.spirv) hash = (hash ^ word) * 1099511628211ull;
-        std::string key(reinterpret_cast<const char*>(&hash), sizeof(hash));
-        const auto spirvWords = static_cast<std::uint64_t>(shader.spirv.size());
-        key.append(reinterpret_cast<const char*>(&spirvWords), sizeof(spirvWords));
-        key.push_back(pushStages != 0 ? '\1' : '\0');
-        const auto& layoutKey = resources->LayoutKey();
-        key.append(reinterpret_cast<const char*>(layoutKey.data()), layoutKey.size() * sizeof(std::uint32_t));
-        auto found = state->computePipelines.find(key);
-        if (found == state->computePipelines.end()) {
-            if (state->computePipelines.size() >= 1024) {
-                state->drawQueue->Wait();
-                check(state->DeviceFunction<PFN_vkDeviceWaitIdle>("vkDeviceWaitIdle")(state->device), "vkDeviceWaitIdle before compute pipeline eviction");
-                state->destroyComputePipelines();
-            }
-            State::ComputePipeline entry;
-            const auto destroyModule = state->DeviceFunction<PFN_vkDestroyShaderModule>("vkDestroyShaderModule");
-            const auto destroyLayout = state->DeviceFunction<PFN_vkDestroyPipelineLayout>("vkDestroyPipelineLayout");
-            try {
-                VkShaderModuleCreateInfo moduleInfo{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
-                moduleInfo.codeSize = shader.spirv.size() * sizeof(std::uint32_t);
-                moduleInfo.pCode = shader.spirv.data();
-                check(state->DeviceFunction<PFN_vkCreateShaderModule>("vkCreateShaderModule")(state->device, &moduleInfo, nullptr, &entry.module), "vkCreateShaderModule");
-                const auto setLayout = resources->Layout();
-                const VkPushConstantRange push{VK_SHADER_STAGE_COMPUTE_BIT, 0, Graphics::PipelinePushConstantBytes};
-                VkPipelineLayoutCreateInfo layoutInfo{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-                layoutInfo.setLayoutCount = 1;
-                layoutInfo.pSetLayouts = &setLayout;
-                layoutInfo.pushConstantRangeCount = pushStages != 0 ? 1 : 0;
-                layoutInfo.pPushConstantRanges = pushStages != 0 ? &push : nullptr;
-                check(state->DeviceFunction<PFN_vkCreatePipelineLayout>("vkCreatePipelineLayout")(state->device, &layoutInfo, nullptr, &entry.layout), "vkCreatePipelineLayout");
-                VkComputePipelineCreateInfo pipelineInfo{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
-                pipelineInfo.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-                pipelineInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-                pipelineInfo.stage.module = entry.module;
-                pipelineInfo.stage.pName = "main";
-                pipelineInfo.layout = entry.layout;
-                const auto creationStart = std::chrono::steady_clock::now();
-                check(state->DeviceFunction<PFN_vkCreateComputePipelines>("vkCreateComputePipelines")(state->device, context.pipelineCache, 1, &pipelineInfo, nullptr, &entry.pipeline), "vkCreateComputePipelines");
+        const auto key = State::computePipelineKey(shader, pushStages != 0, resources->LayoutKey());
+        State::ComputePipeline selected;
+        {
+            std::unique_lock pipelineLock(state->computePipelineMutex);
+            if (const auto found = state->computePipelines.find(key); found != state->computePipelines.end()) {
+                selected = found->second;
+                timing.Mark("pipeline_hit");
+            } else {
+                if (state->computePipelines.size() >= State::ComputePipelineLimit) {
+                    pipelineLock.unlock();
+                    state->drawQueue->Wait();
+                    check(state->DeviceFunction<PFN_vkDeviceWaitIdle>("vkDeviceWaitIdle")(state->device), "vkDeviceWaitIdle before compute pipeline eviction");
+                    pipelineLock.lock();
+                    state->destroyComputePipelines();
+                }
+                pipelineLock.unlock();
+                auto entry = state->createComputePipeline(shaders, context.pipelineCache, resources->Layout(), pushStages != 0);
                 timing.Mark("pipeline_create");
-                Graphics::ReportSlowPipeline("compute", creationStart, shaders);
-                if (state->pipelineCache) state->pipelineCache->NoteCreated();
-                if (state->pipelineCache && std::chrono::steady_clock::now() - creationStart > std::chrono::milliseconds(100)) state->pipelineCache->Save();
-            } catch (...) {
-                if (entry.layout) destroyLayout(state->device, entry.layout, nullptr);
-                if (entry.module) destroyModule(state->device, entry.module, nullptr);
-                throw;
+                pipelineLock.lock();
+                const auto [position, inserted] = state->computePipelines.emplace(key, entry);
+                if (!inserted) state->destroyComputePipeline(entry);
+                selected = position->second;
             }
-            found = state->computePipelines.emplace(key, entry).first;
-        } else {
-            timing.Mark("pipeline_hit");
         }
-        const auto layout = found->second.layout;
-        const auto pipeline = found->second.pipeline;
+        const auto layout = selected.layout;
+        const auto pipeline = selected.pipeline;
         if (static const bool traceWrites = std::getenv("ANYPS5_TRACE_WAITS") != nullptr; traceWrites && resources->Writes()) {
             static int reported = 0;
             if (reported++ < 400) {

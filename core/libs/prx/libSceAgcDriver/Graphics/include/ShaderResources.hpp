@@ -10,6 +10,8 @@
 #include "prx/libSceAgcDriver/Graphics/include/Shaders.hpp"
 #include <array>
 #include <memory>
+#include <optional>
+#include <span>
 #include <vector>
 
 namespace AgcDriver::Graphics {
@@ -35,6 +37,8 @@ public:
     bool Writes() const { return guestMemory.HasWrites() || storesImages || usesFaultBuffer; }
     bool UsesGds() const { return usesGds; }
     const std::vector<std::uint32_t>& LayoutKey() const { return layoutKey; }
+    static std::optional<std::vector<VkDescriptorSetLayoutBinding>> LayoutBindings(std::span<const CompiledShader> shaders);
+    static std::vector<std::uint32_t> KeyOf(std::span<const VkDescriptorSetLayoutBinding> bindings);
 
 private:
     struct Allocation {

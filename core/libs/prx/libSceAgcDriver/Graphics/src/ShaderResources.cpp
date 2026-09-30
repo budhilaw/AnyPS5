@@ -51,6 +51,21 @@ const char* roleName(ShaderRecompiler::DescriptorRole role) {
     throw std::runtime_error("AGC graphics: unknown descriptor role");
 }
 
+std::optional<VkDescriptorType> descriptorType(const ShaderRecompiler::DescriptorBinding& binding) {
+    switch (binding.role) {
+        case ShaderRecompiler::DescriptorRole::GuestImages:
+            if (binding.kind == ShaderRecompiler::DescriptorKind::SampledImage) return VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+            if (binding.kind == ShaderRecompiler::DescriptorKind::StorageImage) return VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+            return std::nullopt;
+        case ShaderRecompiler::DescriptorRole::GuestSamplers:
+            if (binding.kind == ShaderRecompiler::DescriptorKind::Sampler) return VK_DESCRIPTOR_TYPE_SAMPLER;
+            return std::nullopt;
+        default:
+            if (binding.kind == ShaderRecompiler::DescriptorKind::StorageBuffer) return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            return std::nullopt;
+    }
+}
+
 const char* kindName(ShaderRecompiler::DescriptorKind kind) {
     switch (kind) {
         case ShaderRecompiler::DescriptorKind::UniformBuffer: return "UniformBuffer";
@@ -155,10 +170,8 @@ void ShaderResources::build(std::span<const CompiledShader> shaders, const Color
         else if (usesFaultBuffer) bda = std::make_unique<BdaResources>(context);
         timing.Mark("memory_upload");
         std::vector<VkDescriptorSetLayoutBinding> description;
-        for (const auto& binding : bindings) {
-            description.push_back(binding.layout);
-            layoutKey.insert(layoutKey.end(), {binding.layout.binding, static_cast<std::uint32_t>(binding.layout.descriptorType), binding.layout.descriptorCount, binding.layout.stageFlags});
-        }
+        for (const auto& binding : bindings) description.push_back(binding.layout);
+        layoutKey = KeyOf(description);
         std::vector<VkDescriptorPoolSize> sizes;
         if (storageBuffers != 0) sizes.push_back({VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, static_cast<std::uint32_t>(storageBuffers)});
         std::uint32_t sampledImages = 0, storageImages = 0;
@@ -364,6 +377,28 @@ void ShaderResources::release() noexcept {
 
 VkDescriptorSetLayout ShaderResources::Layout() const {
     return _layout;
+}
+
+std::optional<std::vector<VkDescriptorSetLayoutBinding>> ShaderResources::LayoutBindings(std::span<const CompiledShader> shaders) {
+    std::vector<VkDescriptorSetLayoutBinding> result;
+    for (const auto& shader : shaders) {
+        if (shader.program == nullptr) return std::nullopt;
+        const VkShaderStageFlags flags = VulkanStage(shader.stage);
+        for (const auto& binding : shader.program->bindings) {
+            const auto type = descriptorType(binding);
+            if (!type || binding.descriptorSet != 0 || binding.count == 0) return std::nullopt;
+            if (std::any_of(result.begin(), result.end(), [&](const VkDescriptorSetLayoutBinding& existing) { return existing.binding == binding.binding; })) return std::nullopt;
+            result.push_back({binding.binding, *type, binding.count, flags, nullptr});
+        }
+    }
+    return result;
+}
+
+std::vector<std::uint32_t> ShaderResources::KeyOf(std::span<const VkDescriptorSetLayoutBinding> bindings) {
+    std::vector<std::uint32_t> key;
+    key.reserve(bindings.size() * 4);
+    for (const auto& binding : bindings) key.insert(key.end(), {binding.binding, static_cast<std::uint32_t>(binding.descriptorType), binding.descriptorCount, binding.stageFlags});
+    return key;
 }
 
 void ShaderResources::Bind(VkCommandBuffer commands, VkPipelineBindPoint bindPoint, VkPipelineLayout layout) const {
