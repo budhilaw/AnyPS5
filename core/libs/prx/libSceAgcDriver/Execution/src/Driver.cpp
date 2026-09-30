@@ -23,6 +23,7 @@
 #include "prx/libSceAgcDriver/Eq/include/Event.hpp"
 #include "prx/libc/include/GuestMemoryTracking.hpp"
 #include "prx/libc/include/PreciseSleep.hpp"
+#include "prx/libSceAgcDriver/Execution/include/ThreadSampler.hpp"
 #include <bit>
 #include <algorithm>
 #include <array>
@@ -251,6 +252,7 @@ private:
 
     void runGraphics() noexcept {
         preferPerformanceCores();
+        ThreadSampler::Register("graphics");
         std::unique_lock lock(graphicsMutex);
         while (true) {
             graphicsChanged.wait(lock, [&] { return graphicsStopping || !graphicsJobs.empty(); });
@@ -347,6 +349,11 @@ public:
 
     void Submit(const Packet* packets, std::uint32_t count, std::uint32_t queue) {
         const auto received = FrameTiming::Clock::now();
+        thread_local bool sampled = false;
+        if (!sampled) {
+            sampled = true;
+            ThreadSampler::Register("title");
+        }
         CheckFailure();
         require(queue == 0 || (queue >= 0x20 && queue < 0x58), "unsupported compute queue");
         require(count != 0, "empty submission");
@@ -1349,6 +1356,7 @@ private:
 
     void run() noexcept {
         preferPerformanceCores();
+        ThreadSampler::Register("worker");
         try {
             for (;;) {
                 {

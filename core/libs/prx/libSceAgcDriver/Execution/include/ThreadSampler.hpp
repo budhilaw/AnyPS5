@@ -1,0 +1,10 @@
+#ifndef CORE_LIBS_PRX_LIBSCEAGCDRIVER_EXECUTION_INCLUDE_THREADSAMPLER_HPP
+#define CORE_LIBS_PRX_LIBSCEAGCDRIVER_EXECUTION_INCLUDE_THREADSAMPLER_HPP
+
+namespace AgcDriver::ThreadSampler {
+
+void Register(const char* name);
+
+}
+
+#endif

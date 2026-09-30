@@ -56,6 +56,7 @@ add_library(libSceAgcDriver SHARED EXCLUDE_FROM_ALL
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/BdaFeatures.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/Pm4.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/GpuJournal.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/ThreadSampler.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/VulkanDevice.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/VulkanLibrary.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/SwapchainState.cpp
