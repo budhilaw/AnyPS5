@@ -9,6 +9,10 @@ extern "C" {
 void* APS5_VABI mmap_nid_postfix(void*, std::size_t, int, int, int, std::int64_t) noexcept;
 int APS5_VABI munmap_nid_postfix(void*, std::size_t) noexcept;
 int* APS5_VABI __error_nid_postfix();
+int APS5_VABI sceKernelAllocateDirectMemory(std::int64_t, std::int64_t, std::size_t, std::size_t, int, std::int64_t*);
+int APS5_VABI sceKernelMapDirectMemory(void**, std::size_t, int, int, std::int64_t, std::size_t);
+int APS5_VABI sceKernelMunmap(std::uint64_t, std::size_t);
+int APS5_VABI sceKernelReleaseDirectMemory(std::int64_t, std::size_t);
 }
 
 static void Require(bool condition) {
@@ -16,6 +20,37 @@ static void Require(bool condition) {
         std::fputs("Guest memory check failed\n", stderr);
         std::abort();
     }
+}
+
+static void RequirePhysicalAliasing() {
+    constexpr std::size_t mebibyte = 1u << 20;
+    std::int64_t physical = -1;
+    Require(sceKernelAllocateDirectMemory(0, 13824ll << 20, 8 * mebibyte, 2 * mebibyte, 0, &physical) == 0);
+    void* firstView = nullptr;
+    void* secondView = nullptr;
+    Require(sceKernelMapDirectMemory(&firstView, 4 * mebibyte, 3, 0, physical, 2 * mebibyte) == 0);
+    Require(sceKernelMapDirectMemory(&secondView, 4 * mebibyte, 3, 0, physical, 2 * mebibyte) == 0);
+    auto* first = static_cast<unsigned char*>(firstView);
+    auto* second = static_cast<unsigned char*>(secondView);
+    Require(first != second);
+    for (std::size_t piece = 0; piece < 4; ++piece) first[piece * mebibyte + 5] = static_cast<unsigned char>(piece + 1);
+    for (std::size_t piece = 0; piece < 4; ++piece) Require(second[piece * mebibyte + 5] == piece + 1);
+    Require(sceKernelMunmap(reinterpret_cast<std::uintptr_t>(first + mebibyte), mebibyte) == 0);
+    Require(first[5] == 1 && first[2 * mebibyte + 5] == 3 && first[3 * mebibyte + 5] == 4);
+    second[3 * mebibyte + 5] = 44;
+    Require(first[3 * mebibyte + 5] == 44);
+    void* hole = first + mebibyte;
+    Require(sceKernelMapDirectMemory(&hole, mebibyte, 3, 0x10, physical + static_cast<std::int64_t>(4 * mebibyte), 0) == 0);
+    Require(hole == first + mebibyte);
+    first[mebibyte + 9] = 99;
+    void* thirdView = nullptr;
+    Require(sceKernelMapDirectMemory(&thirdView, mebibyte, 3, 0, physical + static_cast<std::int64_t>(4 * mebibyte), 0) == 0);
+    Require(static_cast<unsigned char*>(thirdView)[9] == 99);
+    Require(second[mebibyte + 5] == 2);
+    Require(sceKernelMunmap(reinterpret_cast<std::uintptr_t>(first), 4 * mebibyte) == 0);
+    Require(sceKernelMunmap(reinterpret_cast<std::uintptr_t>(second), 4 * mebibyte) == 0);
+    Require(sceKernelMunmap(reinterpret_cast<std::uintptr_t>(thirdView), mebibyte) == 0);
+    Require(sceKernelReleaseDirectMemory(physical, 8 * mebibyte) == 0);
 }
 
 int main() {
@@ -55,7 +90,7 @@ int main() {
     Require(munmap_nid_postfix(memory, page) == 0);
     Require(memory[page * 2] == 73);
     Require(munmap_nid_postfix(memory + page * 2, page) == 0);
-    Require(munmap_nid_postfix(memory, page) == -1);
+    Require(munmap_nid_postfix(memory, page) == 0);
     for (int protection : {0, 1, 3, 5}) {
         void* mapped = mmap_nid_postfix(memory, 1, protection, 0x1002, -1, 0);
         Require(mapped != failed);
@@ -67,4 +102,5 @@ int main() {
         }
         Require(munmap_nid_postfix(mapped, 1) == 0);
     }
+    RequirePhysicalAliasing();
 }
