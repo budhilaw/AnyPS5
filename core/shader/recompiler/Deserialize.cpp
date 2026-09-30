@@ -1,243 +1,179 @@
 #include "Recompiler.hpp"
 #include "ControlFlow/RequestSerializer.hpp"
 #include "RdnaDecoder/RdnaInstructionDecoder.hpp"
-#include "ControlFlow/GraphBuilder.hpp"
-#include "ControlFlow/Structurizer.hpp"
-#include "IntermediateRepresentation/IrProgram.hpp"
-#include "Optimization/BindingAllocator.hpp"
-#include "Optimization/ConstantFolder.hpp"
-#include "Optimization/DeadCodeEliminator.hpp"
-#include "Optimization/ReadLaneEliminator.hpp"
-#include "Optimization/ResourceTracker.hpp"
-#include "Optimization/ShaderInfoCollector.hpp"
-#include "Optimization/SrtWalker.hpp"
-#include "Optimization/SsaBuilder.hpp"
-#include "Translation/InstructionTranslator.hpp"
-#include "Translation/ShaderInputInfoBuilder.hpp"
 
+#include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <exception>
 #include <fstream>
-#include <iostream>
-#include <sstream>
+#include <span>
 #include <stdexcept>
 #include <string>
+#include <string_view>
+#include <vector>
 
 using namespace ShaderRecompiler;
 
-static std::string ReadFile(const char* path) {
-    std::ifstream file(path, std::ios::binary);
-    if (!file) {
-        throw std::runtime_error(std::string("failed to open file: ") + path);
+namespace {
+
+struct ReplayOptions {
+    std::vector<std::string> inputs;
+    std::string disassemblyDirectory;
+    std::string spirvDirectory;
+};
+
+struct ReplaySummary {
+    std::size_t requests = 0;
+    std::size_t failures = 0;
+    double milliseconds = 0.0;
+};
+
+std::uint64_t CodeHash(std::span<const std::uint32_t> code) {
+    std::uint64_t hash = 0x9e3779b97f4a7c15ull ^ code.size();
+    for (const auto word : code) {
+        hash = (hash ^ word) * 0xff51afd7ed558ccdull;
+        hash ^= hash >> 32u;
     }
-
-    std::ostringstream stream;
-    stream << file.rdbuf();
-
-    if (!file.good() && !file.eof()) {
-        throw std::runtime_error(std::string("failed to read file: ") + path);
-    }
-
-    return stream.str();
+    return hash != 0 ? hash : 1;
 }
 
-static ShaderStageKind ToShaderStageKind(ShaderStage stage) {
+const char* StageName(ShaderStage stage) {
     switch (stage) {
     case ShaderStage::Compute:
-        return ShaderStageKind::Compute;
+        return "compute";
     case ShaderStage::Vertex:
-        return ShaderStageKind::Vertex;
+        return "vertex";
     case ShaderStage::TessellationControl:
-        return ShaderStageKind::TessellationControl;
+        return "hull";
     case ShaderStage::TessellationEvaluation:
-        return ShaderStageKind::TessellationEvaluation;
-    case ShaderStage::Fragment:
-        return ShaderStageKind::Pixel;
-    case ShaderStage::Local:
-        return ShaderStageKind::Local;
-    case ShaderStage::Mesh:
-        return ShaderStageKind::Mesh;
+        return "domain";
     case ShaderStage::Geometry:
-        throw std::runtime_error("unsupported geometry shader stage");
+        return "geometry";
+    case ShaderStage::Fragment:
+        return "pixel";
+    case ShaderStage::Local:
+        return "local";
+    case ShaderStage::Mesh:
+        return "mesh";
     }
+    return "unknown";
+}
 
-    throw std::runtime_error("invalid shader stage");
+bool IsPayload(std::string_view line) {
+    if (line.size() < 16u || line.size() % 4u != 0u) {
+        return false;
+    }
+    for (const char c : line) {
+        if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '+' || c == '/' || c == '=')) {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::string FailureReason(std::string_view message) {
+    return std::string(message.substr(0, message.find("\nRecompileRequest:")));
+}
+
+double MillisecondsSince(std::chrono::steady_clock::time_point start) {
+    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+}
+
+void WriteFile(const std::string& path, const void* data, std::size_t size) {
+    std::ofstream file(path, std::ios::binary);
+    file.write(static_cast<const char*>(data), static_cast<std::streamsize>(size));
+    if (!file) {
+        throw std::runtime_error("failed to write " + path);
+    }
+}
+
+void Replay(std::string_view payload, const ReplayOptions& options, ReplaySummary& summary) {
+    const auto index = ++summary.requests;
+    std::printf("[%zu] ", index);
+    auto start = std::chrono::steady_clock::now();
+    bool compiling = false;
+    try {
+        auto deserialized = RequestSerializer{}.Deserialize(payload);
+        auto& request = deserialized.request;
+        request.shader.codeHash = CodeHash(request.shader.code);
+        std::printf("%s program 0x%llx hash 0x%016llx, %zu code words, %zu user data, %zu memory regions: ", StageName(request.shader.stage), static_cast<unsigned long long>(request.shader.codeAddress), static_cast<unsigned long long>(request.shader.codeHash), request.shader.code.size(), request.context.userData.size(), request.context.memory.size());
+        std::fflush(stdout);
+        char name[48];
+        std::snprintf(name, sizeof(name), "%zu_%llx", index, static_cast<unsigned long long>(request.shader.codeAddress));
+        if (!options.disassemblyDirectory.empty()) {
+            const auto text = RdnaProgramToString(RdnaInstructionDecoder{}.Decode(request.shader.code));
+            WriteFile(options.disassemblyDirectory + "/" + name + ".rdna.txt", text.data(), text.size());
+        }
+        compiling = true;
+        start = std::chrono::steady_clock::now();
+        const auto result = Recompile(request);
+        const double milliseconds = MillisecondsSince(start);
+        summary.milliseconds += milliseconds;
+        compiling = false;
+        std::printf("ok, %zu SPIR-V words, SPIR-V hash 0x%016llx, %zu bindings, %.1f ms\n", result.spirv.size(), static_cast<unsigned long long>(result.spirvHash), result.bindings.size(), milliseconds);
+        if (!options.spirvDirectory.empty()) {
+            WriteFile(options.spirvDirectory + "/" + name + ".spv", result.spirv.data(), result.spirv.size() * sizeof(std::uint32_t));
+        }
+    } catch (const std::exception& error) {
+        const double milliseconds = compiling ? MillisecondsSince(start) : 0.0;
+        summary.milliseconds += milliseconds;
+        summary.failures++;
+        std::printf("FAILED after %.1f ms: %s\n", milliseconds, FailureReason(error.what()).c_str());
+    }
+    std::fflush(stdout);
+}
+
+void PrintUsage() {
+    std::fprintf(stderr,
+        "usage: recompile_replay [--disasm <directory>] [--spirv <directory>] <file>...\n"
+        "Runs ShaderRecompiler::Recompile on every serialized RecompileRequest in the files: a file holding one payload,\n"
+        "a driver log whose RecompileRequest: lines are followed by payloads, or a shader-requests.cache.\n"
+        "--disasm writes the RDNA disassembly and --spirv the SPIR-V of each request into the directory.\n"
+        "The exit code is 0 when every request compiles, 2 when any fails and 1 on usage or input errors.\n");
+}
+
 }
 
 int main(int argc, char** argv) {
-    if (argc != 2) {
-        std::cerr << "usage: Deserialize <payload.b64>\n";
+    ReplayOptions options;
+    for (int i = 1; i < argc; ++i) {
+        const std::string_view argument = argv[i];
+        if ((argument == "--disasm" || argument == "--spirv") && i + 1 < argc) {
+            (argument == "--disasm" ? options.disassemblyDirectory : options.spirvDirectory) = argv[++i];
+        } else if (argument.starts_with("--")) {
+            PrintUsage();
+            return 1;
+        } else {
+            options.inputs.emplace_back(argument);
+        }
+    }
+    if (options.inputs.empty()) {
+        PrintUsage();
         return 1;
     }
 
-    try {
-        std::string b64 = ReadFile(argv[1]);
-
-        while (!b64.empty() && (b64.back() == '\n' || b64.back() == '\r' || b64.back() == ' ' || b64.back() == '\t')) {
-            b64.pop_back();
+    ReplaySummary summary;
+    for (const auto& input : options.inputs) {
+        std::ifstream file(input, std::ios::binary);
+        if (!file) {
+            std::fprintf(stderr, "failed to open %s\n", input.c_str());
+            return 1;
         }
-
-        if (b64.empty()) {
-            throw std::runtime_error("payload is empty");
-        }
-
-        RequestSerializer serializer;
-        const DeserializedRequest req = serializer.Deserialize(b64);
-        const auto& request = req.request;
-
-        std::cout << "shader code words: " << request.shader.code.size() << "\n";
-        std::cout << "shader stage: " << static_cast<int>(request.shader.stage) << "\n";
-        std::cout << "codeAddress: 0x" << std::hex << request.shader.codeAddress << std::dec << "\n";
-        std::cout << "header bytes: " << request.shader.header.size() << "\n";
-        std::cout << "userData count: " << request.context.userData.size() << "\n";
-        std::cout << "waveSize: " << request.context.waveSize << "\n";
-        std::cout << "userDataBaseRegister: " << request.context.userDataBaseRegister << "\n";
-        std::cout << "memory regions: " << request.context.memory.size() << "\n";
-
-        for (const auto& memory : request.context.memory) {
-            std::cout << "region addr=0x" << std::hex << memory.guestAddress << std::dec << " size=" << memory.bytes.size() << "\n";
-        }
-
-        for (std::uint32_t i = 0; i < request.context.userData.size(); ++i) {
-            std::cout << "userData[" << i << "]=0x" << std::hex << request.context.userData[i] << std::dec << "\n";
-        }
-
-        if (request.context.vertex) {
-            const auto& vertex = *request.context.vertex;
-
-            std::cout << "vertex resourcesNum=" << vertex.resourcesNum << " fetchAttribReg=" << vertex.fetchAttribReg << " fetchBufferReg=" << vertex.fetchBufferReg << " fetchEmbedded=" << vertex.fetchEmbedded << "\n";
-
-            if (vertex.resources.size() < vertex.resourcesNum) {
-                throw std::runtime_error("vertex resources size is smaller than resourcesNum");
+        std::string line;
+        while (std::getline(file, line)) {
+            while (!line.empty() && (line.back() == '\r' || line.back() == ' ' || line.back() == '\t')) {
+                line.pop_back();
             }
-
-            if (vertex.resourcesDst.size() < vertex.resourcesNum) {
-                throw std::runtime_error("vertex resourcesDst size is smaller than resourcesNum");
-            }
-
-            for (std::uint32_t i = 0; i < vertex.resourcesNum; ++i) {
-                const auto& resource = vertex.resources[i];
-                const auto& dst = vertex.resourcesDst[i];
-
-                std::cout << "resource[" << i << "] fields=";
-                for (const auto field : resource.fields) {
-                    std::cout << std::hex << field << " ";
-                }
-
-                std::cout << std::dec << "dst registerStart=" << dst.registerStart << " registersNum=" << dst.registersNum << " attrId=" << dst.attrId << " fetchIndex=" << dst.fetchIndex << "\n";
+            if (IsPayload(line)) {
+                Replay(line, options, summary);
             }
         }
-
-        if (request.context.compute) {
-            const auto& compute = *request.context.compute;
-            std::cout << "compute numThreads=" << compute.numThreads[0] << "," << compute.numThreads[1] << "," << compute.numThreads[2] << " ldsSizeDwords=" << compute.ldsSizeDwords << "\n";
-        }
-
-        RdnaInstructionDecoder decoder;
-        const auto decoded = decoder.Decode(request.shader.code);
-        const std::string disasm = RdnaProgramToString(decoded);
-
-        {
-            std::ofstream output("disasm.txt", std::ios::binary);
-            if (!output) {
-                throw std::runtime_error("failed to open disasm.txt");
-            }
-
-            output << disasm;
-            if (!output) {
-                throw std::runtime_error("failed to write disasm.txt");
-            }
-        }
-
-        std::cout << "Disassembly written to disasm.txt (" << disasm.size() << " bytes)\n";
-
-        const ShaderStageKind stageKind = ToShaderStageKind(request.shader.stage);
-        const auto inputInfo = BuildShaderStageInputInfo(stageKind, request.context, request.target.subgroupSize);
-
-        GraphBuilder graphBuilder;
-        auto cfg = graphBuilder.Build(decoded);
-
-        Structurizer structurizer;
-        structurizer.Structurize(cfg);
-
-        TranslateOptions translateOptions{};
-        translateOptions.stage = stageKind;
-        translateOptions.waveSize = request.context.waveSize;
-        translateOptions.userDataBaseRegister = request.context.userDataBaseRegister;
-        translateOptions.userDataCount = static_cast<std::uint32_t>(request.context.userData.size());
-        translateOptions.inputInfo = inputInfo;
-
-        EmbeddedFetchPlan embeddedFetch;
-
-        if ((stageKind == ShaderStageKind::Vertex || stageKind == ShaderStageKind::Local) && inputInfo.vertex != nullptr && inputInfo.vertex->fetchEmbedded) {
-            EmbeddedVertexFetchAnalyzer embeddedFetchAnalyzer;
-            embeddedFetch = embeddedFetchAnalyzer.Analyze(decoded, inputInfo.vertex->fetchAttribReg, inputInfo.vertex->fetchBufferReg, request.context.userDataBaseRegister, static_cast<std::uint32_t>(request.context.userData.size()), request.context.waveSize);
-        }
-
-        translateOptions.embeddedFetch = embeddedFetch.loads.empty() ? nullptr : &embeddedFetch;
-
-        std::cout << "embedded fetch loads: " << embeddedFetch.loads.size() << "\n";
-
-        InstructionTranslator translator;
-        auto program = translator.Translate(decoded, cfg, translateOptions);
-
-        std::cout << "Translate OK, blocks=" << program.Blocks().size() << "\n";
-
-        SsaBuilder ssaBuilder;
-        ssaBuilder.Rewrite(program);
-        std::cout << "SSA OK\n";
-
-        ConstantFolder constantFolder;
-        DeadCodeEliminator deadCodeEliminator;
-
-        constantFolder.Fold(program);
-        ResolveControlFlowIdentities(program);
-        deadCodeEliminator.RemoveIdentities(program);
-        deadCodeEliminator.Eliminate(program);
-        std::cout << "Fold/DCE pass 1 OK\n";
-
-        ReadLaneEliminator readLaneEliminator;
-        const auto readLaneStats = readLaneEliminator.Eliminate(program, translateOptions.waveSize);
-
-        std::cout << "ReadLaneEliminator rewrote " << readLaneStats.rewrittenReads << "\n";
-
-        if (readLaneStats.rewrittenReads != 0u) {
-            constantFolder.Fold(program);
-            ResolveControlFlowIdentities(program);
-            deadCodeEliminator.RemoveIdentities(program);
-            deadCodeEliminator.Eliminate(program);
-        }
-
-        SrtWalker srtWalker;
-        srtWalker.BuildPlan(program);
-        std::cout << "SrtWalker::BuildPlan OK\n";
-
-        deadCodeEliminator.Eliminate(program);
-        std::cout << "DCE after SRT OK\n";
-
-        ResourceTracker resourceTracker;
-        resourceTracker.Track(program);
-        std::cout << "ResourceTracker::Track OK\n";
-
-        deadCodeEliminator.Eliminate(program);
-        std::cout << "DCE after ResourceTracker OK\n";
-
-        ShaderInfoCollector shaderInfoCollector;
-        shaderInfoCollector.Collect(program);
-        std::cout << "ShaderInfoCollector::Collect OK\n";
-
-        BindingAllocator bindingAllocator;
-        const auto bindings = bindingAllocator.Allocate(program, request.layout);
-
-        std::cout << "BindingAllocator::Allocate OK, bindings=" << bindings.bindings.size() << "\n";
-        std::cout << "ALL STAGES OK\n";
-
-        return 0;
-    } catch (const std::exception& e) {
-        std::cerr << "FAILED: " << e.what() << "\n";
-        return 2;
-    } catch (...) {
-        std::cerr << "FAILED: unknown exception\n";
-        return 2;
     }
+    if (summary.requests == 0) {
+        std::fprintf(stderr, "no serialized recompile requests found\n");
+        return 1;
+    }
+    std::printf("%zu requests: %zu compiled, %zu failed, %.1f ms compiling\n", summary.requests, summary.requests - summary.failures, summary.failures, summary.milliseconds);
+    return summary.failures == 0 ? 0 : 2;
 }
