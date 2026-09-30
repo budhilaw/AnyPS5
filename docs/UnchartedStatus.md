@@ -64,4 +64,3 @@ Build and relink as described in the README. The run folder holds the relinked `
 2. Selector image: find out why the history depth buffers (`0x8463400000` / `0x8464710000` in the logs) are never filled, then fix the dark lighting and the blocky tiles.
 3. Continue past New Game into gameplay. Watch for GPU-culled indirect draw arguments exceeding the index buffer, a hint from the Kyty fork (github.com/budhilaw/Kyty, branch `feat/ps5-gameplay-fixes`).
 4. Performance target: 30 fps in gameplay at a 720p internal resolution. That needs render scaling, smaller recompiled shaders and less per-draw CPU work.
-5. The graphics unit tests stop at a stale "pitch" expectation, and the minimum-LOD case changed from an error to a log.
