@@ -1,6 +1,7 @@
 #include "prx/libkernel/Time/include/Time.hpp"
 
 #include "prx/libc/include/General.hpp"
+#include "prx/libc/include/PreciseSleep.hpp"
 #include <cerrno>
 #include <cstdint>
 #include <thread>
@@ -50,30 +51,7 @@ static std::uint64_t GetStartNanos() {
 }
 
 static void SleepNanos(std::uint64_t nanos) {
-    if (nanos == 0) {
-        return;
-    }
-#ifdef _WIN32
-    if (nanos <= 50000ULL) {
-        const auto deadline = GetMonotonicNanos() + nanos;
-        while (GetMonotonicNanos() < deadline) {
-            YieldProcessor();
-        }
-        return;
-    }
-    thread_local HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
-    LARGE_INTEGER due{};
-    due.QuadPart = -static_cast<LONGLONG>((nanos + 99ULL) / 100ULL);
-    if (timer != nullptr && SetWaitableTimerEx(timer, &due, 0, nullptr, nullptr, nullptr, 0) && WaitForSingleObject(timer, INFINITE) == WAIT_OBJECT_0) {
-        return;
-    }
-    Sleep(static_cast<DWORD>((nanos + 999999ULL) / 1000000ULL));
-#else
-    struct timespec req{};
-    req.tv_sec = static_cast<time_t>(nanos / 1000000000ULL);
-    req.tv_nsec = static_cast<long>(nanos % 1000000000ULL);
-    while (nanosleep(&req, &req) == -1 && errno == EINTR) {}
-#endif
+    PreciseSleepNanos_nid_no_patch(nanos);
 }
 
 static constexpr int SCE_KERNEL_ERROR_EINVAL = 0x80020016;
