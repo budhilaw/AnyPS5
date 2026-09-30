@@ -1208,6 +1208,26 @@ private:
                         } else if (opcode == 0x42 || opcode == 0x46) {
                             postGraphics({[current] { current->RecordBarrier(); }, {}, false});
                             timing.Mark("gpu_barrier");
+                        } else if (memoryTransfer && !(opcode == 0x50 && (Pm4::DmaGdsDestination(packet) || Pm4::DmaGdsSource(packet)))) {
+                            std::uint64_t destination = 0, source = 0;
+                            std::size_t destinationBytes = 0, sourceBytes = 0;
+                            Pm4::TransferRanges(packet, destination, destinationBytes, source, sourceBytes);
+                            GraphicsJob job;
+                            if (destinationBytes != 0) job.writes.emplace_back(destination, destination + destinationBytes);
+                            QueueState* queuePointer = &queue;
+                            job.run = [current, frame = frameTiming, copy = std::vector<std::uint32_t>(packet.begin(), packet.end()), queuePointer, destination, destinationBytes, source, sourceBytes] {
+                                PerformanceContext timingContext(frame.get());
+                                PerformanceTimer transferTiming("Driver.TransferJob");
+                                if (destinationBytes != 0) current->ResolveMemory(destination, destinationBytes, true);
+                                if (sourceBytes != 0) current->ResolveMemory(source, sourceBytes, false);
+                                transferTiming.Mark("resolve");
+                                Pm4::Execute(std::span<const std::uint32_t>(copy), *queuePointer);
+                                transferTiming.Mark("execute");
+                            };
+                            postGraphics(std::move(job));
+                            timing.Mark("transfer_post");
+                            execution.cursor += count;
+                            return execution.cursor >= submission.commands.size() ? Step::Finished : Step::Progressed;
                         } else if (memoryTransfer) {
                             drainGraphics();
                             std::lock_guard gpuLock(gpuMutex);
