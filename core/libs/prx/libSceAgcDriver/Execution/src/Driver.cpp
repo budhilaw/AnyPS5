@@ -89,6 +89,7 @@ struct Submission {
     std::uint32_t queue;
     std::vector<std::uint32_t> commands;
     std::deque<std::vector<std::uint32_t>> registerLists;
+    std::map<std::size_t, std::span<const std::uint32_t>> hostRegisterLists;
     std::shared_ptr<const RegisteredShaders> shaders;
     std::map<std::size_t, std::shared_ptr<IFlipRequest>> flips;
     std::map<std::size_t, std::shared_ptr<IRenderingWait>> renderingWaits;
@@ -441,7 +442,7 @@ public:
             if (descriptor.dw_num == 0) continue;
             require(descriptor.dw_num <= std::numeric_limits<std::size_t>::max() / sizeof(std::uint32_t), "command size overflow");
             GuestMemory::CheckRange(descriptor.addr, static_cast<std::size_t>(descriptor.dw_num) * sizeof(std::uint32_t), alignof(std::uint32_t));
-            appendCommands(submission.commands, submission.registerLists, descriptor.addr, descriptor.dw_num, 0);
+            appendCommands(submission.commands, submission.registerLists, submission.hostRegisterLists, descriptor.addr, descriptor.dw_num, 0);
         }
         submission.copied = FrameTiming::Clock::now();
         std::vector<std::size_t> presentationPackets;
@@ -684,7 +685,7 @@ private:
         }
     }
 
-    static void appendCommands(std::vector<std::uint32_t>& out, std::deque<std::vector<std::uint32_t>>& registerLists, const std::uint32_t* words, std::uint32_t count, unsigned depth) {
+    static void appendCommands(std::vector<std::uint32_t>& out, std::deque<std::vector<std::uint32_t>>& registerLists, std::map<std::size_t, std::span<const std::uint32_t>>& hostRegisterLists, const std::uint32_t* words, std::uint32_t count, unsigned depth) {
         require(depth <= 32, "indirect buffer nesting is too deep");
         std::uint32_t chainLinks = 0;
         for (std::uint32_t cursor = 0; cursor < count;) {
@@ -717,9 +718,10 @@ private:
                     cursor = 0;
                     continue;
                 }
-                appendCommands(out, registerLists, reinterpret_cast<const std::uint32_t*>(target), targetCount, depth + 1);
+                appendCommands(out, registerLists, hostRegisterLists, reinterpret_cast<const std::uint32_t*>(target), targetCount, depth + 1);
             } else {
                 const auto opcode = (header >> 8u) & 0xffu;
+                const auto packetCursor = out.size();
                 out.insert(out.end(), words + cursor, words + cursor + size);
                 if ((opcode == 0x63 || opcode == 0x64 || opcode == 0x9f) && size == 5 && words[cursor + 3] == 0x80000000u && words[cursor + 4] != 0) {
                     const auto source = static_cast<std::uint64_t>(words[cursor + 1]) | (static_cast<std::uint64_t>(words[cursor + 2]) << 32u);
@@ -727,13 +729,18 @@ private:
                     if (source != 0 && source % 4 == 0) {
                         registerLists.emplace_back(static_cast<std::size_t>(pairs) * 2);
                         auto& copy = registerLists.back();
+                        bool copied = false;
                         try {
                             GuestMemory::Read(source, std::as_writable_bytes(std::span(copy)), 4);
+                            copied = true;
+                        } catch (const std::exception&) {
+                            registerLists.pop_back();
+                        }
+                        if (copied) {
                             const auto host = reinterpret_cast<std::uintptr_t>(copy.data());
                             out[out.size() - 4] = static_cast<std::uint32_t>(host);
                             out[out.size() - 3] = static_cast<std::uint32_t>(host >> 32u);
-                        } catch (const std::exception&) {
-                            registerLists.pop_back();
+                            if (const auto kept = Pm4::FilterRegisterPairs(copy)) hostRegisterLists.emplace(packetCursor, *kept);
                         }
                     }
                 }
@@ -1532,6 +1539,10 @@ private:
                     });
                     transferDevice->GdsTransfer(packet);
                     timing.Mark("gds_transfer");
+                } else if (const auto hostRegisters = (opcode == 0x63 || opcode == 0x64 || opcode == 0x9f) ? submission.hostRegisterLists.find(cursor) : submission.hostRegisterLists.end(); hostRegisters != submission.hostRegisterLists.end()) {
+                    watchdog.Stage("register_list");
+                    Pm4::ApplyRegisterPairs(queue, opcode, hostRegisters->second);
+                    timing.Mark("register_list");
                 } else if (opcode != 0x42 && opcode != 0x58 && (opcode != 0x46 || Pm4::EventWritesMemory(packet))) {
                     watchdog.Stage("pm4_execute");
                     graphicsDevice = current;

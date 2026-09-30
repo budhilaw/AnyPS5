@@ -4,6 +4,7 @@
 #include "prx/libSceAgcDriver/Execution/include/QueueState.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Pm4Opcodes.hpp"
 #include <array>
+#include <optional>
 #include <span>
 #include <functional>
 #include <string>
@@ -39,6 +40,8 @@ void TransferRanges(std::span<const std::uint32_t> packet, std::uint64_t& destin
 bool DeferrableWrite(std::span<const std::uint32_t> packet, std::uint64_t& address, std::uint32_t& bytes, std::uint64_t& value, bool& known);
 void Validate(std::span<const std::uint32_t> packet, std::uint32_t queue);
 void Execute(std::span<const std::uint32_t> packet, QueueState& queue);
+std::optional<std::span<const std::uint32_t>> FilterRegisterPairs(std::span<std::uint32_t> pairs);
+void ApplyRegisterPairs(QueueState& queue, std::uint32_t opcode, std::span<const std::uint32_t> pairs);
 bool AccessesMemory(std::uint32_t header);
 bool UsesGpuCacheBarrier(std::span<const std::uint32_t> packet);
 std::uint64_t DispatchIndirectAddress(std::span<const std::uint32_t> packet, const QueueState& queue);

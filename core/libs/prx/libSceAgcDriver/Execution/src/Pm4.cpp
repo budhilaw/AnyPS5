@@ -57,6 +57,15 @@ void writeRegister(QueueState& queue, std::uint32_t opcode, std::uint32_t offset
     if ((opcode == 0x64 || opcode == 0x79 || opcode == 0x7a) && offset == 0x243) queue.indexType = value & 3u;
 }
 
+bool malformedRegisterWord(std::uint32_t word) {
+    return word != 0xffffffffu && (word & 0x0fff0000u) != 0;
+}
+
+void reportMalformedPair(std::uint64_t list, std::size_t pair, std::uint32_t word, std::uint32_t value) {
+    static std::once_flag once;
+    std::call_once(once, [&] { std::fprintf(stderr, "AGC driver: indirect register list at 0x%llx skips pair %zu {0x%08x, 0x%08x} (not a register offset)\n", static_cast<unsigned long long>(list), pair, word, value); std::fflush(stderr); });
+}
+
 bool memorySelector(std::uint32_t selector) {
     return selector == 0 || selector == 3;
 }
@@ -565,11 +574,9 @@ void Execute(std::span<const std::uint32_t> packet, QueueState& queue) {
         case 0x63: case 0x64: case 0x9f: {
             std::vector<std::uint32_t> pairs(static_cast<std::size_t>(packet[4]) * 2);
             GuestMemory::Read(address(packet[1], packet[2]), std::as_writable_bytes(std::span(pairs)), 4);
-            const auto malformed = [](std::uint32_t word) { return word != 0xffffffffu && (word & 0x0fff0000u) != 0; };
             for (std::size_t i = 0; i < pairs.size(); i += 2) {
-                if (malformed(pairs[i])) {
-                    static std::once_flag once;
-                    std::call_once(once, [&] { std::fprintf(stderr, "AGC driver: indirect register list at 0x%llx skips pair %zu {0x%08x, 0x%08x} (not a register offset)\n", static_cast<unsigned long long>(address(packet[1], packet[2])), i / 2, pairs[i], pairs[i + 1]); std::fflush(stderr); });
+                if (malformedRegisterWord(pairs[i])) {
+                    reportMalformedPair(address(packet[1], packet[2]), i / 2, pairs[i], pairs[i + 1]);
                     continue;
                 }
                 try {
@@ -586,7 +593,7 @@ void Execute(std::span<const std::uint32_t> packet, QueueState& queue) {
                     throw std::runtime_error(message);
                 }
             }
-            for (std::size_t i = 0; i < pairs.size(); i += 2) if (!malformed(pairs[i])) writeRegister(queue, opcode, registerOffset(pairs[i]), pairs[i + 1]);
+            ApplyRegisterPairs(queue, opcode, pairs);
             return;
         }
         case 0x69: case 0x76: case 0x79: case 0x7a: {
@@ -655,6 +662,36 @@ void Execute(std::span<const std::uint32_t> packet, QueueState& queue) {
         }
         default: throw std::runtime_error("packet " + Name(packet[0]) + " requires driver execution");
     }
+}
+
+std::optional<std::span<const std::uint32_t>> FilterRegisterPairs(std::span<std::uint32_t> pairs) {
+    bool padded = false;
+    for (std::size_t i = 0; i + 1 < pairs.size(); i += 2) {
+        if (malformedRegisterWord(pairs[i])) {
+            padded = true;
+            continue;
+        }
+        try {
+            registerOffset(pairs[i]);
+        } catch (const std::exception&) {
+            return std::nullopt;
+        }
+    }
+    if (!padded) return pairs;
+    std::size_t kept = 0;
+    for (std::size_t i = 0; i + 1 < pairs.size(); i += 2) {
+        if (malformedRegisterWord(pairs[i])) {
+            reportMalformedPair(reinterpret_cast<std::uintptr_t>(pairs.data()), i / 2, pairs[i], pairs[i + 1]);
+            continue;
+        }
+        pairs[kept++] = pairs[i];
+        pairs[kept++] = pairs[i + 1];
+    }
+    return pairs.first(kept);
+}
+
+void ApplyRegisterPairs(QueueState& queue, std::uint32_t opcode, std::span<const std::uint32_t> pairs) {
+    for (std::size_t i = 0; i + 1 < pairs.size(); i += 2) if (!malformedRegisterWord(pairs[i])) writeRegister(queue, opcode, registerOffset(pairs[i]), pairs[i + 1]);
 }
 
 }
