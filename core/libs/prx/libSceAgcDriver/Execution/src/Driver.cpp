@@ -15,6 +15,9 @@
 #include "prx/libSceAgcDriver/Execution/include/VulkanDevice.hpp"
 #include "prx/libSceAgcDriver/Execution/include/VideoOutput.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ShaderInputState.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/GuestTextureResource.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/Texture.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/TextureTiling.hpp"
 #include "prx/libc/include/Shutdown.hpp"
 #include "prx/libSceAgcDriver/Execution/include/MemoryAccessScope.hpp"
 #include "prx/libSceAgcDriver/Eq/include/Event.hpp"
@@ -169,6 +172,25 @@ void ReportUnresolvedImages(const char* kind, std::uint64_t address, const Shade
     static std::set<std::uint64_t> reported;
     std::lock_guard lock(reportedMutex);
     if (reported.insert(address).second) std::fprintf(stderr, "AGC driver: %s program 0x%llx samples %u image(s) whose descriptors are selected at run time; they read as null textures\n", kind, static_cast<unsigned long long>(address), result.unresolvedImages);
+}
+
+bool StorageImageWrites(const ShaderRecompiler::DescriptorBinding& binding, std::vector<std::pair<std::uint64_t, std::uint64_t>>& writes) {
+    if (binding.count == 0 || binding.guestDescriptor.size() != static_cast<std::size_t>(binding.count) * 8) return false;
+    for (std::size_t element = 0; element < binding.count; ++element) {
+        const auto words = std::span<const std::uint32_t>(binding.guestDescriptor).subspan(element * 8, 8);
+        if (words[0] == 0 && (words[1] & 0xffu) == 0) continue;
+        try {
+            const auto resource = Graphics::DecodeTextureResource(words);
+            if (resource.baseAddress == 0) continue;
+            const auto mips = Graphics::ComputeMipLayout(resource.tileMode, resource.format, resource.width, resource.height, resource.mipCount);
+            const auto bytes = Graphics::ComputeSurfaceSize(mips, Graphics::FullArrayLayers(resource));
+            if (bytes == 0 || bytes > std::numeric_limits<std::uint64_t>::max() - resource.baseAddress) return false;
+            writes.emplace_back(resource.baseAddress, resource.baseAddress + bytes);
+        } catch (const std::exception&) {
+            return false;
+        }
+    }
+    return true;
 }
 
 template<typename Work>
@@ -780,7 +802,7 @@ private:
                     if (base == 0 || bytes == 0 || (element < binding.elementOptional.size() && binding.elementOptional[element] && bytes > (64ull << 20u))) continue;
                     job.writes.emplace_back(base, base + bytes);
                 }
-            } else if (!binding.readOnly && binding.kind == ShaderRecompiler::DescriptorKind::StorageImage) {
+            } else if (!binding.readOnly && binding.kind == ShaderRecompiler::DescriptorKind::StorageImage && !StorageImageWrites(binding, job.writes)) {
                 job.writesUnknown = true;
             }
         }
@@ -1045,7 +1067,7 @@ private:
                         if (base == 0 || bytes == 0 || (element < binding.elementOptional.size() && binding.elementOptional[element] && bytes > (64ull << 20u))) continue;
                         job.writes.emplace_back(base, base + bytes);
                     }
-                } else if (!binding.readOnly && binding.kind == ShaderRecompiler::DescriptorKind::StorageImage) {
+                } else if (!binding.readOnly && binding.kind == ShaderRecompiler::DescriptorKind::StorageImage && !StorageImageWrites(binding, job.writes)) {
                     job.writesUnknown = true;
                 }
             }
