@@ -63,13 +63,27 @@ void GuestBufferCache::resolve(void* owner, GuestMemoryTracking::Access access) 
     if (access == GuestMemoryTracking::Access::Invalidate) chunk.lost = true;
 }
 
+void GuestBufferCache::ageChunks() {
+    const auto now = std::chrono::steady_clock::now();
+    if (now - swept < ChunkSweep) return;
+    swept = now;
+    for (auto& [address, chunk] : chunks) {
+        if (!chunk->watch || !chunk->protectedRead || now - chunk->touched < ChunkAge) continue;
+        chunk->watch->Protect(GuestMemoryTracking::Protection::ReadWrite);
+        chunk->protectedRead = false;
+        chunk->generation = ++generation;
+    }
+}
+
 bool GuestBufferCache::current(const Mirror& mirror) {
     const auto protection = GuestAllocations::GuestAllocationsProtectionGeneration_nid_postfix();
+    const auto now = std::chrono::steady_clock::now();
     const auto first = mirror.begin - mirror.begin % chunkBytes;
     auto it = chunks.find(first);
     for (auto address = first; address < mirror.end; address += chunkBytes, ++it) {
         if (it == chunks.end() || it->first != address) return false;
-        const auto& chunk = *it->second;
+        auto& chunk = *it->second;
+        chunk.touched = now;
         if (chunk.immutableSince != 0 && chunk.immutableSince == protection) continue;
         if (chunk.untrackable || chunk.lost || !chunk.protectedRead || chunk.generation > mirror.synced) return false;
     }
@@ -77,8 +91,10 @@ bool GuestBufferCache::current(const Mirror& mirror) {
 }
 
 void GuestBufferCache::protect(const Mirror& mirror) {
+    const auto now = std::chrono::steady_clock::now();
     for (auto address = mirror.begin - mirror.begin % chunkBytes; address < mirror.end; address += chunkBytes) {
         auto& chunk = this->chunk(address);
+        chunk.touched = now;
         if (chunk.immutableSince != 0) {
             if (chunk.immutableSince == GuestAllocations::GuestAllocationsProtectionGeneration_nid_postfix()) continue;
             chunk.immutableSince = 0;
@@ -128,6 +144,7 @@ std::shared_ptr<GuestBufferCache::Mirror> GuestBufferCache::Acquire(std::uint64_
     Require(begin < end && end - begin <= std::numeric_limits<std::size_t>::max(), "invalid guest buffer mirror range");
     std::lock_guard registryLock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
     std::lock_guard lock(mutex);
+    ageChunks();
     const auto bytes = static_cast<std::size_t>(end - begin);
     auto& slot = mirrors[{begin, end}];
     if (slot && (slot->buffer->Usage() & usage) != usage) slot.reset();
@@ -422,6 +439,7 @@ void GuestBufferCache::ReleaseTracking(std::uint64_t address, std::size_t bytes)
 std::uint64_t GuestBufferCache::Track(std::uint64_t begin, std::uint64_t end) {
     std::lock_guard registryLock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
     std::lock_guard lock(mutex);
+    ageChunks();
     Mirror range{begin, end, nullptr, 0, 0};
     protect(range);
     return generation;
@@ -430,6 +448,7 @@ std::uint64_t GuestBufferCache::Track(std::uint64_t begin, std::uint64_t end) {
 bool GuestBufferCache::Current(std::uint64_t begin, std::uint64_t end, std::uint64_t stamp) {
     std::lock_guard registryLock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
     std::lock_guard lock(mutex);
+    ageChunks();
     Mirror range{begin, end, nullptr, stamp, 0};
     return current(range);
 }

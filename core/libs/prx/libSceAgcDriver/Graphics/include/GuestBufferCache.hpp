@@ -5,6 +5,7 @@
 #include "prx/libc/include/GuestAllocations.hpp"
 #include "prx/libc/include/GuestMemoryTracking.hpp"
 #include "prx/libc/include/GuestMemoryBacking.hpp"
+#include <chrono>
 #include <cstdint>
 #include <list>
 #include <map>
@@ -65,8 +66,13 @@ private:
         char untrackableReason = 0;
         std::uint64_t immutableSince = 0;
         bool lost = false;
+        std::chrono::steady_clock::time_point touched{};
     };
     static constexpr std::uint64_t chunkBytes = 1u << 16;
+    static constexpr std::chrono::milliseconds ChunkAge{250};
+    static constexpr std::chrono::milliseconds ChunkSweep{100};
+    void ageChunks();
+    std::chrono::steady_clock::time_point swept{};
     static constexpr std::uint64_t IncrementalBytes = 16ull << 20;
     static constexpr std::uint64_t ImportBytes = 1ull << 20;
     std::shared_ptr<Mirror> import(std::uint64_t begin, std::uint64_t end, VkBufferUsageFlags usage);
