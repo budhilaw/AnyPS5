@@ -67,17 +67,6 @@ int NativeStdUncaughtExceptions() { return static_cast<int>(LibcException::globa
 std::type_info* NativeCurrentExceptionType() asm("__cxa_current_exception_type");
 std::type_info* NativeCurrentExceptionType() { return __cxa_current_exception_type_nid_postfix(); }
 void* NativeInitPrimaryException(void* object, std::type_info* type, void (*destructor)(void*)) asm("__cxa_init_primary_exception");
-void* NativeInitPrimaryException(void* object, std::type_info* type, void (*destructor)(void*)) {
-    using namespace LibcException;
-    auto* header = FromObject(object);
-    header->type = type;
-    header->destructor = destructor;
-    header->terminate = terminateHandler.load(std::memory_order_acquire);
-    header->adjusted = object;
-    header->unwind.exception_class = PrimaryClass;
-    header->unwind.exception_cleanup = Cleanup;
-    AllocationOf(header)->references.store(0, std::memory_order_relaxed);
-    return AllocationOf(header);
-}
+void* NativeInitPrimaryException(void* object, std::type_info* type, void (*destructor)(void*)) { return __cxa_init_primary_exception_nid_postfix(object, type, destructor); }
 }
 #endif
