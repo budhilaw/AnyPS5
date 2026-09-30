@@ -39,10 +39,12 @@ static int registerVideoOutEvent(int handle, KernelEqueue eq, int16_t eventKind,
     event.event.filter = EVFILT_VIDEO_OUT;
     event.event.flags = EV_ADD;
     event.event.udata = udata;
-    if (eventKind == VIDEO_OUT_EVENT_SET_MODE) {
+    if (eventKind == VIDEO_OUT_EVENT_SET_MODE || eventKind == VIDEO_OUT_EVENT_VRR_ACTIVE_STATUS) {
+        const uint64_t vrrActive = (cfg->vblankStatus.flags & VIDEO_OUT_VBLANK_STATUS_FLAG_VRR_ACTIVE) != 0 ? 1 : 0;
+        const uint64_t status = eventKind == VIDEO_OUT_EVENT_SET_MODE ? cfg->outputMode : vrrActive;
         event.triggered = true;
         event.event.fflags = 1;
-        event.event.data = static_cast<intptr_t>((cfg->outputMode << 16u) | (1u << 12u));
+        event.event.data = static_cast<intptr_t>((status << 16u) | (1u << 12u));
     }
     event.filter.triggerFunc = [](KernelEqueueEvent* e, void* data) {
         const uint64_t old = static_cast<uint64_t>(e->event.data);

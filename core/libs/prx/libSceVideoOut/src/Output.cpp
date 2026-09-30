@@ -8,6 +8,7 @@
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 #include "prx/libSceVideoOut/include/VideoOutDriver.hpp"
+#include "prx/libSceVideoOut/include/FramePacing.hpp"
 
 static constexpr int TracedCalls = 20;
 
@@ -40,7 +41,14 @@ static int outputModeSupported(int handle, uint64_t mode, const VideoOutOutputOp
     if (result != 0) {
         return result;
     }
-    return (mode == VIDEO_OUT_OUTPUT_MODE_119_88HZ) ? 0 : 1;
+    return (mode == VIDEO_OUT_OUTPUT_MODE_119_88HZ && GetFramePacing().display == DisplayProfile::Hz60) ? 0 : 1;
+}
+
+static void setVrrPegged(int handle, bool pegged) {
+    auto cfg = VideoOutDriver::Get().GetConfig(handle);
+    std::lock_guard lock(cfg->mutex);
+    cfg->Check();
+    cfg->vrrPegged = pegged;
 }
 
 extern "C" {
@@ -129,7 +137,7 @@ int APS5_VABI sceVideoOutGetOutputStatus(int handle, VideoOutOutputStatus* statu
     status->resolution = (cfg->width >= 3840 || cfg->height >= 2160) ? 2u : 1u;
     status->dynamicRange = 1;
     status->refreshRate = (cfg->outputMode == VIDEO_OUT_OUTPUT_MODE_119_88HZ) ? VIDEO_OUT_REFRESH_RATE_119_88HZ : VIDEO_OUT_REFRESH_RATE_59_94HZ;
-    status->flags = 0;
+    status->flags = GetFramePacing().display == DisplayProfile::Vrr ? VIDEO_OUT_OUTPUT_STATUS_FLAG_VRR_CAPABLE : 0;
     status->reserved[0] = 0;
     status->reserved[1] = 0;
     status->reserved[2] = 0;
@@ -186,13 +194,7 @@ int APS5_VABI sceVideoOutConfigureOutput(int handle, uint64_t mode, const VideoO
     if (supported == 0 && mode == VIDEO_OUT_OUTPUT_MODE_119_88HZ) {
         result = VIDEO_OUT_ERROR_UNAVAILABLE_OUTPUT_MODE;
     } else {
-        auto cfg = VideoOutDriver::Get().GetConfig(handle);
-        if (cfg == nullptr) {
-            throw std::runtime_error(std::string(__func__) + ": VIDEO_OUT_ERROR_INVALID_HANDLE");
-        }
-        std::unique_lock lock(cfg->mutex);
-        cfg->Check();
-        cfg->outputMode = mode;
+        VideoOutDriver::Get().ConfigureOutput(handle, mode);
     }
     static std::atomic<int> calls{0};
     if (traceCall(calls)) APS5_LOG_OUT("sceVideoOutConfigureOutput handle=%d mode=0x%llx result=0x%08x", handle, static_cast<unsigned long long>(mode), static_cast<unsigned>(result));
@@ -268,18 +270,14 @@ int APS5_VABI sceVideoOutAdjustColor_(int handle, const VideoOutColorSettings* s
 int APS5_VABI sceVideoOutVrrPegToFixedRate(int handle, uint64_t first, uint64_t second) {
     static std::atomic<int> calls{0};
     if (traceCall(calls)) APS5_LOG_OUT("sceVideoOutVrrPegToFixedRate handle=%d first=0x%llx second=0x%llx", handle, static_cast<unsigned long long>(first), static_cast<unsigned long long>(second));
-    if (!VideoOutDriver::Get().IsOpen(handle)) {
-        throw std::runtime_error(std::string(__func__) + ": VIDEO_OUT_ERROR_INVALID_HANDLE");
-    }
+    setVrrPegged(handle, true);
     return 0;
 }
 
 int APS5_VABI sceVideoOutVrrUnpegFromFixedRate(int handle) {
     static std::atomic<int> calls{0};
     if (traceCall(calls)) APS5_LOG_OUT("sceVideoOutVrrUnpegFromFixedRate handle=%d", handle);
-    if (!VideoOutDriver::Get().IsOpen(handle)) {
-        throw std::runtime_error(std::string(__func__) + ": VIDEO_OUT_ERROR_INVALID_HANDLE");
-    }
+    setVrrPegged(handle, false);
     return 0;
 }
 

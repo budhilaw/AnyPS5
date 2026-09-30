@@ -22,6 +22,7 @@
 #include "prx/libkernel/Equeue/Equeue.hpp"
 #include "prx/libkernel/Time/include/Time.hpp"
 #include "prx/libSceVideoOut/include/VideoOutDriver.hpp"
+#include "prx/libSceVideoOut/include/FramePacing.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Presentation.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
@@ -29,6 +30,7 @@
 #include "prx/libc/include/Shutdown.hpp"
 #include "prx/libc/include/General.hpp"
 #include "prx/libc/include/PreciseSleep.hpp"
+#include "prx/libc/include/PreciseWait.hpp"
 
 namespace {
 
@@ -92,7 +94,6 @@ public:
         request->queue = queue;
         request->index = info.index;
         request->outputHandle = info.handle;
-        request->flipMode = static_cast<int>(info.mode);
         request->flipArg = info.argument;
         std::lock_guard queueLock(queue->mutex);
         if (queue->failure) std::rethrow_exception(queue->failure);
@@ -107,7 +108,9 @@ public:
             request->height = cfg->height;
         }
         request->generation = cfg->generation;
+        request->flipMode = static_cast<int>(info.mode);
         request->flipRate = cfg->flipRate;
+        request->pegged = cfg->vrrPegged;
         if (info.index >= 0) request->reuseTicket = cfg->bufferReuse[info.index].Reserve();
         ++queue->reservations;
         ++cfg->flipStatus.flipPendingNum;
@@ -209,6 +212,7 @@ VideoOutDriver& VideoOutDriver::Get() {
 }
 
 VideoOutDriver::VideoOutDriver() {
+    static_cast<void>(GetFramePacing());
     MainThread::Run([] {
         if (SDL_InitSubSystem(SDL_INIT_VIDEO) < 0) {
             throw std::runtime_error(std::string("SDL_InitSubSystem(VIDEO) failed: ") + SDL_GetError());
@@ -290,6 +294,7 @@ int VideoOutDriver::Open(int busType) {
     cfg->opened = true;
     cfg->flipStatus.flipArg = -1;
     cfg->flipStatus.currentBuffer = -1;
+    cfg->vblankStatus.flags = GetFramePacing().display == DisplayProfile::Vrr ? VIDEO_OUT_VBLANK_STATUS_FLAG_VRR_ACTIVE : 0;
     auto output = std::make_shared<VideoOutput>(cfg, flipQueue);
     AgcDriverRegisterVideoOutput_nid_postfix(static_cast<uint32_t>(handle), output);
     contexts[handle] = std::move(cfg);
@@ -356,6 +361,15 @@ void VideoOutDriver::SubmitFlip(int handle, int index, int flipMode, int64_t fli
     require(result == 0, "driver rejected flip submission");
 }
 
+void VideoOutDriver::ConfigureOutput(int handle, uint64_t mode) {
+    auto cfg = GetConfig(handle);
+    std::lock_guard lock(cfg->mutex);
+    checkConfig(*cfg);
+    if (cfg->outputMode == mode) return;
+    cfg->outputMode = mode;
+    triggerEvents(*cfg, VIDEO_OUT_EVENT_SET_MODE, reinterpret_cast<void*>(mode));
+}
+
 void VideoOutDriver::triggerEvents(VideoOutConfig& cfg, int eventKind, void* triggerData) {
     std::vector<EventRegistration>* events = nullptr;
     if (eventKind == VIDEO_OUT_EVENT_FLIP) events = &cfg.flipEvents;
@@ -404,9 +418,11 @@ void VideoOutDriver::processFlip(FlipRequest& req) {
         require(req.ready && !req.terminal && req.generation == req.cfg->generation, "stale or incomplete flip request");
         const auto interval = static_cast<uint64_t>(req.flipRate + 1);
         require(req.cfg->lastFlipVblank <= std::numeric_limits<uint64_t>::max() - interval, "flip interval overflow");
-        const auto target = req.cfg->lastFlipVblank + interval;
+        const auto gate = ComputeFlipGate({.flipMode = req.flipMode, .flipRate = req.flipRate, .vrr = GetFramePacing().display == DisplayProfile::Vrr, .pegged = req.pegged, .lastLatchVblank = req.cfg->lastFlipVblank, .lastLatchTime = req.cfg->lastFlipLatch, .vblankPeriod = VblankPeriod(req.cfg->outputMode)});
         timing.Mark("validate");
-        if (req.flipMode != VIDEO_OUT_FLIP_MODE_HSYNC) req.cfg->vblankCond.wait(lock, [&] { return req.cfg->vblankStatus.count >= target || req.cfg->failure || req.cfg->closing; });
+        const auto cancelled = [&] { return req.cfg->failure || req.cfg->closing; };
+        if (gate.byVblank) req.cfg->vblankCond.wait(lock, [&] { return req.cfg->vblankStatus.count >= gate.targetVblank || cancelled(); });
+        else if (gate.notBefore > std::chrono::steady_clock::now()) PreciseWait::Until(req.cfg->vblankCond, lock, gate.notBefore, cancelled);
         timing.Mark("vblank_wait");
         checkConfig(*req.cfg);
         req.latchVblank = req.cfg->vblankStatus.count;

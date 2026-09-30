@@ -67,6 +67,9 @@ static constexpr uint64_t VIDEO_OUT_OUTPUT_MODE_119_88HZ = 0x000000000000000FULL
 static constexpr uint64_t VIDEO_OUT_REFRESH_RATE_59_94HZ = 3;
 static constexpr uint64_t VIDEO_OUT_REFRESH_RATE_119_88HZ = 13;
 
+static constexpr uint64_t VIDEO_OUT_OUTPUT_STATUS_FLAG_VRR_CAPABLE = 0x10;
+static constexpr uint8_t VIDEO_OUT_VBLANK_STATUS_FLAG_VRR_ACTIVE = 0x04;
+
 using VblankTick = std::chrono::duration<std::int64_t, std::ratio<1001, 120000>>;
 
 inline constexpr std::uint64_t VblankTicksAt59_94Hz = 2;
@@ -142,6 +145,7 @@ struct VideoOutConfig {
     bool closing = false;
     std::exception_ptr failure;
     int flipRate = 0;
+    bool vrrPegged = false;
     uint64_t lastFlipVblank = 0;
     std::chrono::steady_clock::time_point lastFlipLatch{};
     AgcDriver::FrameTiming::Clock::time_point lastTimingFlip{};
@@ -174,6 +178,7 @@ struct FlipRequest final : AgcDriver::IFlipRequest, std::enable_shared_from_this
     int index = 0;
     int flipMode = 0;
     int flipRate = 0;
+    bool pegged = false;
     int64_t flipArg = 0;
     std::uint64_t latchVblank = 0;
     std::chrono::steady_clock::time_point latchTime{};
@@ -220,6 +225,7 @@ public:
     bool IsOpen(int handle);
 
     void SubmitFlip(int handle, int index, int flipMode, int64_t flipArg);
+    void ConfigureOutput(int handle, uint64_t mode);
 
 private:
     bool close(int handle);

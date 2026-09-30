@@ -1,4 +1,5 @@
 #include "prx/libSceVideoOut/include/VideoOutDriver.hpp"
+#include "prx/libSceVideoOut/include/FramePacing.hpp"
 #include "prx/libSceVideoOut/include/Buffer.hpp"
 #include "prx/libSceVideoOut/include/Output.hpp"
 #include "prx/libSceVideoOut/include/Event.hpp"
@@ -8,9 +9,11 @@
 #include "prx/libc/include/Shutdown.hpp"
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <optional>
 #include <string>
 #include <limits>
@@ -34,6 +37,20 @@ std::string expectFailure(TAction action) {
     try { action(); }
     catch (const std::runtime_error& error) { return error.what(); }
     throw std::runtime_error("expected an exception");
+}
+
+void setEnvironment(const char* name, const char* value) {
+#ifdef _WIN32
+    check(_putenv_s(name, value != nullptr ? value : "") == 0, "environment update failed");
+#else
+    check((value != nullptr ? setenv(name, value, 1) : unsetenv(name)) == 0, "environment update failed");
+#endif
+}
+
+void usePacingEnvironment(const char* display) {
+    setEnvironment("ANYPS5_DISPLAY", display);
+    setEnvironment("ANYPS5_UNCAPPED", nullptr);
+    setEnvironment("ANYPS5_FPS_LIMIT", nullptr);
 }
 
 class Gate final : public AgcDriver::IVideoOutput, public AgcDriver::IFlipRequest, public std::enable_shared_from_this<Gate> {
@@ -188,6 +205,73 @@ std::uint64_t pacedFlipVblanks(int flips, std::chrono::steady_clock::duration pr
     return lastFlipVblank - firstLatch;
 }
 
+void checkRejected(const char* display, const char* uncapped, const char* fpsLimit, const char* variable, const char* accepted) {
+    const auto message = expectFailure([&] { ParseFramePacing(display, uncapped, fpsLimit); });
+    check(message.find(variable) != std::string::npos && message.find(accepted) != std::string::npos, "a rejected frame pacing value did not name its variable and the accepted values");
+}
+
+void checkFramePacingSettings() {
+    const std::array<const char*, 2> unset{nullptr, ""};
+    for (const char* value : unset) {
+        const auto defaults = ParseFramePacing(value, value, value);
+        check(defaults.display == DisplayProfile::Hz60 && !defaults.uncapped && defaults.fpsLimit < 0.0, "unset frame pacing variables did not select the PS5 60 Hz defaults");
+    }
+    check(ParseFramePacing("60hz", nullptr, nullptr).display == DisplayProfile::Hz60 && ParseFramePacing("120hz", nullptr, nullptr).display == DisplayProfile::Hz120 && ParseFramePacing("vrr", nullptr, nullptr).display == DisplayProfile::Vrr, "ANYPS5_DISPLAY was not parsed");
+    check(!ParseFramePacing(nullptr, "0", nullptr).uncapped && ParseFramePacing(nullptr, "1", nullptr).uncapped, "ANYPS5_UNCAPPED was not parsed");
+    check(ParseFramePacing(nullptr, nullptr, "0").fpsLimit == 0.0 && ParseFramePacing(nullptr, nullptr, "144").fpsLimit == 144.0 && ParseFramePacing(nullptr, nullptr, "59.94").fpsLimit == 59.94, "ANYPS5_FPS_LIMIT was not parsed");
+    for (const char* value : {"120", "120Hz", "VRR", "144hz", "vrr "}) checkRejected(value, nullptr, nullptr, "ANYPS5_DISPLAY", "60hz, 120hz or vrr");
+    for (const char* value : {"2", "true", "yes", "01", "-1"}) checkRejected(nullptr, value, nullptr, "ANYPS5_UNCAPPED", "0 or 1");
+    for (const char* value : {"-1", "-0.5", "fast", "60fps", "nan", "inf", "1e999"}) checkRejected(nullptr, nullptr, value, "ANYPS5_FPS_LIMIT", "at least 0");
+}
+
+void checkFlipGates() {
+    using Period59 = std::chrono::duration<std::int64_t, std::ratio<1001, 60000>>;
+    using Period119 = std::chrono::duration<std::int64_t, std::ratio<1001, 120000>>;
+    const auto period = VblankPeriod(VIDEO_OUT_OUTPUT_MODE_119_88HZ);
+    check(VblankPeriod(VIDEO_OUT_OUTPUT_MODE_DEFAULT) == std::chrono::duration_cast<std::chrono::steady_clock::duration>(Period59(1)) && period == std::chrono::duration_cast<std::chrono::steady_clock::duration>(Period119(1)), "the vblank period is not 1001/60000 s at 59.94 Hz and 1001/120000 s at 119.88 Hz");
+    const auto latch = std::chrono::steady_clock::time_point{} + std::chrono::seconds(100);
+    const FlipGateInput base{.flipMode = VIDEO_OUT_FLIP_MODE_VSYNC, .flipRate = 2, .lastLatchVblank = 1000, .lastLatchTime = latch, .vblankPeriod = period, .limitInterval = std::chrono::milliseconds(7)};
+    const auto onGrid = [](const FlipGate& gate, std::uint64_t target) { return gate.byVblank && gate.targetVblank == target; };
+    const auto notBefore = [](const FlipGate& gate, std::chrono::steady_clock::time_point time) { return !gate.byVblank && gate.notBefore == time; };
+    const auto immediate = [](const FlipGate& gate) { return !gate.byVblank && gate.notBefore == std::chrono::steady_clock::time_point{}; };
+    auto input = base;
+    check(onGrid(ComputeFlipGate(input), 1003), "a capped flip did not wait until flip rate + 1 vblanks after the latched vblank");
+    for (const bool uncapped : {false, true}) {
+        for (const bool vrr : {false, true}) {
+            for (const bool pegged : {false, true}) {
+                input = base;
+                input.flipMode = VIDEO_OUT_FLIP_MODE_HSYNC;
+                input.uncapped = uncapped;
+                input.vrr = vrr;
+                input.pegged = pegged;
+                check(immediate(ComputeFlipGate(input)), "an immediate flip waited");
+            }
+        }
+    }
+    input = base;
+    input.vrr = true;
+    check(notBefore(ComputeFlipGate(input), latch + period * 3), "an unpegged VRR flip at flip rate 2 did not wait three vblank periods after the previous latch");
+    input.flipRate = 0;
+    check(notBefore(ComputeFlipGate(input), latch + period), "an unpegged VRR flip at flip rate 0 did not wait one vblank period after the previous latch");
+    input.pegged = true;
+    check(onGrid(ComputeFlipGate(input), 1001), "a pegged VRR flip left the vblank grid");
+    input.lastLatchTime = {};
+    input.pegged = false;
+    check(immediate(ComputeFlipGate(input)), "the first unpegged VRR flip waited");
+    input = base;
+    input.uncapped = true;
+    input.vrr = true;
+    check(notBefore(ComputeFlipGate(input), latch + std::chrono::milliseconds(7)), "an uncapped flip did not wait for the frame rate limit alone");
+    input.pegged = true;
+    check(onGrid(ComputeFlipGate(input), 1003), "a pegged uncapped flip left the vblank grid");
+    input.pegged = false;
+    input.limitInterval = {};
+    check(immediate(ComputeFlipGate(input)), "an uncapped flip without a frame rate limit waited");
+    input.limitInterval = std::chrono::milliseconds(7);
+    input.lastLatchTime = {};
+    check(immediate(ComputeFlipGate(input)), "the first uncapped flip waited");
+}
+
 void testPacing() {
     constexpr std::uint64_t slow = VblankTicksAt59_94Hz;
     constexpr std::uint64_t fast = VblankTicksAt119_88Hz;
@@ -212,6 +296,8 @@ void testPacing() {
     const auto period = vblankTicks(VblankTicksAt59_94Hz);
     check(pacedFlipVblanks(101, period * 9 / 10) == 100, "flips whose present fits in a vblank were not shown on every vblank");
     check(pacedFlipVblanks(101, period * 5 / 4) <= 126, "a present longer than a vblank cost the next flip an extra vblank");
+    checkFramePacingSettings();
+    checkFlipGates();
 }
 
 void checkVblankRate(int handle, const std::shared_ptr<VideoOutConfig>& cfg, double rate, const char* reason) {
@@ -276,10 +362,16 @@ void testControls() {
     check(owner->GetTriggeredEvents(&event, 1) == 1, "initial output mode event missing");
     int64_t mode = 0;
     check(sceVideoOutGetEventData(&event, &mode) == 0 && mode == VIDEO_OUT_OUTPUT_MODE_DEFAULT && sceVideoOutGetEventCount(&event) == 1, "initial output mode event encoding is wrong");
+    check(sceVideoOutAddVrrActiveStatusEvent(queue, handle, nullptr) == 0, "VRR status subscription failed");
+    int64_t vrrStatus = -1;
+    check(owner->GetTriggeredEvents(&event, 1) == 1 && sceVideoOutGetEventId(&event) == VIDEO_OUT_EVENT_VRR_ACTIVE_STATUS && sceVideoOutGetEventData(&event, &vrrStatus) == 0 && vrrStatus == 0 && sceVideoOutGetEventCount(&event) == 1, "the VRR status was not signalled as inactive at registration");
+    VideoOutVblankStatus vblankStatus{};
+    check(sceVideoOutGetVblankStatus(handle, &vblankStatus) == 0 && vblankStatus.flags == 0, "the 60 Hz display reported an active VRR");
     check(sceVideoOutIsOutputSupported(handle, VIDEO_OUT_OUTPUT_MODE_DEFAULT, nullptr, nullptr, 0) == 1 && sceVideoOutIsOutputSupported(handle, VIDEO_OUT_OUTPUT_MODE_119_88HZ, nullptr, nullptr, 0) == 0, "output mode support is wrong");
     check(sceVideoOutConfigureOutput(handle, VIDEO_OUT_OUTPUT_MODE_119_88HZ, nullptr, nullptr, 0) == VIDEO_OUT_ERROR_UNAVAILABLE_OUTPUT_MODE, "unavailable 119.88 Hz output was not refused");
     VideoOutOutputStatus output{};
     check(sceVideoOutGetOutputStatus(handle, &output) == 0 && output.refreshRate == VIDEO_OUT_REFRESH_RATE_59_94HZ, "refused output mode changed the refresh rate");
+    check(output.flags == 0, "the 60 Hz display reported itself VRR capable");
     check(owner->GetTriggeredEvents(&event, 1) == 0, "refused output mode triggered an event");
     check(sceVideoOutConfigureOutput(handle, VIDEO_OUT_OUTPUT_MODE_DEFAULT, nullptr, nullptr, 0) == 0, "default output mode was refused");
     for (const int flipMode : {3, VIDEO_OUT_FLIP_MODE_VSYNC_MULTI}) {
@@ -421,11 +513,177 @@ void testPresentation(bool expectUnavailable) {
     LibcRunShutdown_nid_postfix();
 }
 
+bool vrrActive(int handle) {
+    VideoOutVblankStatus status{};
+    check(sceVideoOutGetVblankStatus(handle, &status) == 0, "vblank status query failed");
+    return status.flags == VIDEO_OUT_VBLANK_STATUS_FLAG_VRR_ACTIVE;
+}
+
+bool pegged(const std::shared_ptr<VideoOutConfig>& cfg) {
+    std::lock_guard lock(cfg->mutex);
+    return cfg->vrrPegged;
+}
+
+void checkModeEvent(const KernelEqueueRef& events, std::uint64_t mode, const char* reason) {
+    KernelEvent event{};
+    int64_t data = -1;
+    check(events->GetTriggeredEvents(&event, 1) == 1 && sceVideoOutGetEventId(&event) == VIDEO_OUT_EVENT_SET_MODE && sceVideoOutGetEventData(&event, &data) == 0 && data == static_cast<int64_t>(mode), reason);
+}
+
+void testDisplay(bool vrr) {
+    const int handle = sceVideoOutOpen(255, 0, 0, nullptr);
+    const auto cfg = VideoOutDriver::Get().GetConfig(handle);
+    KernelEqueue queue = 0;
+    check(sceKernelCreateEqueue(&queue, "VideoOut display") == 0, "event queue creation failed");
+    auto owner = EqueuePin_nid_postfix(queue);
+    check(sceVideoOutAddOutputModeEvent(queue, handle, nullptr) == 0 && sceVideoOutAddVrrActiveStatusEvent(queue, handle, nullptr) == 0, "display event subscription failed");
+    std::array<KernelEvent, 3> registered{};
+    check(owner->GetTriggeredEvents(registered.data(), static_cast<int>(registered.size())) == 2, "the output mode and the VRR status were not both signalled at registration");
+    std::optional<int64_t> initialMode;
+    std::optional<int64_t> initialVrr;
+    for (std::size_t index = 0; index < 2; ++index) {
+        int64_t data = -1;
+        check(sceVideoOutGetEventData(&registered[index], &data) == 0 && sceVideoOutGetEventCount(&registered[index]) == 1, "registration event encoding is wrong");
+        if (sceVideoOutGetEventId(&registered[index]) == VIDEO_OUT_EVENT_SET_MODE) initialMode = data;
+        else if (sceVideoOutGetEventId(&registered[index]) == VIDEO_OUT_EVENT_VRR_ACTIVE_STATUS) initialVrr = data;
+    }
+    check(initialMode == static_cast<int64_t>(VIDEO_OUT_OUTPUT_MODE_DEFAULT) && initialVrr == (vrr ? 1 : 0), "registration did not signal the 59.94 Hz output mode and the display's VRR status");
+    check(sceVideoOutIsOutputSupported(handle, VIDEO_OUT_OUTPUT_MODE_DEFAULT, nullptr, nullptr, 0) == 1 && sceVideoOutIsOutputSupported(handle, VIDEO_OUT_OUTPUT_MODE_119_88HZ, nullptr, nullptr, 0) == 1, "the 120 Hz display does not offer 119.88 Hz");
+    const uint64_t flags = vrr ? VIDEO_OUT_OUTPUT_STATUS_FLAG_VRR_CAPABLE : 0;
+    VideoOutOutputStatus output{};
+    check(sceVideoOutGetOutputStatus(handle, &output) == 0 && output.refreshRate == VIDEO_OUT_REFRESH_RATE_59_94HZ && output.flags == flags, "the 120 Hz display did not start at 59.94 Hz with the VRR capability of its profile");
+    check(vrrActive(handle) == vrr, "the VRR active status does not match the display profile");
+    check(sceVideoOutConfigureOutput(handle, VIDEO_OUT_OUTPUT_MODE_119_88HZ, nullptr, nullptr, 0) == 0, "119.88 Hz output was refused");
+    checkModeEvent(owner, VIDEO_OUT_OUTPUT_MODE_119_88HZ, "switching to 119.88 Hz did not signal SET_MODE with the new mode");
+    KernelEvent event{};
+    check(sceVideoOutConfigureOutput(handle, VIDEO_OUT_OUTPUT_MODE_119_88HZ, nullptr, nullptr, 0) == 0 && owner->GetTriggeredEvents(&event, 1) == 0, "configuring the current output mode again signalled SET_MODE");
+    check(sceVideoOutGetOutputStatus(handle, &output) == 0 && output.refreshRate == VIDEO_OUT_REFRESH_RATE_119_88HZ && output.flags == flags, "the 119.88 Hz output status is wrong");
+    checkVblankRate(handle, cfg, 120000.0 / 1001.0, "the vblank count did not advance at 119.88 Hz after ConfigureOutput");
+    check(!pegged(cfg), "a new port started pegged");
+    check(sceVideoOutVrrPegToFixedRate(handle, 0, 0) == 0 && pegged(cfg), "VrrPegToFixedRate did not peg the port");
+    check(sceVideoOutVrrUnpegFromFixedRate(handle) == 0 && !pegged(cfg), "VrrUnpegFromFixedRate did not unpeg the port");
+    check(sceVideoOutConfigureOutput(handle, VIDEO_OUT_OUTPUT_MODE_DEFAULT, nullptr, nullptr, 0) == 0, "59.94 Hz output was refused");
+    checkModeEvent(owner, VIDEO_OUT_OUTPUT_MODE_DEFAULT, "switching back to 59.94 Hz did not signal SET_MODE with the new mode");
+    checkVblankRate(handle, cfg, 60000.0 / 1001.0, "the vblank count did not return to 59.94 Hz");
+    check(vrrActive(handle) == vrr && owner->GetTriggeredEvents(&event, 1) == 0, "the VRR status changed or was signalled again after registration");
+    sceVideoOutClose(handle);
+    check(sceKernelDeleteEqueue(queue) == 0, "event queue deletion failed");
+    LibcRunShutdown_nid_postfix();
+}
+
+std::uint64_t completedFlips(const std::shared_ptr<VideoOutConfig>& cfg) {
+    std::lock_guard lock(cfg->mutex);
+    return cfg->flipStatus.count;
+}
+
+void waitForFlip(const std::shared_ptr<VideoOutConfig>& cfg, std::uint64_t count, std::chrono::seconds timeout, const char* reason) {
+    std::unique_lock lock(cfg->mutex);
+    check(cfg->vblankCond.wait_for(lock, timeout, [&] { return cfg->failure != nullptr || cfg->flipStatus.count >= count; }), reason);
+    if (cfg->failure) std::rethrow_exception(cfg->failure);
+}
+
+void submitHeldFlip(const std::atomic<std::uint32_t>& label, std::uint32_t release, int handle, int64_t argument) {
+    const auto address = reinterpret_cast<std::uint64_t>(&label);
+    const auto flipArgument = static_cast<std::uint64_t>(argument);
+    std::array<std::uint32_t, 13> words{0xc0053c00u, 0x13u, static_cast<std::uint32_t>(address), static_cast<std::uint32_t>(address >> 32u), release, 0xffffffffu, 0x10u, AgcDriver::FlipPacketHeader, static_cast<std::uint32_t>(handle), static_cast<std::uint32_t>(VIDEO_OUT_BUFFER_INDEX_BLANK), static_cast<std::uint32_t>(VIDEO_OUT_FLIP_MODE_VSYNC), static_cast<std::uint32_t>(flipArgument), static_cast<std::uint32_t>(flipArgument >> 32u)};
+    Packet packet{words.data(), static_cast<std::uint32_t>(words.size()), 0, {}};
+    check(sceAgcDriverSubmitDcb(&packet) == 0, "held flip submission failed");
+}
+
+void checkReserved(const std::shared_ptr<VideoOutConfig>& cfg) {
+    std::lock_guard lock(cfg->mutex);
+    check(cfg->flipStatus.flipPendingNum == 1, "the held flip was not reserved when it was submitted");
+}
+
+void testVrrFlips() {
+    static std::atomic<std::uint32_t> label{0};
+    const int handle = sceVideoOutOpen(255, 0, 0, nullptr);
+    const auto cfg = VideoOutDriver::Get().GetConfig(handle);
+    check(sceVideoOutConfigureOutput(handle, VIDEO_OUT_OUTPUT_MODE_119_88HZ, nullptr, nullptr, 0) == 0 && sceVideoOutSetFlipRate(handle, 2) == 0, "the VRR display did not switch to 119.88 Hz at flip rate 2");
+    const auto period = VblankPeriod(VIDEO_OUT_OUTPUT_MODE_119_88HZ);
+    const auto flip = [&](int64_t argument, const char* reason) {
+        const auto target = completedFlips(cfg) + 1;
+        sceVideoOutSubmitFlip(handle, VIDEO_OUT_BUFFER_INDEX_BLANK, VIDEO_OUT_FLIP_MODE_VSYNC, argument);
+        waitForFlip(cfg, target, std::chrono::seconds(15), reason);
+    };
+    flip(1, "the first flip did not complete");
+    std::chrono::steady_clock::time_point previousLatch;
+    std::uint64_t unreachable = 0;
+    {
+        std::lock_guard lock(cfg->mutex);
+        previousLatch = std::chrono::steady_clock::now();
+        cfg->lastFlipLatch = previousLatch;
+        unreachable = cfg->vblankStatus.count + 1000000;
+        cfg->lastFlipVblank = unreachable;
+    }
+    flip(2, "an unpegged VRR flip waited for the vblank grid");
+    {
+        std::lock_guard lock(cfg->mutex);
+        check(cfg->lastFlipVblank < unreachable, "an unpegged VRR flip waited for the vblank grid");
+        check(cfg->lastFlipLatch >= previousLatch + period * 3, "an unpegged VRR flip at flip rate 2 was shown sooner than three 119.88 Hz periods after the previous flip");
+    }
+    check(sceVideoOutVrrPegToFixedRate(handle, 0, 0) == 0, "VRR peg failed");
+    std::uint64_t gridStart = 0;
+    {
+        std::lock_guard lock(cfg->mutex);
+        gridStart = cfg->vblankStatus.count;
+        cfg->lastFlipVblank = gridStart;
+        cfg->lastFlipLatch = std::chrono::steady_clock::now() + std::chrono::hours(1);
+    }
+    flip(3, "a pegged VRR flip did not follow the vblank grid");
+    {
+        std::lock_guard lock(cfg->mutex);
+        check(cfg->lastFlipVblank >= gridStart + 3, "a pegged VRR flip at flip rate 2 latched sooner than three vblanks after the previous flip");
+    }
+    check(sceVideoOutVrrUnpegFromFixedRate(handle) == 0, "VRR unpeg failed");
+    auto target = completedFlips(cfg) + 1;
+    submitHeldFlip(label, 1, handle, 4);
+    checkReserved(cfg);
+    check(sceVideoOutVrrPegToFixedRate(handle, 0, 0) == 0, "VRR peg failed");
+    {
+        std::lock_guard lock(cfg->mutex);
+        unreachable = cfg->vblankStatus.count + 1000000;
+        cfg->lastFlipVblank = unreachable;
+    }
+    label.store(1);
+    waitForFlip(cfg, target, std::chrono::seconds(5), "a flip reserved while unpegged followed a peg made after its reservation");
+    target = completedFlips(cfg) + 1;
+    submitHeldFlip(label, 2, handle, 5);
+    checkReserved(cfg);
+    check(sceVideoOutVrrUnpegFromFixedRate(handle) == 0, "VRR unpeg failed");
+    {
+        std::lock_guard lock(cfg->mutex);
+        gridStart = cfg->vblankStatus.count;
+        cfg->lastFlipVblank = gridStart;
+        cfg->lastFlipLatch = std::chrono::steady_clock::now() + std::chrono::hours(1);
+    }
+    label.store(2);
+    waitForFlip(cfg, target, std::chrono::seconds(5), "a flip reserved while pegged followed an unpeg made after its reservation");
+    {
+        std::lock_guard lock(cfg->mutex);
+        check(cfg->lastFlipVblank >= gridStart + 3, "a flip reserved while pegged left the vblank grid");
+    }
+    sceVideoOutClose(handle);
+    LibcRunShutdown_nid_postfix();
+}
+
+const char* displayProfileFor(int argc, char** argv) {
+    if (argc != 2) return nullptr;
+    const std::string command = argv[1];
+    if (command == "display" || command == "vrr") return "vrr";
+    if (command == "display120") return "120hz";
+    return nullptr;
+}
+
 int run(int argc, char** argv) {
     try {
+        usePacingEnvironment(displayProfileFor(argc, argv));
         if (argc == 2 && std::string(argv[1]) == "decode") testDecode();
         else if (argc == 2 && std::string(argv[1]) == "pacing") testPacing();
         else if (argc == 2 && std::string(argv[1]) == "controls") testControls();
+        else if (argc == 2 && std::string(argv[1]) == "display") testDisplay(true);
+        else if (argc == 2 && std::string(argv[1]) == "display120") testDisplay(false);
+        else if (argc == 2 && std::string(argv[1]) == "vrr") testVrrFlips();
         else if (argc == 2 && std::string(argv[1]) == "present") testPresentation(false);
         else if (argc == 2 && std::string(argv[1]) == "unavailable") testPresentation(true);
         else testLifetime(argc == 2 && std::string(argv[1]) == "reopen");
