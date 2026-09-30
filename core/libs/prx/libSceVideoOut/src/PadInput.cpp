@@ -9,6 +9,7 @@
 #include "prx/libSceVideoOut/include/DisplayWindow.hpp"
 #include "prx/libScePad/include/PadState.hpp"
 #include "prx/libScePad/include/PadInputTypes.hpp"
+#include <cstdio>
 #include <cstdlib>
 #include <vector>
 #include <tuple>
@@ -18,18 +19,25 @@ namespace {
 
 struct ScriptedInput { std::uint32_t buttons = 0; std::array<std::uint8_t, 4> sticks{128, 128, 128, 128}; };
 
+struct ScriptedPress { double at; double duration; std::uint32_t button; int axis; std::uint8_t axisValue; };
+
+bool ParseScriptedPress(const std::string& name, double at, double duration, std::vector<ScriptedPress>& result) {
+    static const std::vector<std::pair<std::string, Pad::PadButton>> names = {
+        {"cross", Pad::PadButton::Cross}, {"circle", Pad::PadButton::Circle}, {"triangle", Pad::PadButton::Triangle}, {"square", Pad::PadButton::Square},
+        {"options", Pad::PadButton::Options}, {"up", Pad::PadButton::Up}, {"down", Pad::PadButton::Down},
+        {"left", Pad::PadButton::Left}, {"right", Pad::PadButton::Right}, {"l1", Pad::PadButton::L1}, {"r1", Pad::PadButton::R1}};
+    static const std::vector<std::tuple<std::string, int, std::uint8_t>> axes = {
+        {"lsleft", 0, 0}, {"lsright", 0, 255}, {"lsup", 1, 0}, {"lsdown", 1, 255}, {"rsleft", 2, 0}, {"rsright", 2, 255}, {"rsup", 3, 0}, {"rsdown", 3, 255}};
+    for (const auto& [candidate, button] : names) if (candidate == name) { result.push_back({at, duration, static_cast<std::uint32_t>(button), -1, 128}); return true; }
+    for (const auto& [candidate, axis, value] : axes) if (candidate == name) { result.push_back({at, duration, 0, axis, value}); return true; }
+    return false;
+}
+
 ScriptedInput ScriptedControls(std::chrono::steady_clock::time_point now) {
-    struct Press { double at; double duration; std::uint32_t button; int axis; std::uint8_t axisValue; };
-    static const std::vector<Press> presses = [] {
-        std::vector<Press> result;
+    static std::vector<ScriptedPress> presses = [] {
+        std::vector<ScriptedPress> result;
         const char* text = std::getenv("ANYPS5_DEBUG_PRESS");
         if (text == nullptr) return result;
-        const std::vector<std::pair<std::string, Pad::PadButton>> names = {
-            {"cross", Pad::PadButton::Cross}, {"circle", Pad::PadButton::Circle}, {"triangle", Pad::PadButton::Triangle}, {"square", Pad::PadButton::Square},
-            {"options", Pad::PadButton::Options}, {"up", Pad::PadButton::Up}, {"down", Pad::PadButton::Down},
-            {"left", Pad::PadButton::Left}, {"right", Pad::PadButton::Right}, {"l1", Pad::PadButton::L1}, {"r1", Pad::PadButton::R1}};
-        const std::vector<std::tuple<std::string, int, std::uint8_t>> axes = {
-            {"lsleft", 0, 0}, {"lsright", 0, 255}, {"lsup", 1, 0}, {"lsdown", 1, 255}, {"rsleft", 2, 0}, {"rsright", 2, 255}, {"rsup", 3, 0}, {"rsdown", 3, 255}};
         std::string entry;
         for (const char* cursor = text;; ++cursor) {
             if (*cursor != ',' && *cursor != '\0') { entry += *cursor; continue; }
@@ -38,18 +46,48 @@ ScriptedInput ScriptedControls(std::chrono::steady_clock::time_point now) {
                 auto name = entry.substr(colon + 1);
                 double duration = 0.3;
                 if (const auto second = name.find(':'); second != std::string::npos) { duration = std::atof(name.c_str() + second + 1); name = name.substr(0, second); }
-                for (const auto& [candidate, button] : names) if (candidate == name) result.push_back({std::atof(entry.c_str()), duration, static_cast<std::uint32_t>(button), -1, 128});
-                for (const auto& [candidate, axis, value] : axes) if (candidate == name) result.push_back({std::atof(entry.c_str()), duration, 0, axis, value});
+                ParseScriptedPress(name, std::atof(entry.c_str()), duration, result);
             }
             entry.clear();
             if (*cursor == '\0') break;
         }
         return result;
     }();
+    static const char* inputFile = std::getenv("ANYPS5_DEBUG_INPUT_FILE");
     ScriptedInput input;
-    if (presses.empty()) return input;
+    if (presses.empty() && inputFile == nullptr) return input;
     static const auto start = now;
     const double elapsed = std::chrono::duration<double>(now - start).count();
+    if (inputFile != nullptr) {
+        static std::size_t consumed = 0;
+        static double lastPoll = -1.0;
+        static double nextFree = 0.0;
+        if (elapsed - lastPoll >= 0.1) {
+            lastPoll = elapsed;
+            if (std::FILE* file = std::fopen(inputFile, "rb")) {
+                std::string content;
+                char buffer[512];
+                for (std::size_t count; (count = std::fread(buffer, 1, sizeof(buffer), file)) != 0;) content.append(buffer, count);
+                std::fclose(file);
+                const auto lineEnd = content.rfind('\n');
+                if (lineEnd != std::string::npos && lineEnd + 1 > consumed) {
+                    std::string entry;
+                    for (std::size_t at = consumed; at <= lineEnd; ++at) {
+                        const char c = content[at];
+                        if (c != ',' && c != '\n' && c != ' ') { entry += c; continue; }
+                        if (entry.empty()) continue;
+                        double duration = 0.5;
+                        if (const auto colon = entry.find(':'); colon != std::string::npos) { duration = std::atof(entry.c_str() + colon + 1); entry.resize(colon); }
+                        const double begin = std::max(elapsed + 0.05, nextFree);
+                        if (entry == "wait") nextFree = begin + duration;
+                        else if (ParseScriptedPress(entry, begin, duration, presses)) nextFree = begin + duration + 0.6;
+                        entry.clear();
+                    }
+                    consumed = lineEnd + 1;
+                }
+            }
+        }
+    }
     for (const auto& press : presses) {
         if (elapsed < press.at || elapsed >= press.at + press.duration) continue;
         if (press.axis < 0) input.buttons |= press.button;
