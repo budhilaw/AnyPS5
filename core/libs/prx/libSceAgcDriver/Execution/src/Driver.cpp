@@ -6,6 +6,7 @@
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/ProgramFailures.hpp"
+#include "prx/libSceAgcDriver/Execution/include/PublishedPointer.hpp"
 #include "prx/libSceAgcDriver/Execution/include/ShaderMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/ShaderWarmup.hpp"
 #include "prx/libSceAgcDriver/Execution/include/WorkerWatchdog.hpp"
@@ -81,12 +82,14 @@ struct ShaderSnapshot {
     }
 };
 
+using RegisteredShaders = std::map<std::uint64_t, std::shared_ptr<const ShaderSnapshot>>;
+
 struct Submission {
     std::uint64_t serial;
     std::uint32_t queue;
     std::vector<std::uint32_t> commands;
     std::deque<std::vector<std::uint32_t>> registerLists;
-    std::map<std::uint64_t, std::shared_ptr<const ShaderSnapshot>> shaders;
+    std::shared_ptr<const RegisteredShaders> shaders;
     std::map<std::size_t, std::shared_ptr<IFlipRequest>> flips;
     std::map<std::size_t, std::shared_ptr<IRenderingWait>> renderingWaits;
     bool suspend = false;
@@ -310,6 +313,7 @@ private:
             } catch (...) {
                 ReportFailure(std::current_exception());
             }
+            run = nullptr;
             usage.Sample();
             lock.lock();
             graphicsJobs.pop_front();
@@ -408,12 +412,11 @@ private:
         return self.graphicsDevice == nullptr || (self.graphicsWriter(address, bytes) == 0 && !self.graphicsDevice->NeedsResolve(address, bytes));
     }
     std::shared_ptr<VulkanDevice> graphicsDevice;
-    std::mutex deviceMutex;
+    PublishedPointer<VulkanDevice>::Cache workerDeviceCache;
 
-    std::shared_ptr<VulkanDevice> currentDevice(bool create = false) {
-        std::lock_guard lock(deviceMutex);
-        if (device == nullptr && create) device = std::make_shared<VulkanDevice>();
-        return device;
+    const std::shared_ptr<VulkanDevice>& workerDevice(bool create = false) {
+        if (create) return device.GetOrCreate(workerDeviceCache, [] { return std::make_shared<VulkanDevice>(); });
+        return device.Get(workerDeviceCache);
     }
 
 public:
@@ -441,14 +444,15 @@ public:
             appendCommands(submission.commands, submission.registerLists, descriptor.addr, descriptor.dw_num, 0);
         }
         submission.copied = FrameTiming::Clock::now();
-        validate(submission.commands, queue);
+        std::vector<std::size_t> presentationPackets;
+        validate(submission.commands, queue, presentationPackets);
         submission.validated = FrameTiming::Clock::now();
         {
             std::lock_guard lock(mutex);
             rethrowFailure();
             require(!stopping, "submission during shutdown");
             require(accepted != std::numeric_limits<std::uint64_t>::max(), "submission serial overflow");
-            for (std::size_t cursor = 0; cursor < submission.commands.size();) {
+            for (const auto cursor : presentationPackets) {
                 const auto* words = submission.commands.data() + cursor;
                 if (words[0] == RenderingWaitPacketHeader) {
                     const auto output = outputs.find(words[1]);
@@ -465,9 +469,12 @@ public:
                     require(request != nullptr, "video output returned a null flip reservation");
                     submission.flips.emplace(cursor, std::move(request));
                 }
-                cursor += static_cast<std::size_t>((words[0] >> 16u) & 0x3fffu) + 2;
             }
-            submission.shaders = shaders;
+            if (shadersChanged) {
+                publishedShaders = std::make_shared<const RegisteredShaders>(shaders);
+                shadersChanged = false;
+            }
+            submission.shaders = publishedShaders;
             submission.serial = accepted + 1;
             submission.enqueued = FrameTiming::Clock::now();
             pending.push_back(std::move(submission));
@@ -517,6 +524,7 @@ public:
     }
 
     void CheckFailure() {
+        if (!failed.load(std::memory_order_acquire)) return;
         std::lock_guard lock(mutex);
         rethrowFailure();
     }
@@ -528,6 +536,7 @@ public:
         {
             std::lock_guard lock(mutex);
             if (!failure) failure = error;
+            failed.store(true, std::memory_order_release);
             for (const auto& [handle, output] : outputs) output->Fail(failure);
             for (const auto& item : pending) {
                 for (const auto& [offset, flip] : item.flips) flip->Fail(failure);
@@ -547,17 +556,16 @@ public:
         timing.Mark("validate");
         try {
             {
-                if (const auto existing = currentDevice(); existing == nullptr || existing->Window() == nullptr) drainGraphics("drain present");
+                if (const auto existing = device.Get(); existing == nullptr || existing->Window() == nullptr) drainGraphics("drain present");
                 std::unique_lock lock(gpuMutex);
                 timing.Mark("gpu_mutex_wait");
-                if (device == nullptr || device->Window() == nullptr) {
-                    if (device) device->WaitIdle();
-                    auto replacement = std::make_shared<VulkanDevice>(&window);
-                    std::lock_guard deviceLock(deviceMutex);
-                    device = std::move(replacement);
+                presenting = device.Get();
+                if (presenting == nullptr || presenting->Window() == nullptr) {
+                    if (presenting) presenting->WaitIdle();
+                    presenting = std::make_shared<VulkanDevice>(&window);
+                    device.Publish(presenting);
                 }
-                require(device->Window() == window.context, "presentation window does not match device surface");
-                presenting = device;
+                require(presenting->Window() == window.context, "presentation window does not match device surface");
                 timing.Mark("device_setup");
                 std::uint32_t drawableWidth = 0;
                 std::uint32_t drawableHeight = 0;
@@ -597,8 +605,7 @@ public:
     void ReleaseWindow(void* window) {
         drainGraphics("drain release window");
         std::lock_guard lock(gpuMutex);
-        std::lock_guard deviceLock(deviceMutex);
-        if (device && device->Window() == window) device.reset();
+        if (const auto current = device.Get(); current && current->Window() == window) device.Publish(nullptr);
     }
 
     void RegisterShader(const Shader* shader) {
@@ -619,6 +626,7 @@ public:
         rethrowFailure();
         const auto address = snapshot.codeAddress;
         shaders.insert_or_assign(address, std::make_shared<const ShaderSnapshot>(std::move(snapshot)));
+        shadersChanged = true;
     }
 
 private:
@@ -626,16 +634,19 @@ private:
     std::mutex shutdownMutex;
     std::condition_variable changed;
     std::deque<Submission> pending;
-    std::map<std::uint64_t, std::shared_ptr<const ShaderSnapshot>> shaders;
+    RegisteredShaders shaders;
+    std::shared_ptr<const RegisteredShaders> publishedShaders = std::make_shared<const RegisteredShaders>();
+    bool shadersChanged = false;
     std::map<std::uint32_t, QueueState> queues;
     std::map<std::uint32_t, std::shared_ptr<IVideoOutput>> outputs;
     std::recursive_mutex& gpuMutex = GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix();
-    std::shared_ptr<VulkanDevice> device;
+    PublishedPointer<VulkanDevice> device;
     std::uint64_t accepted = 0;
     std::uint64_t completed = 0;
     std::set<std::uint64_t> inFlight;
     std::uint64_t dequeuedSerial = 0;
     std::exception_ptr failure;
+    std::atomic<bool> failed{false};
     bool stopping = false;
     std::shared_ptr<FrameTiming> frameTiming;
     std::uint64_t frameSerial = 0;
@@ -731,7 +742,7 @@ private:
         }
     }
 
-    static void validate(std::span<const std::uint32_t> commands, std::uint32_t queue) {
+    static void validate(std::span<const std::uint32_t> commands, std::uint32_t queue, std::vector<std::size_t>& presentationPackets) {
         for (std::size_t cursor = 0; cursor < commands.size();) {
             const auto header = commands[cursor];
             require((header & 0xc0000000u) == 0xc0000000u, "unsupported PM4 packet type");
@@ -748,6 +759,7 @@ private:
                 }
                 throw std::runtime_error("AGC driver: " + Pm4::Name(header) + " at DWORD " + std::to_string(cursor) + ": " + error.what() + " (packet" + words + ")");
             }
+            if (header == RenderingWaitPacketHeader || header == FlipPacketHeader) presentationPackets.push_back(cursor);
             cursor += count;
         }
     }
@@ -782,8 +794,8 @@ private:
             return;
         }
         const auto address = (static_cast<std::uint64_t>(readRegister(queue.shader, 0x20c)) << 8u) | (static_cast<std::uint64_t>(readRegister(queue.shader, 0x20d) & 0xffu) << 40u);
-        auto it = submission.shaders.upper_bound(address);
-        require(it != submission.shaders.begin(), "compute program does not belong to a registered shader");
+        auto it = submission.shaders->upper_bound(address);
+        require(it != submission.shaders->begin(), "compute program does not belong to a registered shader");
         --it;
         const auto& snapshot = *it->second;
         require(address - snapshot.codeAddress < snapshot.code.size() * sizeof(std::uint32_t), "compute program is outside registered shader code");
@@ -802,7 +814,7 @@ private:
         }
         const auto compute = Graphics::DecodeComputeStageInfo(queue.shader);
         const std::array<ShaderRecompiler::MemoryRegion, 2> memory{{{snapshot.codeAddress, std::as_bytes(std::span(snapshot.code))}, {snapshot.headerAddress, snapshot.header}}};
-        const auto current = currentDevice(true);
+        const auto current = workerDevice(true);
         graphicsDevice = current;
         const GuestMemory::MemoryAccessScope memoryScope(this, &Driver::resolveForHost, &Driver::quietForHost);
         const auto codeOffset = static_cast<std::size_t>((address - snapshot.codeAddress) / sizeof(std::uint32_t));
@@ -914,10 +926,12 @@ private:
             }
         }
         std::vector<Graphics::GuestMemorySnapshot> snapshots;
-        snapshots.reserve(captured.size());
-        for (const auto& region : captured) snapshots.push_back({region.guestAddress, region.bytes});
+        if (compiled.bdaAbiVersion != 0) {
+            snapshots.reserve(captured.size());
+            for (const auto& region : captured) snapshots.push_back({region.guestAddress, region.bytes});
+        }
         timing.Mark("snapshots");
-        {
+        if (static const bool journalDispatches = std::getenv("ANYPS5_GPU_JOURNAL_DRAWS") != nullptr; journalDispatches) {
             char text[160];
             std::snprintf(text, sizeof(text), "dispatch program 0x%llx groups %ux%ux%u wave%u%s", static_cast<unsigned long long>(address), packet[1], packet[2], packet[3], (packet[4] & 0x8000u) != 0 ? 32u : 64u, journalIndirect ? " (indirect)" : "");
             GpuJournal::Record(text);
@@ -999,8 +1013,8 @@ private:
             return (static_cast<std::uint64_t>(readRegister(queue.shader, base)) << 8u) | (static_cast<std::uint64_t>(high) << 40u);
         };
         const auto prepare = [&](std::uint64_t address, std::uint8_t type, ShaderRecompiler::ShaderStage stage, std::uint32_t rsrc2, std::uint32_t userDataBase) {
-            auto it = submission.shaders.upper_bound(address);
-            require(it != submission.shaders.begin(), "graphics program does not belong to a registered shader");
+            auto it = submission.shaders->upper_bound(address);
+            require(it != submission.shaders->begin(), "graphics program does not belong to a registered shader");
             --it;
             const auto& snapshot = *it->second;
             require(address - snapshot.codeAddress < snapshot.code.size() * sizeof(std::uint32_t), "graphics program is outside registered shader code");
@@ -1050,8 +1064,8 @@ private:
             append(0x0c8, 2, Stage::TessellationEvaluation, 0x08b, 0x08c, Role::Domain);
         } else if (graphics.stages.path == Graphics::ShaderPath::Geometry) {
             const auto frontAddress = programAddress(0xc8);
-            auto snapshot = submission.shaders.upper_bound(frontAddress);
-            require(snapshot != submission.shaders.begin(), "geometry front program is not registered");
+            auto snapshot = submission.shaders->upper_bound(frontAddress);
+            require(snapshot != submission.shaders->begin(), "geometry front program is not registered");
             --snapshot;
             const auto type = snapshot->second->type;
             require(type == 2 || type == 4, "invalid geometry front binary type");
@@ -1112,7 +1126,7 @@ private:
             GpuJournal::Record(text);
         }
         timing.Mark("prepare");
-        const auto current = currentDevice(true);
+        const auto current = workerDevice(true);
         timing.Mark("device_setup");
         graphicsDevice = current;
         const GuestMemory::MemoryAccessScope memoryScope(this, &Driver::resolveForHost, &Driver::quietForHost);
@@ -1213,8 +1227,10 @@ private:
             throw ProgramFailure("graphics", programs.back().binary, error, std::move(key), 0.0);
         }
         std::vector<Graphics::GuestMemorySnapshot> snapshots;
-        snapshots.reserve(memory.size());
-        for (const auto& region : memory) snapshots.push_back({region.guestAddress, region.bytes});
+        if (std::any_of(results.begin(), results.end(), [](const auto& result) { return result.bdaAbiVersion != 0; })) {
+            snapshots.reserve(memory.size());
+            for (const auto& region : memory) snapshots.push_back({region.guestAddress, region.bytes});
+        }
         timing.Mark("post_compile_prepare");
         GraphicsJob job;
         if (graphics.hasColorTarget) {
@@ -1326,7 +1342,7 @@ private:
             drainGraphics("drain suspend");
             std::lock_guard gpuLock(gpuMutex);
             timing.Mark("gpu_mutex_wait");
-            if (device != nullptr) device->WaitIdle();
+            if (const auto& current = workerDevice(); current != nullptr) current->WaitIdle();
             timing.Mark("device_idle_wait");
             return Step::Finished;
         }
@@ -1351,7 +1367,7 @@ private:
                 std::uint64_t writeAddress = 0, writeValue = 0;
                 std::uint32_t writeBytes = 0;
                 bool writeKnown = false;
-                const auto current = currentDevice();
+                const auto& current = workerDevice();
                 const auto pendingWork = [&] {
                     if (graphicsPending()) return true;
                     const auto stage = watchdog.Stage("pending_work");
@@ -1509,15 +1525,16 @@ private:
                     watchdog.Stage("gds_transfer");
                     drainGraphics("drain gds transfer");
                     std::lock_guard gpuLock(gpuMutex);
-                    require(device != nullptr, "GDS transfer without a device");
-                    const GuestMemory::MemoryAccessScope memoryScope(device.get(), [](void* context, std::uint64_t address, std::size_t bytes, bool writable) {
+                    const auto& transferDevice = workerDevice();
+                    require(transferDevice != nullptr, "GDS transfer without a device");
+                    const GuestMemory::MemoryAccessScope memoryScope(transferDevice.get(), [](void* context, std::uint64_t address, std::size_t bytes, bool writable) {
                         if (context) static_cast<VulkanDevice*>(context)->ResolveMemory(address, bytes, writable);
                     });
-                    device->GdsTransfer(packet);
+                    transferDevice->GdsTransfer(packet);
                     timing.Mark("gds_transfer");
                 } else if (opcode != 0x42 && opcode != 0x58 && (opcode != 0x46 || Pm4::EventWritesMemory(packet))) {
                     watchdog.Stage("pm4_execute");
-                    graphicsDevice = currentDevice();
+                    graphicsDevice = current;
                     const GuestMemory::MemoryAccessScope memoryScope(this, &Driver::resolveForHost, &Driver::quietForHost);
                     Pm4::Execute(packet, queue);
                     timing.Mark("pm4_execute");
@@ -1531,7 +1548,7 @@ private:
                 frameTiming->SetFlip(submission.serial, cursor, submission.received, FrameTiming::Clock::now());
                 const auto completedFrame = std::exchange(frameTiming, nullptr);
                 auto flip = submission.flips.at(cursor);
-                if (const auto current = currentDevice(); current != nullptr && AsyncFlips()) {
+                if (const auto& current = workerDevice(); current != nullptr && AsyncFlips()) {
                     postGraphics({[current, flip, completedFrame] {
                         current->FlushDraws();
                         flip->GpuReady(completedFrame);
@@ -1608,7 +1625,7 @@ private:
                 }
                 {
                     std::unique_lock gpuLock(gpuMutex, std::try_to_lock);
-                    const auto current = currentDevice();
+                    const auto& current = workerDevice();
                     if (current == nullptr) gpuPending = false;
                     else if (gpuLock.owns_lock()) {
                         current->Collect();
@@ -1625,7 +1642,7 @@ private:
                     const auto result = step(execution);
                     if (result == Step::Finished) {
                         watchdog.Progress();
-                        if (const auto current = currentDevice(); current != nullptr && graphicsPosted != 0) postGraphics({[current] { current->FlushDraws(); }, {}, false});
+                        if (const auto& current = workerDevice(); current != nullptr && graphicsPosted != 0) postGraphics({[current] { current->FlushDraws(); }, {}, false});
                         Submission finished = std::move(execution.submission);
                         fifo.pop_front();
                         complete(finished);
@@ -1649,8 +1666,8 @@ private:
             }
             drainGraphics("drain shutdown");
             std::lock_guard gpuLock(gpuMutex);
-            std::lock_guard deviceLock(deviceMutex);
-            device.reset();
+            device.Publish(nullptr);
+            workerDeviceCache = {};
             graphicsDevice.reset();
         } catch (...) {
             watchdog.Idle();
@@ -1660,8 +1677,8 @@ private:
             {
                 drainGraphics("drain shutdown");
                 std::lock_guard gpuLock(gpuMutex);
-                std::lock_guard deviceLock(deviceMutex);
-                device.reset();
+                device.Publish(nullptr);
+                workerDeviceCache = {};
                 graphicsDevice.reset();
             }
         }
