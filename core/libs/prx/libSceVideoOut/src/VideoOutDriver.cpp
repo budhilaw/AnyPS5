@@ -495,7 +495,7 @@ void VideoOutDriver::presentLoop(std::stop_token token) {
             if (current) {
                 require(current->timing != nullptr, "missing presentation timing");
                 const auto dequeued = AgcDriver::FrameTiming::Clock::now();
-                current->timing->Add(current->timing->Get("VideoOut", "queue"), dequeued - current->queuedAt);
+                if (AgcDriver::FrameTiming::Enabled()) current->timing->Add(current->timing->Get("VideoOut", "queue"), dequeued - current->queuedAt);
                 processFlip(*current);
                 const auto finished = AgcDriver::FrameTiming::Clock::now();
                 AgcDriver::FrameTiming::Clock::duration interval{};
@@ -505,7 +505,7 @@ void VideoOutDriver::presentLoop(std::stop_token token) {
                     if (previous != AgcDriver::FrameTiming::Clock::time_point{}) interval = finished - previous;
                     current->cfg->lastTimingFlip = finished;
                 }
-                current->timing->Print(current->outputHandle, current->index, current->flipArg, finished, interval);
+                if (AgcDriver::FrameTiming::Enabled()) current->timing->Print(current->outputHandle, current->index, current->flipArg, finished, interval);
             }
             current.reset();
         }

@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <iomanip>
 #include <locale>
 #include <map>
@@ -60,21 +61,34 @@ public:
 
     explicit FrameTiming(std::uint64_t id) : id(id) {}
 
+    static bool Enabled() {
+        static const bool enabled = std::getenv("ANYPS5_TRACE_TIMING") != nullptr;
+        return enabled;
+    }
+
     Metric* Get(const char* scope, const char* stage) {
-        struct Cached { std::uint64_t frame; const FrameTiming* owner; const char* scope; const char* stage; Metric* metric; };
-        thread_local std::array<Cached, 256> cache{};
-        const auto slot = (std::hash<const void*>{}(scope) * 31u ^ std::hash<const void*>{}(stage)) % cache.size();
-        auto& cached = cache[slot];
-        if (cached.owner == this && cached.frame == id && cached.scope == scope && cached.stage == stage) return cached.metric;
-        std::lock_guard lock(mutex);
+        struct Cache {
+            const FrameTiming* owner = nullptr;
+            std::uint64_t frame = 0;
+            std::unordered_map<PointerKey, Metric*, PointerKeyHash> metrics;
+        };
+        thread_local Cache* cache = nullptr;
+        if (cache == nullptr) cache = new Cache;
+        if (cache->owner != this || cache->frame != id) {
+            cache->owner = this;
+            cache->frame = id;
+            cache->metrics.clear();
+        }
         const PointerKey key{scope, stage};
+        if (const auto cached = cache->metrics.find(key); cached != cache->metrics.end()) return cached->second;
+        std::lock_guard lock(mutex);
         Metric* metric = nullptr;
         if (const auto it = byPointer.find(key); it != byPointer.end()) metric = it->second;
         else {
             metric = &metrics[{scope, stage}];
             byPointer.emplace(key, metric);
         }
-        cached = {id, this, scope, stage, metric};
+        cache->metrics.emplace(key, metric);
         return metric;
     }
 
@@ -99,7 +113,7 @@ public:
         }
         start = std::min(start, received);
         lastSerial = serial;
-        if (firstSegment) {
+        if (firstSegment && Enabled()) {
             Add(Get("Submission", "accept"), enqueued - received);
             Add(Get("Submission", "queue"), dequeued - enqueued);
         }
@@ -196,7 +210,7 @@ private:
 class PerformanceContext {
 public:
     explicit PerformanceContext(FrameTiming* frame) : previous(current) {
-        current = frame;
+        current = FrameTiming::Enabled() ? frame : nullptr;
     }
 
     PerformanceContext(const PerformanceContext&) = delete;
@@ -217,7 +231,7 @@ private:
 
 class PerformanceTimer {
 public:
-    explicit PerformanceTimer(const char* scope) : frame(PerformanceContext::Current()), scope(scope) {
+    explicit PerformanceTimer(const char* scope) : frame(FrameTiming::Enabled() ? PerformanceContext::Current() : nullptr), scope(scope) {
         if (frame == nullptr) return;
         total = frame->Get(scope, "total");
         start = Clock::now();

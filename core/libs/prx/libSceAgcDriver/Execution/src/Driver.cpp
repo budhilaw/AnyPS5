@@ -1114,7 +1114,7 @@ private:
         }
         const auto dequeued = firstSegment ? submission.dequeued : FrameTiming::Clock::now();
         frameTiming->IncludeSubmission(submission.serial, submission.received, submission.enqueued, dequeued, firstSegment);
-        if (firstSegment) {
+        if (firstSegment && FrameTiming::Enabled()) {
             frameTiming->Add(frameTiming->Get("Submission", "copy"), submission.copied - submission.received, submission.commands.size() * sizeof(std::uint32_t));
             frameTiming->Add(frameTiming->Get("Submission", "validate"), submission.validated - submission.copied);
             frameTiming->Add(frameTiming->Get("Submission", "reserve_enqueue"), submission.enqueued - submission.validated);
