@@ -137,7 +137,7 @@ static unsigned __stdcall StartNativeThread(void* opaque) {
                 throw std::runtime_error("Guest thread stack is not fully committed");
             cursor = reinterpret_cast<std::uintptr_t>(memory.BaseAddress) + memory.RegionSize;
         }
-        self->threadId = std::this_thread::get_id();
+        self->threadId = GetCurrentThreadId();
         currentThread = self;
         args->initialized.set_value();
     } catch (...) {
@@ -302,15 +302,22 @@ extern "C" Pthread KernelCurrentThreadRecord() {
 }
 
 Pthread APS5_VABI scePthreadSelf() {
-#ifndef _WIN32
     if (currentThread == nullptr) {
         auto* adopted = new PthreadPrivate();
         adopted->_detached = true;
+#ifdef _WIN32
+        ULONG_PTR low = 0;
+        ULONG_PTR high = 0;
+        GetCurrentThreadStackLimits(&low, &high);
+        adopted->stackAddress = reinterpret_cast<void*>(low);
+        adopted->stackSize = static_cast<std::size_t>(high - low);
+        adopted->threadId = GetCurrentThreadId();
+#else
         adopted->native = pthread_self();
         RecordHostStack(adopted);
+#endif
         currentThread = adopted;
     }
-#endif
     return currentThread;
 }
 

@@ -57,10 +57,11 @@ using GuestHandler = void (APS5_VABI *)(int, void*);
 
 std::mutex handlerMutex;
 std::array<std::atomic<GuestHandler>, SignalCount> handlers{};
+
+#if !defined(_WIN32) && defined(__x86_64__)
 std::once_flag hostHandlerInstalled;
 constexpr int HostDeliverySignal = SIGUSR1;
 
-#if !defined(_WIN32) && defined(__x86_64__)
 GuestUcontext fromHost(const ucontext_t* host) {
     GuestUcontext context{};
     auto& m = context.mcontext;

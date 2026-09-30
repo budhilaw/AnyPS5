@@ -63,7 +63,6 @@ struct PthreadAttrPrivate {
 struct PthreadPrivate {
 #ifdef _WIN32
     void* nativeHandle = nullptr;
-    std::thread::id threadId;
     std::atomic<unsigned> references{2};
 #else
     pthread_t native{};
