@@ -18,7 +18,7 @@
 #if !defined(_WIN32)
 #include <sys/mman.h>
 #else
-#include <windows.h>
+#include "prx/libc/include/specifics/windows/NativeProtection.hpp"
 
 static constexpr int PROT_NONE = 0;
 static constexpr int PROT_READ = 1;
@@ -35,8 +35,7 @@ static DWORD WinProtFromPosix(int prot) {
 }
 
 static int mprotect(void* addr, size_t len, int prot) {
-    DWORD old;
-    if (!VirtualProtect(addr, len, WinProtFromPosix(prot), &old))
+    if (!ProtectNativeRange(reinterpret_cast<std::uintptr_t>(addr), len, WinProtFromPosix(prot)))
         throw std::system_error(static_cast<int>(GetLastError()), std::system_category(), "VirtualProtect failed");
     return 0;
 }

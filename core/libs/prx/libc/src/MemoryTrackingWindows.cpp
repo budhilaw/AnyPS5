@@ -1,4 +1,5 @@
 #include "prx/libc/include/MemoryTrackingPlatform.hpp"
+#include "prx/libc/include/specifics/windows/NativeProtection.hpp"
 #include <algorithm>
 #include <exception>
 #include <stdexcept>
@@ -25,8 +26,7 @@ LONG CALLBACK handleException(EXCEPTION_POINTERS* exception) {
 }
 
 void protect(std::uint64_t address, std::size_t bytes, DWORD protection) {
-    DWORD previous = 0;
-    if (!VirtualProtect(reinterpret_cast<void*>(address), bytes, protection, &previous)) throw std::system_error(static_cast<int>(GetLastError()), std::system_category(), "guest memory tracking VirtualProtect failed");
+    if (!ProtectNativeRange(address, bytes, protection)) throw std::system_error(static_cast<int>(GetLastError()), std::system_category(), "guest memory tracking VirtualProtect failed");
 }
 
 }
