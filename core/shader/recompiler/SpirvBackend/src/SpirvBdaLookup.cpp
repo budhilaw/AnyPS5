@@ -24,9 +24,10 @@ void DefineGetBdaPointer(SpirvEmitterState& state) {
     state.module.AddName(state.bdaCacheBegin, "bda_cache_begin");
     state.module.AddName(state.bdaCacheEnd, "bda_cache_end");
     state.module.AddName(state.bdaCacheBase, "bda_cache_base");
-    state.bdaPointerFunction = state.module.AllocateId();
-    state.module.AddName(state.bdaPointerFunction, "get_bda_pointer");
-    state.module.AddFunction(spv::OpFunction, u64, state.bdaPointerFunction, spv::FunctionControlMaskNone, state.module.Type(spv::OpTypeFunction, u64, u64, u32, u32));
+    const auto functionType = state.module.Type(spv::OpTypeFunction, u64, u64, u32, u32);
+    const auto missFunction = state.module.AllocateId();
+    state.module.AddName(missFunction, "get_bda_pointer_miss");
+    state.module.AddFunction(spv::OpFunction, u64, missFunction, spv::FunctionControlDontInlineMask, functionType);
     const auto address = state.module.AllocateId();
     const auto bytes = state.module.AllocateId();
     const auto instruction = state.module.AllocateId();
@@ -39,25 +40,6 @@ void DefineGetBdaPointer(SpirvEmitterState& state) {
     const auto pointer = TypePointer(state, spv::StorageClassFunction, u32);
     state.module.AddFunction(spv::OpVariable, pointer, low, spv::StorageClassFunction);
     state.module.AddFunction(spv::OpVariable, pointer, high, spv::StorageClassFunction);
-    {
-        const auto loadCache = [&](std::uint32_t variable) {
-            const auto value = state.module.AllocateId();
-            state.module.AddFunction(spv::OpLoad, u64, value, variable);
-            return value;
-        };
-        const auto cachedBegin = loadCache(state.bdaCacheBegin);
-        const auto cachedEnd = loadCache(state.bdaCacheEnd);
-        const auto accessEnd = binary(spv::OpIAdd, u64, address, Unary(state, spv::OpUConvert, u64, bytes));
-        const auto inside = binary(spv::OpLogicalAnd, boolean, binary(spv::OpUGreaterThanEqual, boolean, address, cachedBegin), binary(spv::OpULessThanEqual, boolean, accessEnd, cachedEnd));
-        const auto hit = binary(spv::OpLogicalAnd, boolean, inside, binary(spv::OpUGreaterThan, boolean, accessEnd, address));
-        const auto hitLabel = state.module.AllocateId();
-        const auto missLabel = state.module.AllocateId();
-        state.module.AddFunction(spv::OpSelectionMerge, missLabel, spv::SelectionControlMaskNone);
-        state.module.AddFunction(spv::OpBranchConditional, hit, hitLabel, missLabel);
-        EmitLabel(state, hitLabel);
-        state.module.AddFunction(spv::OpReturnValue, binary(spv::OpIAdd, u64, loadCache(state.bdaCacheBase), binary(spv::OpISub, u64, address, cachedBegin)));
-        EmitLabel(state, missLabel);
-    }
     const auto fail = [&](std::uint32_t condition, BdaAbi::FaultReason reason) { ReturnBdaFailureIf(state, condition, address, bytes, instruction, reason); };
     const auto length = state.module.AllocateId();
     state.module.AddFunction(spv::OpArrayLength, u32, length, state.bdaPagetableVariable, 0u);
@@ -121,6 +103,38 @@ void DefineGetBdaPointer(SpirvEmitterState& state) {
     state.module.AddFunction(spv::OpStore, state.bdaCacheEnd, finish);
     state.module.AddFunction(spv::OpStore, state.bdaCacheBase, base);
     state.module.AddFunction(spv::OpReturnValue, result);
+    state.module.AddFunction(spv::OpFunctionEnd);
+
+    state.bdaPointerFunction = state.module.AllocateId();
+    state.module.AddName(state.bdaPointerFunction, "get_bda_pointer");
+    state.module.AddFunction(spv::OpFunction, u64, state.bdaPointerFunction, spv::FunctionControlMaskNone, functionType);
+    const auto lookupAddress = state.module.AllocateId();
+    const auto lookupBytes = state.module.AllocateId();
+    const auto lookupInstruction = state.module.AllocateId();
+    state.module.AddFunction(spv::OpFunctionParameter, u64, lookupAddress);
+    state.module.AddFunction(spv::OpFunctionParameter, u32, lookupBytes);
+    state.module.AddFunction(spv::OpFunctionParameter, u32, lookupInstruction);
+    EmitLabel(state, state.module.AllocateId());
+    const auto loadCache = [&](std::uint32_t variable) {
+        const auto value = state.module.AllocateId();
+        state.module.AddFunction(spv::OpLoad, u64, value, variable);
+        return value;
+    };
+    const auto cachedBegin = loadCache(state.bdaCacheBegin);
+    const auto cachedEnd = loadCache(state.bdaCacheEnd);
+    const auto accessEnd = binary(spv::OpIAdd, u64, lookupAddress, Unary(state, spv::OpUConvert, u64, lookupBytes));
+    const auto inside = binary(spv::OpLogicalAnd, boolean, binary(spv::OpUGreaterThanEqual, boolean, lookupAddress, cachedBegin), binary(spv::OpULessThanEqual, boolean, accessEnd, cachedEnd));
+    const auto hit = binary(spv::OpLogicalAnd, boolean, inside, binary(spv::OpUGreaterThan, boolean, accessEnd, lookupAddress));
+    const auto hitLabel = state.module.AllocateId();
+    const auto missLabel = state.module.AllocateId();
+    state.module.AddFunction(spv::OpSelectionMerge, missLabel, spv::SelectionControlMaskNone);
+    state.module.AddFunction(spv::OpBranchConditional, hit, hitLabel, missLabel);
+    EmitLabel(state, hitLabel);
+    state.module.AddFunction(spv::OpReturnValue, binary(spv::OpIAdd, u64, loadCache(state.bdaCacheBase), binary(spv::OpISub, u64, lookupAddress, cachedBegin)));
+    EmitLabel(state, missLabel);
+    const auto missed = state.module.AllocateId();
+    state.module.AddFunction(spv::OpFunctionCall, u64, missed, missFunction, lookupAddress, lookupBytes, lookupInstruction);
+    state.module.AddFunction(spv::OpReturnValue, missed);
     state.module.AddFunction(spv::OpFunctionEnd);
 }
 
