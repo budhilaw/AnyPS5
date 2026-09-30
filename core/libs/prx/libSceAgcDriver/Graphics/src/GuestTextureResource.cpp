@@ -25,7 +25,6 @@ TextureTileMode resolveTileMode(std::uint32_t raw) {
         case 0x05: return TextureTileMode::kStandard4KB;
         case 0x09: return TextureTileMode::kStandard64KB;
         case 0x1b: return TextureTileMode::RenderTarget64KB;
-        case 0x08:
         case 0x18: return TextureTileMode::Depth64KB;
         default: throw std::runtime_error("AGC graphics: guest texture descriptor uses an unsupported tile mode " + std::to_string(raw));
     }
