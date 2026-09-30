@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <future>
 #include "CacheKey.hpp"
+#include <iterator>
 #include <limits>
 #include <mutex>
 #include <string_view>
@@ -146,6 +147,8 @@ IrProgram PrepareResourceProgram(const RecompileRequest& request) {
 
 namespace {
 
+constexpr std::size_t DefaultVariantLimit = 16;
+
 struct CompiledVariant {
     ResourceSpecialization specialization;
     BindingLayout layout;
@@ -173,6 +176,8 @@ struct SourceEntry {
     std::unique_ptr<IrProgram> spare;
     std::vector<std::shared_ptr<const CompiledVariant>> variants;
     std::uint64_t compiled = 0;
+    std::uint64_t evicted = 0;
+    std::vector<std::uint64_t> evictedKeys;
 };
 
 struct SourceKeyHash {
@@ -316,6 +321,19 @@ bool sameLayout(const BindingLayout& left, const BindingLayout& right) {
     return left.descriptorSet == right.descriptorSet && left.firstBinding == right.firstBinding && left.pushConstantOffsetBytes == right.pushConstantOffsetBytes && left.pushConstantSizeBytes == right.pushConstantSizeBytes;
 }
 
+std::size_t variantLimit() {
+    static const std::size_t limit = [] {
+        const char* value = std::getenv("ANYPS5_SHADER_VARIANT_LIMIT");
+        char* end = nullptr;
+        const auto parsed = value != nullptr ? std::strtoull(value, &end, 10) : 0ull;
+        if (value == nullptr || end == value || *end != '\0') {
+            return DefaultVariantLimit;
+        }
+        return parsed == 0 ? std::numeric_limits<std::size_t>::max() : static_cast<std::size_t>(parsed);
+    }();
+    return limit;
+}
+
 bool traceVariants() {
     static const bool enabled = std::getenv("ANYPS5_TRACE_VARIANTS") != nullptr;
     return enabled;
@@ -355,6 +373,38 @@ const char* numericClassName(IrTextureNumericClass numericClass) {
         break;
     }
     return "unsupported";
+}
+
+std::uint64_t variantKey(const BindingLayout& layout, const ResourceSpecialization& specialization) {
+    std::uint64_t hash = 0x9e3779b97f4a7c15ull;
+    const auto mix = [&hash](std::uint64_t value) {
+        hash = (hash ^ value) * 0xff51afd7ed558ccdull;
+        hash ^= hash >> 32u;
+    };
+    mix(layout.descriptorSet);
+    mix(layout.firstBinding);
+    mix(layout.pushConstantOffsetBytes);
+    mix(layout.pushConstantSizeBytes);
+    mix(specialization.buffers.size());
+    for (const auto& buffer : specialization.buffers) {
+        mix(buffer.packedStride);
+        mix(static_cast<std::uint64_t>(buffer.descriptorFormat));
+        mix(buffer.descriptorSwizzle);
+    }
+    mix(specialization.images.size());
+    for (const auto& image : specialization.images) {
+        mix(static_cast<std::uint64_t>(image.numericClass));
+        mix(static_cast<std::uint64_t>(image.dimension));
+        mix(image.mipCount);
+        mix(static_cast<std::uint64_t>(image.conversionFormat));
+        mix(image.shaderSwizzle);
+        mix(image.indirectRoot);
+        mix(image.indirectMappingOffset);
+        mix(image.indirectSearchIterations);
+        mix(image.cube ? 1u : 0u);
+        mix(image.fmask ? 1u : 0u);
+    }
+    return hash;
 }
 
 std::size_t differenceCount(const CompiledVariant& left, const CompiledVariant& right) {
@@ -459,8 +509,15 @@ void traceVariant(const RecompileRequest& request, const SourceEntry& source, co
             nearestDifferences = differences;
         }
     }
+    const auto key = variantKey(created.layout, created.specialization);
+    const bool recreated = std::find(source.evictedKeys.begin(), source.evictedKeys.end(), key) != source.evictedKeys.end();
     const auto change = describeChange(*nearest, created);
-    std::fprintf(stderr, "shader recompiler: %s program 0x%llx code hash 0x%016llx compiles variant %llu (%zu resident); variant %llu differs in%s\n", stageName(request.shader.stage), static_cast<unsigned long long>(request.shader.codeAddress), static_cast<unsigned long long>(request.shader.codeHash), static_cast<unsigned long long>(created.ordinal), source.variants.size(), static_cast<unsigned long long>(nearest->ordinal), change.empty() ? " nothing" : change.c_str() + 1);
+    std::fprintf(stderr, "shader recompiler: %s program 0x%llx code hash 0x%016llx compiles variant %llu%s (%zu resident, %llu evicted); variant %llu differs in%s\n", stageName(request.shader.stage), static_cast<unsigned long long>(request.shader.codeAddress), static_cast<unsigned long long>(request.shader.codeHash), static_cast<unsigned long long>(created.ordinal), recreated ? " again after evicting it" : "", source.variants.size(), static_cast<unsigned long long>(source.evicted), static_cast<unsigned long long>(nearest->ordinal), change.empty() ? " nothing" : change.c_str() + 1);
+}
+
+void traceEviction(const RecompileRequest& request, SourceEntry& source, const CompiledVariant& evicted) {
+    source.evictedKeys.push_back(variantKey(evicted.layout, evicted.specialization));
+    std::fprintf(stderr, "shader recompiler: %s program 0x%llx code hash 0x%016llx evicts variant %llu, the least recently used of %zu\n", stageName(request.shader.stage), static_cast<unsigned long long>(request.shader.codeAddress), static_cast<unsigned long long>(request.shader.codeHash), static_cast<unsigned long long>(evicted.ordinal), source.variants.size());
 }
 
 RecompileResult RecompileImpl(const RecompileRequest& request) {
@@ -491,10 +548,13 @@ RecompileResult RecompileImpl(const RecompileRequest& request) {
     bool cacheHit = false;
     {
         std::lock_guard lock(source->mutex);
-        for (const auto& candidate : source->variants) {
-            if (sameLayout(candidate->layout, request.layout) && candidate->specialization == *specializationUsed) {
-                variant = candidate;
+        auto& variants = source->variants;
+        for (auto candidate = variants.end(); candidate != variants.begin();) {
+            --candidate;
+            if (sameLayout((*candidate)->layout, request.layout) && (*candidate)->specialization == *specializationUsed) {
+                variant = *candidate;
                 cacheHit = true;
+                std::rotate(candidate, std::next(candidate), variants.end());
                 break;
             }
         }
@@ -506,7 +566,14 @@ RecompileResult RecompileImpl(const RecompileRequest& request) {
             if (traceVariants()) {
                 traceVariant(request, *source, *created);
             }
-            source->variants.push_back(created);
+            if (variants.size() >= variantLimit()) {
+                if (traceVariants()) {
+                    traceEviction(request, *source, *variants.front());
+                }
+                variants.erase(variants.begin());
+                ++source->evicted;
+            }
+            variants.push_back(created);
             variant = std::move(created);
         }
     }
