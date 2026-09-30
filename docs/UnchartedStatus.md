@@ -23,7 +23,7 @@ Build and relink as described in the README. The run folder holds the relinked `
 - `ANYPS5_DEBUG_INPUT_FILE=<file>`: presses pad buttons from lines appended to the file, for example `cross:0.5,wait:2,down`.
 - `ANYPS5_DUMP_DISPLAY_TRIGGER=<file>` / `ANYPS5_DUMP_TARGETS_TRIGGER=<file>`: touching the file dumps the displayed image, or every color and depth target plus the GPU journal.
 - `ANYPS5_DUMP_DISPLAY_AT=t1,t2:prefix`: dumps the display at the given seconds.
-- `ANYPS5_GPU_JOURNAL_DRAWS=1`, `ANYPS5_JOURNAL_TEXTURES=1`: the GPU journal printed on a driver failure also lists draws (with stencil state and depth addresses) and the textures each dispatch binds.
+- `ANYPS5_GPU_JOURNAL_DRAWS=1`, `ANYPS5_JOURNAL_TEXTURES=1`: the GPU journal printed on a driver failure also lists draws (with stencil state and depth addresses) and dispatches, and the textures each dispatch binds.
 - `ANYPS5_DEBUG_GPU_LABELS=1`: inserts a debug label after every draw and dispatch (visible in GPU captures and command buffer error reports).
 - `ANYPS5_DEBUG_SLOW_GPU=<ms>`: serializes GPU work and logs draws and dispatches slower than the threshold.
 - `ANYPS5_DEBUG_STENCIL_PROBE=<depth address>`, `ANYPS5_DEBUG_REPORT_STENCILED=1`: stencil histograms and before/after pixel diffs.
