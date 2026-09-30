@@ -40,8 +40,9 @@ Build and relink as described in the README. The run folder holds the relinked `
 ## Where it stands (Windows, i5-12400F, RTX 3070)
 
 - Builds with MinGW-w64 GCC 15.2 and runs from the relinked `eboot.exe`. Guest physical memory is one pagefile-backed section mapped into placeholders in 1 MiB views, so the title's defragmentation (1 MiB `munmap` pieces remapped with `sceKernelBatchMap2`) costs about 15 µs per unmap.
-- Speed: 18-20 fps in the first scenes (60-75 s after start), about 4 fps while compute pipelines of about 9700 dwords compile in 200 ms each.
-- Crash (blocker): about two minutes in, a game leaf function reads a pointer it kept in the SysV red zone and gets zero. Windows has no red zone: when a guest thread takes a page fault on memory the driver tracks, the kernel writes the exception record just below `rsp` and overwrites the 128 bytes the function still uses. Linux and macOS skip the red zone when they deliver a signal. A run saw 14,000 such faults, mostly while loading. The fix is to patch every guest instruction that can fault while the red zone holds live data so it runs with `rsp` lowered by 128 (shadPS4 and the Kyty fork do this with Zydis). Fewer tracking faults only makes the crash rarer.
+- Speed: 18-23 fps in the first scenes, 6-9 fps in the Language menu. In the menu the graphics thread is saturated: about 150 dispatches and 600 draws per frame, large GPU-written surfaces (2560x1440) revalidated byte by byte every frame because the texture descriptor does not match the resident render target, and depth textures copied through a buffer each time the depth changes.
+- Crash: a game leaf function (`eboot+0x15bb5c0`) writing per-frame records keeps its object pointer in the SysV red zone. Windows has no red zone: when a guest thread takes a page fault on memory the driver tracks, the kernel writes the exception record just below `rsp` and overwrites the 128 bytes the function still uses. Linux and macOS skip the red zone when they deliver a signal. The fault that killed it hit a stale 64 KiB texture watch on memory the game had reused; watches no texture or buffer used for 250 ms are now released, and three 3-4 minute runs finished without a crash. Any remaining fault in such a function can still corrupt it; the full fix is to patch the guest instructions that can fault while the red zone holds live data so they run with `rsp` lowered by 128 (shadPS4 and the Kyty fork do this).
+- Colors: the title presents 10:10:10:2 display buffers (pixel format `0x8100000000000000`). They used to be copied bit for bit into an 8-bit image, which tinted the menus green and red; they are now converted.
 - Movies are black: `libSceVdecsw` only decodes with VideoToolbox (macOS).
 
 ## Windows findings
@@ -54,12 +55,12 @@ Build and relink as described in the README. The run folder holds the relinked `
 ## Debug switches for performance work
 
 - `ANYPS5_SAMPLE_THREADS=1`: samples the title, worker and graphics threads every millisecond (Windows) and prints the hottest functions and call chains every 30 s.
-- `ANYPS5_TRACE_SLOW_OPS=1`: prints 5 s summaries of lock waits and slow memory, tracking and device operations.
+- `ANYPS5_TRACE_SLOW_OPS=1`: prints 5 s summaries of lock waits, the reasons the driver worker waits for the graphics thread, the stages of recording draws and dispatches, and slow memory, tracking and device operations. On Windows it also prints the first tracking fault of each guest instruction with the watch it hit.
 - `ANYPS5_TRACE_TIMING=1`: per-frame timing of the driver stages and GPU timestamps per command batch.
 
 ## Next steps
 
-1. Windows: protect the guest red zone (see the crash above), then cut the tracking faults and the full pipeline barriers around every compute dispatch.
+1. Windows: protect the guest red zone (see the crash above). Performance: serve GPU-written surfaces sampled through a mismatched descriptor (for example `0x1492970000`, 256x256 R8 tile 4 over a tile 27 render target) from the GPU instead of revalidating guest memory, sample depth directly instead of copying it, and cut the per-draw resource setup and the full pipeline barriers around every compute dispatch.
 2. Selector image: find out why the history depth buffers (`0x8463400000` / `0x8464710000` in the logs) are never filled, then fix the dark lighting and the blocky tiles.
 3. Continue past New Game into gameplay. Watch for GPU-culled indirect draw arguments exceeding the index buffer, a hint from the Kyty fork (github.com/budhilaw/Kyty, branch `feat/ps5-gameplay-fixes`).
 4. Performance target: 30 fps in gameplay at a 720p internal resolution. That needs render scaling, smaller recompiled shaders and less per-draw CPU work.
