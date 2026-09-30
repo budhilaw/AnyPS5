@@ -436,8 +436,10 @@ void buildResourceSpecialization(const IrResourcePlan& plan, ResourceSnapshot& s
         const auto& buffer = plan.info.buffers[i];
         ResourceSpecialization::Buffer entry;
         entry.packedStride = packedStride;
-        entry.descriptorFormat = buffer.formatted ? decoded.Format() : IrBufferFormat::Invalid;
-        entry.descriptorSwizzle = buffer.formatted ? decoded.DstSelXYZW() : DstSel(4, 5, 6, 7);
+        entry.descriptorFormat = buffer.descriptorFormatted ? decoded.Format() : IrBufferFormat::Invalid;
+        const auto swizzledDwords = entry.descriptorFormat == IrBufferFormat::Invalid ? 0u : std::min(buffer.swizzledDwords, 4u);
+        const auto swizzledBits = (1u << (swizzledDwords * 3u)) - 1u;
+        entry.descriptorSwizzle = (decoded.DstSelXYZW() & swizzledBits) | (DstSel(4, 5, 6, 7) & ~swizzledBits);
         result.buffers.push_back(entry);
     }
 

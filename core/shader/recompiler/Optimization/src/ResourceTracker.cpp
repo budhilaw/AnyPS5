@@ -573,6 +573,12 @@ private:
         resource.written = resource.written || write;
         resource.atomic = resource.atomic || atomic;
         resource.formatted = resource.formatted || memory.formatted;
+        if (memory.formatted && !memory.typed) {
+            resource.descriptorFormatted = true;
+            if (access == BufferAccess::Read) {
+                resource.swizzledDwords = std::max(resource.swizzledDwords, memory.dataDwords);
+            }
+        }
         resource.scalar = resource.scalar || op == IrOpcode::ReadConstBuffer || memory.kind == ResourceKind::ScalarBuffer;
     }
 

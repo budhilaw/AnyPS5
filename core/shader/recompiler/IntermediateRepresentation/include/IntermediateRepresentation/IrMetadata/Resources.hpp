@@ -19,11 +19,13 @@ struct BufferResource {
     std::uint32_t packedStride = 0;
     IrBufferFormat descriptorFormat = IrBufferFormat::Invalid;
     std::uint32_t descriptorSwizzle = 0x00000facu;
+    std::uint32_t swizzledDwords = 0;
     std::uint32_t imageAlias = NoImageAlias;
     bool read = false;
     bool written = false;
     bool atomic = false;
     bool formatted = false;
+    bool descriptorFormatted = false;
     bool scalar = false;
     bool optional = false;
 
