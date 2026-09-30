@@ -1,6 +1,7 @@
 #ifndef CORE_LIBS_PRX_LIBC_INCLUDE_GUESTLOCK_HPP
 #define CORE_LIBS_PRX_LIBC_INCLUDE_GUESTLOCK_HPP
 
+#include "prx/libc/include/PreciseSleep.hpp"
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -27,7 +28,7 @@ public:
         auto pause = std::chrono::microseconds(1);
         while (!try_lock()) {
             if (std::chrono::steady_clock::now() >= deadline) return false;
-            std::this_thread::sleep_for(pause);
+            PreciseSleepNanos_nid_no_patch(static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(pause).count()));
             pause = std::min(pause * 2, std::chrono::microseconds(500));
         }
         return true;

@@ -1,4 +1,6 @@
 #include "prx/libc/include/General.hpp"
+#include "prx/libc/include/PreciseWait.hpp"
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -28,7 +30,14 @@ struct Mutex {
     template<class TClock, class TDuration> bool try_lock_until(const std::chrono::time_point<TClock, TDuration>& deadline) { return recursive ? recursiveMutex.try_lock_until(deadline) : plainMutex.try_lock_until(deadline); }
 };
 
-struct Condition { std::condition_variable_any variable; };
+struct Condition {
+    std::condition_variable_any variable;
+    std::atomic<std::uint64_t> signals{0};
+};
+
+std::chrono::steady_clock::time_point steadyDeadline(std::chrono::system_clock::time_point deadline) {
+    return std::chrono::steady_clock::now() + std::chrono::duration_cast<std::chrono::steady_clock::duration>(deadline - std::chrono::system_clock::now());
+}
 
 std::chrono::system_clock::time_point deadline(const Xtime* time) {
     if (time == nullptr) throw std::invalid_argument("xtime: null");
@@ -81,8 +90,19 @@ void APS5_VABI _Cnd_destroy_nid_postfix(void* condition) {
     delete handle;
     handle = nullptr;
 }
-int APS5_VABI _Cnd_signal_nid_postfix(void* condition) { conditionOf(condition).variable.notify_one(); return Success; }
-int APS5_VABI _Cnd_broadcast_nid_postfix(void* condition) { conditionOf(condition).variable.notify_all(); return Success; }
+int APS5_VABI _Cnd_signal_nid_postfix(void* condition) {
+    auto& state = conditionOf(condition);
+    state.signals.fetch_add(1, std::memory_order_release);
+    state.variable.notify_one();
+    return Success;
+}
+
+int APS5_VABI _Cnd_broadcast_nid_postfix(void* condition) {
+    auto& state = conditionOf(condition);
+    state.signals.fetch_add(1, std::memory_order_release);
+    state.variable.notify_all();
+    return Success;
+}
 
 int APS5_VABI _Cnd_wait_nid_postfix(void* condition, void* mutex) {
     std::unique_lock<Mutex> lock(mutexOf(mutex), std::adopt_lock);
@@ -92,13 +112,19 @@ int APS5_VABI _Cnd_wait_nid_postfix(void* condition, void* mutex) {
 }
 
 int APS5_VABI _Cnd_timedwait_nid_postfix(void* condition, void* mutex, const Xtime* time) {
+    auto& state = conditionOf(condition);
     std::unique_lock<Mutex> lock(mutexOf(mutex), std::adopt_lock);
-    const auto status = conditionOf(condition).variable.wait_until(lock, deadline(time));
+    const auto signals = state.signals.load(std::memory_order_acquire);
+    const bool signaled = PreciseWait::Until(state.variable, lock, steadyDeadline(deadline(time)), [&] { return state.signals.load(std::memory_order_acquire) != signals; });
     lock.release();
-    return status == std::cv_status::timeout ? TimedOut : Success;
+    return signaled ? Success : TimedOut;
 }
 
-int APS5_VABI _Thrd_sleep_nid_postfix(const Xtime* time) { std::this_thread::sleep_until(deadline(time)); return Success; }
+int APS5_VABI _Thrd_sleep_nid_postfix(const Xtime* time) {
+    const auto remaining = steadyDeadline(deadline(time)) - std::chrono::steady_clock::now();
+    if (remaining.count() > 0) PreciseSleepNanos_nid_no_patch(static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(remaining).count()));
+    return Success;
+}
 int APS5_VABI _Thrd_yield_nid_postfix() { std::this_thread::yield(); return Success; }
 
 std::int64_t APS5_VABI _Xtime_get_ticks_nid_postfix() {
