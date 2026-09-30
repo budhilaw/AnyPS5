@@ -439,6 +439,82 @@ std::vector<std::uint32_t> selectionRegion(const ControlFlowGraph& graph, const 
     return region;
 }
 
+bool isNaturalLoopHeader(const ControlFlowGraph& graph, std::uint32_t blockId) {
+    return std::any_of(graph.naturalLoops.begin(), graph.naturalLoops.end(), [&](const NaturalLoop& loop) {
+        return loop.headerBlock == blockId;
+    });
+}
+
+void cloneForExternalPredecessors(ControlFlowGraph& graph, std::uint32_t header, std::uint32_t entered, const std::vector<std::uint32_t>& region) {
+    BasicBlock copy = graph.FindBlock(entered);
+    const auto predecessors = copy.predecessors;
+    copy.id = static_cast<std::uint32_t>(graph.blocks.size());
+    copy.predecessors.clear();
+    copy.dominators.clear();
+    copy.postDominators.clear();
+    const auto clone = copy.id;
+    graph.blocks.push_back(std::move(copy));
+    for (const auto predecessor : predecessors) {
+        if (predecessor == header || std::binary_search(region.begin(), region.end(), predecessor)) {
+            continue;
+        }
+        auto& source = graph.FindBlock(predecessor);
+        replaceValue(source.successors, entered, clone);
+        replaceTerminatorTarget(source.terminator, entered, clone);
+    }
+}
+
+bool duplicateSharedTerminals(ControlFlowGraph& graph) {
+    constexpr std::uint32_t maximumInstructions = 64;
+    bool changed = false;
+    const auto count = graph.blocks.size();
+    for (std::size_t index = 0; index < count; ++index) {
+        const auto terminal = graph.blocks[index];
+        if (!terminal.successors.empty() || terminal.predecessors.size() < 2u || terminal.instructionEnd - terminal.instructionBegin > maximumInstructions) {
+            continue;
+        }
+        for (std::size_t predecessor = 1; predecessor < terminal.predecessors.size(); ++predecessor) {
+            BasicBlock copy = terminal;
+            copy.id = static_cast<std::uint32_t>(graph.blocks.size());
+            copy.predecessors.clear();
+            copy.dominators.clear();
+            copy.postDominators.clear();
+            const auto clone = copy.id;
+            graph.blocks.push_back(std::move(copy));
+            auto& source = graph.FindBlock(terminal.predecessors[predecessor]);
+            replaceValue(source.successors, terminal.id, clone);
+            replaceTerminatorTarget(source.terminator, terminal.id, clone);
+            changed = true;
+        }
+    }
+    return changed;
+}
+
+bool isolateOneExitArm(ControlFlowGraph& graph) {
+    for (const auto& block : graph.blocks) {
+        if (block.terminator.kind != TerminatorKind::ConditionalBranch || block.terminator.trueBlock == block.terminator.falseBlock) {
+            continue;
+        }
+        const auto* loop = findInnermostContainingLoop(graph, block.id);
+        const auto header = block.id;
+        for (const auto [exit, other] : {std::pair{block.terminator.trueBlock, block.terminator.falseBlock}, std::pair{block.terminator.falseBlock, block.terminator.trueBlock}}) {
+            const auto& exitBlock = graph.FindBlock(exit);
+            if (exitBlock.predecessors.size() != 1u || !hasLinearPathToTerminal(graph, exit) || graph.Dominates(header, other)) {
+                continue;
+            }
+            if (loop != nullptr && (other == loop->headerBlock || other == loop->mergeBlock || other == loop->continueBlock)) {
+                continue;
+            }
+            const auto forward = appendSyntheticBranchBlock(graph, other);
+            auto& source = graph.FindBlock(header);
+            replaceValue(source.successors, other, forward);
+            replaceTerminatorTarget(source.terminator, other, forward);
+            return true;
+        }
+    }
+    return false;
+}
+
 bool splitOneSelectionMerge(ControlFlowGraph& graph) {
     std::vector<std::uint32_t> loopHeaders;
     loopHeaders.reserve(graph.naturalLoops.size());
@@ -477,7 +553,11 @@ bool splitOneSelectionMerge(ControlFlowGraph& graph) {
             });
         });
         if (external != region.end()) {
-            throw std::runtime_error("selection header block " + std::to_string(blockId) + " has externally entered region block " + std::to_string(*external) + "; semantic block cloning is disabled");
+            if (isNaturalLoopHeader(graph, *external)) {
+                throw std::runtime_error("selection header block " + std::to_string(blockId) + " has externally entered loop header " + std::to_string(*external));
+            }
+            cloneForExternalPredecessors(graph, blockId, *external, region);
+            return true;
         }
 
         const auto constructBlocks = dominatedBlocks(graph, blockId, merge);
@@ -585,6 +665,14 @@ void tarjanVisit(TarjanState& state, std::uint32_t blockId) {
 void Structurizer::Structurize(ControlFlowGraph& graph) const {
     recomputeAnalyses(graph);
     verifyReducibility(graph);
+    if (duplicateSharedTerminals(graph)) {
+        rebuildPredecessors(graph);
+        recomputeAnalyses(graph);
+    }
+    for (std::size_t isolated = 0, budget = graph.blocks.size(); isolated < budget && isolateOneExitArm(graph); ++isolated) {
+        rebuildPredecessors(graph);
+        recomputeAnalyses(graph);
+    }
     canonicalizeNaturalLoops(graph);
     splitSharedMergeBlocks(graph);
     isolateSemanticLoopHeaders(graph);
@@ -904,7 +992,7 @@ void Structurizer::canonicalizeNaturalLoops(ControlFlowGraph& graph) const {
 
 void Structurizer::splitSharedMergeBlocks(ControlFlowGraph& graph) const {
     const auto originalBlockCount = static_cast<std::uint32_t>(graph.blocks.size());
-    const auto splitBudget = std::max<std::uint32_t>(16u, originalBlockCount * 4u);
+    const auto splitBudget = std::max<std::uint32_t>(64u, originalBlockCount * 8u);
     for (std::uint32_t splits = 0; splits < splitBudget; ++splits) {
         if (!splitOneLoopMerge(graph) && !splitOneSelectionMerge(graph)) {
             return;
