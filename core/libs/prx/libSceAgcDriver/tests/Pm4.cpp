@@ -3,18 +3,23 @@
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/MemoryAccessScope.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver.hpp"
+#include "prx/libSceAgcDriver/Execution/include/DriverThread.hpp"
 #include "prx/libSceAgcDriver/Submit/include/Dcb.hpp"
 #include "prx/libc/include/Shutdown.hpp"
+#include <chrono>
 #include <cstdio>
+#include <exception>
 #include <limits>
 #include <set>
 #include <stdexcept>
+#include <thread>
 #include <vector>
 #ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <tlhelp32.h>
 #endif
 
 namespace {
@@ -395,6 +400,57 @@ void testDriverSubmission() {
     check(destination[0] == 0, "rejected submission executed a prefix");
 }
 
+#ifdef _WIN32
+int highestPriorityThreads() {
+    const auto snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    check(snapshot != INVALID_HANDLE_VALUE, "thread snapshot failed");
+    int count = 0;
+    THREADENTRY32 entry{};
+    entry.dwSize = sizeof(entry);
+    for (auto listed = Thread32First(snapshot, &entry); listed; listed = Thread32Next(snapshot, &entry)) {
+        if (entry.th32OwnerProcessID != GetCurrentProcessId()) continue;
+        const auto thread = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, entry.th32ThreadID);
+        if (thread == nullptr) continue;
+        if (GetThreadPriority(thread) == THREAD_PRIORITY_HIGHEST) ++count;
+        CloseHandle(thread);
+    }
+    CloseHandle(snapshot);
+    return count;
+}
+#endif
+
+void testDriverThreads() {
+#ifdef _WIN32
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (highestPriorityThreads() < 2 && std::chrono::steady_clock::now() < deadline) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    check(highestPriorityThreads() >= 2, "driver worker and graphics threads do not run above the title's threads");
+    check(GetThreadPriority(GetCurrentThread()) == THREAD_PRIORITY_NORMAL, "a submitting thread was raised with the driver threads");
+#endif
+    std::exception_ptr failure;
+    std::thread measured([&failure] {
+        try {
+            AgcDriver::DriverThread::RaisePriority();
+            AgcDriver::DriverThread::CpuUsage usage("test thread");
+            const auto hold = [](bool spin) {
+                const auto start = std::chrono::steady_clock::now();
+                while (std::chrono::steady_clock::now() - start < std::chrono::milliseconds(200)) {
+                    if (!spin) std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                }
+            };
+            hold(true);
+            const auto busy = usage.Take();
+            hold(false);
+            const auto idle = usage.Take();
+            check(busy.wallNanoseconds >= 200000000 && busy.cpuNanoseconds * 2 >= busy.wallNanoseconds && busy.cpuNanoseconds <= busy.wallNanoseconds + 2000000, "a spinning thread was not charged its wall time as CPU time");
+            check(idle.wallNanoseconds >= 200000000 && idle.cpuNanoseconds * 10 <= idle.wallNanoseconds, "a sleeping thread was charged CPU time");
+        } catch (...) {
+            failure = std::current_exception();
+        }
+    });
+    measured.join();
+    if (failure) std::rethrow_exception(failure);
+}
+
 void testAsyncMemoryFailure() {
     auto commands = makePacket(0x37, {0x100, 0x1000, 0, 1});
     Packet packet{commands.data(), static_cast<std::uint32_t>(commands.size()), 0, {}};
@@ -426,8 +482,9 @@ int main(int argc, char** argv) {
         testEventWrite();
         testAcquireMem();
         testDriverSubmission();
+        testDriverThreads();
         LibcRunShutdown_nid_postfix();
-        std::puts("PM4 catalog, registers, state, memory and submission tests passed");
+        std::puts("PM4 catalog, registers, state, memory, submission and driver thread tests passed");
         return 0;
     } catch (const std::exception& error) {
         std::fprintf(stderr, "%s\n", error.what());
