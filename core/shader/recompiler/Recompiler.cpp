@@ -182,33 +182,33 @@ struct SourceKeyHash {
 std::shared_ptr<SourceEntry> getSource(const RecompileRequest& request) {
     static std::shared_mutex mutex;
     static std::unordered_map<std::vector<std::uint64_t>, std::shared_ptr<SourceEntry>, SourceKeyHash> sources;
-    thread_local std::vector<std::uint64_t> key;
+    thread_local std::vector<std::uint64_t>* keyStorage = nullptr;
+    if (keyStorage == nullptr) keyStorage = new std::vector<std::uint64_t>();
+    auto& key = *keyStorage;
     RecompileCacheKey::Build(request, key);
     struct Recent {
-        std::vector<std::uint64_t> key;
-        std::shared_ptr<SourceEntry> source;
+        const std::vector<std::uint64_t>* key;
+        const std::shared_ptr<SourceEntry>* source;
     };
-    thread_local std::array<Recent, 4> recent;
+    thread_local std::array<Recent, 4> recent{};
     thread_local std::size_t nextRecent = 0;
     for (const auto& entry : recent) {
-        if (entry.source != nullptr && entry.key == key) return entry.source;
+        if (entry.source != nullptr && *entry.key == key) return *entry.source;
     }
-    std::shared_ptr<SourceEntry> source;
+    const std::pair<const std::vector<std::uint64_t>, std::shared_ptr<SourceEntry>>* cached = nullptr;
     {
         std::shared_lock lock(mutex);
         const auto found = sources.find(key);
-        if (found != sources.end()) source = found->second;
+        if (found != sources.end()) cached = &*found;
     }
-    if (source == nullptr) {
+    if (cached == nullptr) {
         static_cast<void>(BuildShaderStageInputInfo(toShaderStageKind(request.shader.stage), request.context, request.target.subgroupSize));
         std::unique_lock lock(mutex);
-        const auto found = sources.find(key);
-        if (found != sources.end()) source = found->second;
-        else {
-            source = std::make_shared<SourceEntry>();
-            sources.emplace(key, source);
-        }
+        auto found = sources.find(key);
+        if (found == sources.end()) found = sources.emplace(key, std::make_shared<SourceEntry>()).first;
+        cached = &*found;
     }
+    const auto& source = cached->second;
     {
         std::lock_guard lock(source->mutex);
         if (source->plan == nullptr) {
@@ -217,7 +217,7 @@ std::shared_ptr<SourceEntry> getSource(const RecompileRequest& request) {
             source->spare = std::make_unique<IrProgram>(spare.get());
         }
     }
-    recent[nextRecent++ % recent.size()] = {key, source};
+    recent[nextRecent++ % recent.size()] = {&cached->first, &cached->second};
     return source;
 }
 

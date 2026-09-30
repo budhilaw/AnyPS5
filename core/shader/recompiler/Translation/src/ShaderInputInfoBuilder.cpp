@@ -3,11 +3,13 @@
 #include <array>
 #include <cstdint>
 #include <stdexcept>
+#include <type_traits>
 
 namespace ShaderRecompiler {
 
 namespace {
 
+static_assert(std::is_trivially_destructible_v<ShaderPixelInputInfo> && std::is_trivially_destructible_v<ShaderComputeInputInfo> && std::is_trivially_destructible_v<ShaderVertexInputInfo>);
 thread_local ShaderPixelInputInfo pixelStorage;
 thread_local ShaderComputeInputInfo computeStorage;
 thread_local ShaderVertexInputInfo vertexStorage;
