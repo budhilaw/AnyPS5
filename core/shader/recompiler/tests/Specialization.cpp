@@ -90,6 +90,39 @@ constexpr std::array<std::uint32_t, 34> CopyLoopThenReadTheSlotAtTheCount{
     0x8f6a846bu, 0xf4080300u, 0xd4000000u, 0xf4080400u, 0xfa000130u, 0xbf8cc07fu, 0xe0002000u, 0x80030200u,
     0xbf8c0070u, 0xe0102000u, 0x80040200u, EndProgram};
 
+using TextureDescriptor = std::array<std::uint32_t, 8>;
+
+constexpr std::uint64_t PointerTableAddress = 0x80040u;
+constexpr std::uint32_t PointerTableOffset = 0x40u;
+constexpr std::uint32_t PointerTableUnreadableEntry = 3u;
+constexpr TextureDescriptor FirstTexture{0x00000021u, 56u << 20u, 0u, 0x90000facu, 0u, 0u, 0u, 0u};
+constexpr TextureDescriptor LateTexture{0x00000022u, 56u << 20u, 0u, 0x90000facu, 0u, 0u, 0u, 0u};
+constexpr std::array<std::uint32_t, 16> PointerTableUserData{
+    static_cast<std::uint32_t>(PointerTableAddress - PointerTableOffset), 0u, 0u, 0u,
+    0u, 0u, 0u, 0u,
+    0u, 0u, 0u, 0u,
+    OutputBuffer[0], OutputBuffer[1], OutputBuffer[2], OutputBuffer[3]};
+constexpr std::array<std::uint32_t, 12> PointerTableSample2D{
+    0x7e100500u, 0x8f098508u,
+    0xf40c0400u, 0x12000000u | PointerTableOffset,
+    0x7e0002f0u, 0x7e0202f0u, 0x7e0402f2u,
+    0xf09c0f08u, 0x00240400u,
+    0xe0780000u, 0x80030400u,
+    EndProgram};
+
+bool readThrowingPointerTable(void*, std::uint64_t address, std::uint32_t* value) {
+    if (address < PointerTableAddress) {
+        return false;
+    }
+    const auto entry = (address - PointerTableAddress) / sizeof(TextureDescriptor);
+    const auto dword = (address - PointerTableAddress) % sizeof(TextureDescriptor) / sizeof(std::uint32_t);
+    if (entry == PointerTableUnreadableEntry) {
+        throw std::runtime_error("guest memory is not readable");
+    }
+    *value = (entry < 2u ? FirstTexture : LateTexture)[dword];
+    return true;
+}
+
 constexpr BufferDescriptor copySource(std::uint32_t slot, std::uint32_t stride = 4u) {
     return {0x60000u + slot * 0x100u, stride << 16u, 16u, CopyDescriptorWord3};
 }
@@ -170,7 +203,7 @@ constexpr BufferUserData bufferUserData(const BufferDescriptor& input, const Buf
     return {input[0], input[1], input[2], input[3], output[0], output[1], output[2], output[3]};
 }
 
-RecompileRequest bufferRequest(std::span<const std::uint32_t> code, const BufferUserData& userData) {
+RecompileRequest bufferRequest(std::span<const std::uint32_t> code, std::span<const std::uint32_t> userData) {
     RecompileRequest request{};
     request.shader = {ShaderStage::Compute, CodeAddress, code, 0u, {}};
     request.context.waveSize = 32u;
@@ -396,10 +429,25 @@ void slotReadAfterTheLoopStaysBound() {
     requireSlotsBound(CopyLoopThenReadTheSlotAtTheCount, 0u, 1u, 1u, 0u, "a loop count of 0 followed by a read of the slot at the count");
 }
 
+void pointerTableEndsAtAnEntryWhoseReadThrows() {
+    const auto request = bufferRequest(PointerTableSample2D, PointerTableUserData);
+    const auto plan = GetResourcePlan(request);
+    SrtRuntime runtime;
+    runtime.userData = PointerTableUserData;
+    runtime.shaderBase = CodeAddress;
+    runtime.readMemory = &readThrowingPointerTable;
+    runtime.readSpecializationMemory = &readThrowingPointerTable;
+    ResourceSnapshot snapshot;
+    ResourceSpecialization specialization;
+    ResourceMaterializer{}.Materialize(*plan, runtime, snapshot, specialization);
+    require(snapshot.images.size() == 1u, "a sample through a pointer table does not bind exactly one image");
+    require(std::ranges::equal(snapshot.images[0].dwords, FirstTexture), "a pointer table did not end at the entry whose read throws, as the driver's checked guest memory read does outside readable memory");
+}
+
 }
 
 int main() {
-    const std::array<std::pair<const char*, void (*)()>, 15> tests{{
+    const std::array<std::pair<const char*, void (*)()>, 16> tests{{
         {"buffer_load_format_x compiles the selectors it does not read to the same program", &formattedLoadIgnoresSelectorsOfComponentsItDoesNotRead},
         {"buffer_load_format_xy compiles the Z and W selectors to the same program", &formattedPairLoadIgnoresTheZAndWSelectors},
         {"buffer_store_format_x compiles every selector to the same program", &formattedStoreIgnoresTheSelectors},
@@ -415,6 +463,7 @@ int main() {
         {"a load before the loop test keeps the slot at the count that the store after the test drops", &loadBeforeTheLoopTestKeepsTheSlotAtTheCount},
         {"a branch on the loop count that merges again before the copy binds every slot", &branchOnTheCountThatMergesAgainBindsEverySlot},
         {"a table slot the loop skips stays bound for a read after the loop", &slotReadAfterTheLoopStaysBound},
+        {"a pointer image table ends at the first entry whose read throws", &pointerTableEndsAtAnEntryWhoseReadThrows},
     }};
     int failures = 0;
     for (const auto& [name, test] : tests) {

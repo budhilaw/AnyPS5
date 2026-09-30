@@ -1,3 +1,4 @@
+#include "../../../../shader/recompiler/BdaAbi.hpp"
 #include "../../../../shader/recompiler/Recompiler.hpp"
 #include "RecompilerRequests.hpp"
 #include <algorithm>
@@ -25,8 +26,16 @@ constexpr std::uint64_t TableAddress = 0x10000u;
 constexpr std::uint32_t LightStride = 0x18cu;
 constexpr std::uint32_t ProjectorOffset = 0xb8u;
 constexpr std::uint32_t LightCount = 4u;
+constexpr std::uint32_t PointerTableOffset = 0x40u;
+constexpr std::size_t PointerTableEntries = 256u;
+
+constexpr std::uint32_t ReadFirstLaneS8FromV0 = 0x7e100500u;
+constexpr std::uint32_t ShiftS8By5IntoS9 = 0x8f098508u;
+constexpr std::uint32_t ShiftS8By4IntoS9 = 0x8f098408u;
+constexpr std::uint32_t LoadDescriptorFromS0PlusS9 = 0xf40c0400u;
 
 constexpr std::uint32_t SampleLz2D = 0xf09c0f08u;
+constexpr std::uint32_t SampleLz3D = 0xf09c0f10u;
 constexpr std::uint32_t SampleLzCube = 0xf09c0f18u;
 constexpr std::uint32_t SampleL2D = 0xf0900f08u;
 constexpr std::uint32_t SampleL3D = 0xf0900f10u;
@@ -41,6 +50,11 @@ constexpr std::uint32_t OpCopyObject = 83u;
 constexpr std::uint32_t OpImageSampleExplicitLod = 88u;
 constexpr std::uint32_t OpBitcast = 124u;
 constexpr std::uint32_t ImageOperandsLod = 2u;
+constexpr std::uint32_t CapabilityInt64 = 11u;
+constexpr std::uint32_t CapabilityStorageBuffer8BitAccess = 4448u;
+constexpr std::uint32_t CapabilityPhysicalStorageBufferAddresses = 5347u;
+constexpr std::array<std::uint32_t, 3> BdaCapabilities{CapabilityInt64, CapabilityPhysicalStorageBufferAddresses, CapabilityStorageBuffer8BitAccess};
+constexpr std::array<std::string_view, 2> BdaExtensions{"SPV_KHR_physical_storage_buffer", "SPV_KHR_8bit_storage"};
 
 constexpr std::uint32_t BufferLoadFormatX = 0xe0002000u;
 constexpr std::uint32_t BufferLoadFormatXy = 0xe0042000u;
@@ -63,7 +77,14 @@ constexpr TextureDescriptor TextureCube{0x00000010u, 56u << 20u, 0u, 0xb0000facu
 constexpr TextureDescriptor Texture3D{0x00000040u, 56u << 20u, 0u, 0xa0000facu, 0u, 0u, 0u, 0u};
 constexpr TextureDescriptor Texture1DArray{0x00000060u, 56u << 20u, 0u, 0xc0000facu, 0u, 0u, 0u, 0u};
 constexpr TextureDescriptor Texture2DArray{0x00000070u, 56u << 20u, 0u, 0xd0000facu, 0u, 0u, 0u, 0u};
+constexpr TextureDescriptor HostPointers{0x3a4b5c60u, 0x0000020fu, 0x3a4b5d00u, 0x0000020fu, 0x3a4b5e00u, 0x0000020fu, 1u, 0u};
+constexpr TextureDescriptor LightDataAboveApplicationMemory{0x10000000u, 0x201d67a0u, 0x00000010u, 0xaae0ffffu, 0u, 0u, 0u, 0u};
 constexpr std::array<std::uint32_t, 4> OutputBuffer{0x30000u, 0u, 16u, 0x00000facu};
+
+constexpr TextureDescriptor atAddress(TextureDescriptor texture, std::uint32_t address) {
+    texture[0] = address;
+    return texture;
+}
 
 void require(bool condition, const std::string& message) {
     if (!condition) {
@@ -114,6 +135,39 @@ RecompileResult sampleLightTable(std::uint32_t sample, const std::array<TextureD
         0xe0780000u, 0x80030400u,
         0xbf810000u};
     return Recompile(computeRequest(code, userData, memory));
+}
+
+std::vector<std::byte> tableBytes(std::span<const TextureDescriptor> entries) {
+    std::vector<std::byte> bytes(entries.size() * sizeof(TextureDescriptor));
+    std::memcpy(bytes.data(), entries.data(), bytes.size());
+    return bytes;
+}
+
+RecompileResult samplePointerTableMemory(std::uint32_t sample, std::uint32_t scale, std::span<const MemoryRegion> memory) {
+    const std::array<std::uint32_t, 16> userData{
+        static_cast<std::uint32_t>(TableAddress), 0u, 0u, 0u,
+        0u, 0u, 0u, 0u,
+        0u, 0u, 0u, 0u,
+        OutputBuffer[0], OutputBuffer[1], OutputBuffer[2], OutputBuffer[3]};
+    const std::array<std::uint32_t, 12> code{
+        ReadFirstLaneS8FromV0,
+        scale,
+        LoadDescriptorFromS0PlusS9, 0x12000000u | PointerTableOffset,
+        0x7e0002f0u, 0x7e0202f0u, 0x7e0402f2u,
+        sample, 0x00240400u,
+        0xe0780000u, 0x80030400u,
+        0xbf810000u};
+    auto request = computeRequest(code, userData, memory);
+    request.target.bdaAbiVersion = BdaAbi::Version;
+    request.target.supportedCapabilities = BdaCapabilities;
+    request.target.supportedExtensions = BdaExtensions;
+    return Recompile(request);
+}
+
+RecompileResult samplePointerTable(std::uint32_t sample, std::span<const TextureDescriptor> entries) {
+    const auto bytes = tableBytes(entries);
+    const std::array<MemoryRegion, 1> memory{MemoryRegion{TableAddress + PointerTableOffset, bytes}};
+    return samplePointerTableMemory(sample, ShiftS8By5IntoS9, memory);
 }
 
 RecompileResult sampleTexture(std::uint32_t sample, const TextureDescriptor& texture) {
@@ -264,6 +318,87 @@ void planeSampleOfLineArrayMajorityTableBindsItsPlaneEntry() {
     requireImage(result, Texture2D, DescriptorImageShape::Image2D, "a 2D sample of a table whose most common entry is a 1D array did not bind the table's 2D entry");
 }
 
+void cubeSampleOfPlaneMajorityTableBindsItsCubeEntry() {
+    const auto result = sampleLightTable(SampleLzCube, {Texture2D, TextureCube, Texture2D, Texture2D});
+    requireImage(result, TextureCube, DescriptorImageShape::ImageCube, "a cube sample of a table whose most common entry is 2D did not prefer the table's cube entry");
+}
+
+void volumeSampleOfTableSkipsDataAboveApplicationMemory() {
+    const auto result = sampleLightTable(SampleLz3D, {LightDataAboveApplicationMemory, Texture3D, LightDataAboveApplicationMemory, NullTexture});
+    requireImage(result, Texture3D, DescriptorImageShape::Image3D, "a 3D sample of a light table bound CPU data that decodes as a 3D image above 1 TiB");
+}
+
+void pointerTableSampleBindsTheMostCommonEntry() {
+    const auto first = atAddress(Texture2D, 0x21u);
+    const auto common = atAddress(Texture2D, 0x22u);
+    const std::array<TextureDescriptor, 7> entries{first, common, common, HostPointers, first, first, first};
+    const auto result = samplePointerTable(SampleLz2D, entries);
+    requireImage(result, common, DescriptorImageShape::Image2D, "a 2D sample through a pointer table did not bind the most common 2D entry before the first entry it cannot sample");
+    require(result.unresolvedImages == 0u, "a 2D sample through a pointer table was reported as a null texture");
+}
+
+void pointerTableEndsAtANullEntry() {
+    const auto first = atAddress(Texture2D, 0x21u);
+    const auto late = atAddress(Texture2D, 0x22u);
+    const std::array<TextureDescriptor, 4> entries{first, NullTexture, late, late};
+    const auto result = samplePointerTable(SampleLz2D, entries);
+    requireImage(result, first, DescriptorImageShape::Image2D, "a pointer table did not end at its first null entry");
+}
+
+void pointerTableStartingWithANullEntryReadsAsNull() {
+    const auto first = atAddress(Texture2D, 0x21u);
+    const std::array<TextureDescriptor, 3> entries{NullTexture, first, first};
+    const auto result = samplePointerTable(SampleLz2D, entries);
+    requireImage(result, NullTexture, DescriptorImageShape::Image2D, "a pointer table whose first entry is null was read past that entry");
+}
+
+void volumeSampleOfPointerTableEndsAtDataAboveApplicationMemory() {
+    const std::array<TextureDescriptor, 3> entries{Texture3D, LightDataAboveApplicationMemory, LightDataAboveApplicationMemory};
+    const auto result = samplePointerTable(SampleLz3D, entries);
+    requireImage(result, Texture3D, DescriptorImageShape::Image3D, "a 3D sample through a pointer table bound CPU data that decodes as a 3D image above 1 TiB");
+}
+
+void pointerTableEndsAtItsFirstUnreadableEntry() {
+    const auto first = atAddress(Texture2D, 0x21u);
+    const auto late = atAddress(Texture2D, 0x22u);
+    const std::array<TextureDescriptor, 3> head{first, first, late};
+    const std::array<TextureDescriptor, 6> tail{late, late, late, late, late, late};
+    const auto headBytes = tableBytes(head);
+    const auto tailBytes = tableBytes(tail);
+    const std::array<MemoryRegion, 2> memory{{
+        {TableAddress + PointerTableOffset, headBytes},
+        {TableAddress + PointerTableOffset + 4u * sizeof(TextureDescriptor), tailBytes},
+    }};
+    const auto result = samplePointerTableMemory(SampleLz2D, ShiftS8By5IntoS9, memory);
+    requireImage(result, first, DescriptorImageShape::Image2D, "a pointer table did not end at its first unreadable entry");
+}
+
+void pointerTableIsReadUpTo256Entries() {
+    const auto first = atAddress(Texture2D, 0x21u);
+    const auto late = atAddress(Texture2D, 0x22u);
+    std::vector<TextureDescriptor> entries(PointerTableEntries + 44u, late);
+    std::fill(entries.begin(), entries.begin() + PointerTableEntries / 2u + 1u, first);
+    const auto result = samplePointerTable(SampleLz2D, entries);
+    requireImage(result, first, DescriptorImageShape::Image2D, "a pointer table was read past 256 entries");
+}
+
+void cubeSampleOfPointerTableEndsAtAnotherImageType() {
+    const auto array = atAddress(Texture2DArray, 0x71u);
+    const auto laterCube = atAddress(TextureCube, 0x11u);
+    const std::array<TextureDescriptor, 6> entries{TextureCube, array, array, array, laterCube, laterCube};
+    const auto result = samplePointerTable(SampleLzCube, entries);
+    requireImage(result, TextureCube, DescriptorImageShape::ImageCube, "a cube sample through a pointer table did not end the table at its first entry of another image type");
+}
+
+void descriptorOutsideATableStillReadsAsNull() {
+    const std::array<TextureDescriptor, 4> entries{Texture2D, Texture2D, Texture2D, Texture2D};
+    const auto bytes = tableBytes(entries);
+    const std::array<MemoryRegion, 1> memory{MemoryRegion{TableAddress + PointerTableOffset, bytes}};
+    const auto result = samplePointerTableMemory(SampleLz2D, ShiftS8By4IntoS9, memory);
+    requireImage(result, NullTexture, DescriptorImageShape::Image2D, "a descriptor read at a 16-byte index scale was resolved as a table of image descriptors");
+    require(result.unresolvedImages == 1u, "an image whose descriptor is selected at run time and cannot be resolved was not reported");
+}
+
 void arraySampleOfPlaneTextureReadsTheLodAfterTheSlice() {
     const auto result = sampleTexture(SampleL2DArray, Texture2D);
     requireImage(result, Texture2D, DescriptorImageShape::Image2DArray, "a 2D-array sample of a 2D texture was not specialized as an array");
@@ -309,12 +444,22 @@ void planeSampleOfVolumeTextureKeepsTheInstructionShape() {
 }
 
 int main() {
-    const std::array<std::pair<const char*, void (*)()>, 16> tests{{
+    const std::array<std::pair<const char*, void (*)()>, 26> tests{{
         {"skipped lighting programs from run 27 compile", &skippedLightingProgramsCompile},
         {"a 2D sample of a cube-majority table binds its 2D entry", &planeSampleOfCubeMajorityTableBindsItsPlaneEntry},
         {"a cube sample of a cube-majority table binds a cube entry", &cubeSampleOfCubeMajorityTableBindsACubeEntry},
         {"a 2D sample of a table without 2D entries binds a null image", &tableWithoutAnEntryOfTheSampleShapeBindsANullImage},
         {"a 2D sample of a 1D-array-majority table binds its 2D entry", &planeSampleOfLineArrayMajorityTableBindsItsPlaneEntry},
+        {"a cube sample of a 2D-majority table prefers its cube entry", &cubeSampleOfPlaneMajorityTableBindsItsCubeEntry},
+        {"a 3D sample of a light table skips CPU data that decodes as a 3D image above 1 TiB", &volumeSampleOfTableSkipsDataAboveApplicationMemory},
+        {"a T# loaded with s_load_dwordx8 from a pointer plus a scaled index binds the most common entry before the first entry it cannot sample", &pointerTableSampleBindsTheMostCommonEntry},
+        {"a pointer table ends at its first unreadable entry", &pointerTableEndsAtItsFirstUnreadableEntry},
+        {"a pointer table ends at its first null entry", &pointerTableEndsAtANullEntry},
+        {"a pointer table whose first entry is null reads as null", &pointerTableStartingWithANullEntryReadsAsNull},
+        {"a 3D sample through a pointer table ends at CPU data that decodes as a 3D image above 1 TiB", &volumeSampleOfPointerTableEndsAtDataAboveApplicationMemory},
+        {"a pointer table is read up to 256 entries", &pointerTableIsReadUpTo256Entries},
+        {"a cube sample through a pointer table ends the table at its first entry of another image type", &cubeSampleOfPointerTableEndsAtAnotherImageType},
+        {"a descriptor read at an index scale below 32 bytes still reads as null and is reported", &descriptorOutsideATableStillReadsAsNull},
         {"a 2D sample of a 2D texture reads the LOD after both coordinates", &planeSampleReadsTheLodAfterBothCoordinates},
         {"a 2D-array sample of a 2D texture reads the LOD after the slice", &arraySampleOfPlaneTextureReadsTheLodAfterTheSlice},
         {"a 2D sample of a 1D texture keeps the 1D shape", &planeSampleOfLineTextureKeepsTheLineShape},
