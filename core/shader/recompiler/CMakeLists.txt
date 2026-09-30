@@ -93,6 +93,7 @@ function(add_shader_recompiler target runtimeTarget)
             ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/Optimization/src/ConstantFolder.cpp
             ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/Optimization/src/DeadCodeEliminator.cpp
             ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/Optimization/src/ReadLaneEliminator.cpp
+            ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/Optimization/src/IndirectBufferExpander.cpp
             ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/Optimization/src/ResourceTracker.cpp
             ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/Optimization/src/ResourceMaterializer.cpp
             ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/Optimization/src/BindingAllocator.cpp

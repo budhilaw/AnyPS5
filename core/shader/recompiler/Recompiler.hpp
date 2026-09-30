@@ -249,9 +249,11 @@ struct DescriptorBinding {
     std::vector<std::uint32_t> guestDescriptor;
     bool readOnly = false;
     std::vector<bool> elementWritten;
+    std::vector<bool> elementOptional;
     std::vector<bool> elementRead;
     std::optional<DescriptorImageShape> imageShape;
     std::vector<bool> samplerDepthCompare;
+    bool imageDepthCompare = false;
 };
 
 struct VertexAttribute {
@@ -305,6 +307,7 @@ struct RecompileResult {
     std::int32_t instanceOffsetSgpr = -1;
     std::vector<std::uint32_t> parameterExports;
     std::vector<FragmentParameter> fragmentParameters;
+    std::uint32_t unresolvedImages = 0;
     bool cacheHit = false;
 };
 

@@ -64,6 +64,7 @@ struct IrResourcePlan {
     bool requiresSpecializationMemory = false;
     bool srtPlanComplete = false;
     bool resourceTrackingComplete = false;
+    std::uint32_t unresolvedImages = 0;
     ShaderInfo info;
     UniformFillPlan uniformFill;
 };

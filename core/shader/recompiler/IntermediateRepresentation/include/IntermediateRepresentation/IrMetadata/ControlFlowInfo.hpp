@@ -30,9 +30,18 @@ struct DescriptorSource {
         bool operator==(const IndirectImage& other) const = default;
     };
 
+    struct TableImage {
+        std::uint32_t bufferSource = 0;
+        std::uint32_t offset = 0;
+        std::uint32_t stride = 0;
+
+        bool operator==(const TableImage& other) const = default;
+    };
+
     std::array<IrValue*, 8> dwords {};
     std::uint32_t dwordCount = 0;
     std::optional<IndirectImage> indirectImage;
+    std::optional<TableImage> tableImage;
 
     bool operator==(const DescriptorSource& other) const = default;
 };

@@ -214,7 +214,7 @@ private:
     std::uint32_t InternSource(const DescriptorSource& descriptor) {
         for (std::uint32_t candidate = 0; candidate < m_sources.size(); candidate++) {
             const auto& current = m_sources[candidate];
-            if (current.dwordCount != descriptor.dwordCount || current.indirectImage != descriptor.indirectImage) {
+            if (current.dwordCount != descriptor.dwordCount || current.indirectImage != descriptor.indirectImage || current.tableImage != descriptor.tableImage) {
                 continue;
             }
             bool same = true;
@@ -450,6 +450,89 @@ private:
         source = InternSource(descriptor);
     }
 
+    bool ResolvableImage(const IrValue& handle) {
+        DescriptorSource descriptor;
+        MakeSource(handle, 8, false, false, descriptor);
+        for (std::uint32_t dword = 0; dword < descriptor.dwordCount; dword++) {
+            if (descriptor.dwords[dword]->Resolve()->Opcode() == IrOpcode::ReadConstBuffer) {
+                return false;
+            }
+        }
+        std::uint32_t badDword = 0;
+        return ValidateSource(descriptor, badDword);
+    }
+
+    bool TryTableImageSource(IrValue& handle, std::uint32_t& source) {
+        if (handle.Opcode() != IrOpcode::GetImageResource || handle.ArgumentCount() != 8u) {
+            return false;
+        }
+        IrValue* buffer = nullptr;
+        IrValue* offset = nullptr;
+        std::uint32_t first = 0;
+        for (std::uint32_t dword = 0; dword < 8u; dword++) {
+            IrValue* read = handle.Argument(dword)->Resolve();
+            std::uint32_t memoryIndex = 0;
+            const MemoryInfo* memory = ScalarReadMemory(*read, memoryIndex);
+            if (memory == nullptr) {
+                return false;
+            }
+            IrValue* readBuffer = read->Argument(0)->Resolve();
+            IrValue* readOffset = read->Argument(1)->Resolve();
+            if (dword == 0u) {
+                buffer = readBuffer;
+                offset = readOffset;
+                first = memory->offset;
+            } else if (!EquivalentValue(m_program.Resources(), buffer, readBuffer) || !EquivalentValue(m_program.Resources(), offset, readOffset) || memory->offset != first + dword * 4u) {
+                return false;
+            }
+        }
+        std::uint32_t constant = 0;
+        std::uint32_t stride = 0;
+        IrValue* value = offset;
+        if (value->Opcode() == IrOpcode::IAdd32 && value->ArgumentCount() == 2u) {
+            if (immediateU32(value->Argument(0), constant)) {
+                value = value->Argument(1)->Resolve();
+            } else if (immediateU32(value->Argument(1), constant)) {
+                value = value->Argument(0)->Resolve();
+            } else {
+                return false;
+            }
+        }
+        bool indexed = false;
+        if (value->Opcode() == IrOpcode::IMul32 && value->ArgumentCount() == 2u) {
+            indexed = immediateU32(value->Argument(1), stride) || immediateU32(value->Argument(0), stride);
+        } else if (value->Opcode() == IrOpcode::ShiftLeftLogical32 && value->ArgumentCount() == 2u && immediateU32(value->Argument(1), stride) && stride < 16u) {
+            stride = 1u << stride;
+            indexed = true;
+        }
+        if (!indexed || stride < 32u) {
+            return false;
+        }
+        DescriptorSource bufferDescriptor;
+        std::uint32_t bufferSource = 0;
+        if (!MakeRuntimeBufferSource(*buffer, bufferSource, bufferDescriptor)) {
+            return false;
+        }
+        for (std::uint32_t dword = 0; dword < 8u; dword++) {
+            handle.ReplaceArgument(dword, &m_builder.Constant(0u));
+        }
+        DescriptorSource descriptor;
+        MakeSource(handle, 8, false, false, descriptor);
+        descriptor.tableImage = DescriptorSource::TableImage {bufferSource, constant + first, stride};
+        source = InternSource(descriptor);
+        return true;
+    }
+
+    std::uint32_t NullImageSource(IrValue& handle) {
+        for (std::uint32_t dword = 0; dword < 8u; dword++) {
+            handle.ReplaceArgument(dword, &m_builder.Constant(0u));
+        }
+        DescriptorSource descriptor;
+        MakeSource(handle, 8, false, false, descriptor);
+        m_program.Resources().unresolvedImages++;
+        return InternSource(descriptor);
+    }
+
     void ValidateAddressHandle(IrValue* value) const {
         const IrValue* handle = value->Resolve();
         if (handle->Opcode() != IrOpcode::GetAddressResource) {
@@ -463,6 +546,7 @@ private:
     std::uint32_t AddBuffer(std::uint32_t source, const MemoryInfo& memory, IrOpcode op, std::uint32_t pc) {
         for (std::uint32_t i = 0; i < m_info.buffers.size(); i++) {
             if (m_info.buffers[i].source == source) {
+                m_info.buffers[i].optional = m_info.buffers[i].optional && memory.indirectCandidate;
                 Merge(m_info.buffers[i], memory, op, pc);
                 return i;
             }
@@ -473,6 +557,7 @@ private:
         BufferResource resource;
         resource.source = source;
         resource.firstUsePc = pc;
+        resource.optional = memory.indirectCandidate;
         Merge(resource, memory, op, pc);
         m_info.buffers.push_back(resource);
         return static_cast<std::uint32_t>(m_info.buffers.size() - 1);
@@ -643,6 +728,10 @@ private:
         const IndirectImagePlan* indirect = FindIndirectImage(*handle);
         if (indirect != nullptr) {
             source = indirect->source;
+        } else if (imageInfo.access == ImageAccess::Read && handle->Opcode() == IrOpcode::GetImageResource && handle->ArgumentCount() == 8u && !ResolvableImage(*handle)) {
+            if (!TryTableImageSource(*handle, source)) {
+                source = NullImageSource(*handle);
+            }
         } else {
             GetHandle(inst.Argument(0), IrOpcode::GetImageResource, 8, handle, source);
         }

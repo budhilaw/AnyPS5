@@ -25,6 +25,7 @@ struct BufferResource {
     bool atomic = false;
     bool formatted = false;
     bool scalar = false;
+    bool optional = false;
 
     bool operator==(const BufferResource& other) const = default;
 };

@@ -45,6 +45,7 @@ struct MemoryInfo {
     bool idxen = false;
     bool offen = false;
     bool planningOnly = false;
+    bool indirectCandidate = false;
 
     bool operator==(const MemoryInfo& other) const = default;
 };

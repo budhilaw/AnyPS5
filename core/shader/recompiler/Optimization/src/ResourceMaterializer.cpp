@@ -1,8 +1,10 @@
 #include "Optimization/ResourceMaterializer.hpp"
+#include "SpirvBackend/SpirvBufferFormat.hpp"
 #include "IntermediateRepresentation/IrBuilder.hpp"
 #include "Optimization/ShaderStageInputInfo.hpp"
 #include "RdnaDecoder/RdnaDescriptorFormat.hpp"
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <array>
 #include <cstdint>
@@ -212,6 +214,69 @@ void resolveIndirectImage(const IrResourcePlan& plan, std::uint32_t imageIndex, 
     resolved = candidates[key];
 }
 
+void resolveTableImage(const IrResourcePlan& plan, std::uint32_t imageIndex, const DescriptorSource::TableImage& table, const SrtRuntime& runtime, SrtWalker& walker, DescriptorValue& resolved) {
+    const auto& image = plan.info.images.at(imageIndex);
+    resolved = DescriptorValue{};
+    resolved.dwordCount = 8u;
+    if (runtime.readMemory == nullptr || table.stride == 0u) {
+        return;
+    }
+    DescriptorValue bufferValue;
+    walker.EvaluateDescriptorSource(plan, table.bufferSource, runtime, bufferValue);
+    const ShaderBufferResource buffer = decodeBufferDescriptor(bufferValue);
+    const std::uint64_t base = buffer.Base48();
+    const std::uint64_t size = buffer.GetSize();
+    if (base == 0u) {
+        return;
+    }
+    const auto plausible = [&](const DescriptorValue& candidate) {
+        if (!validImageDescriptor(candidate, image.r128) || (candidate.dwords[0] | (candidate.dwords[1] & 0xffu)) == 0u) {
+            return false;
+        }
+        for (std::uint32_t component = 0; component < 4u; component++) {
+            const auto selector = (candidate.dwords[3] >> (component * 3u)) & 7u;
+            if (selector == 2u || selector == 3u) {
+                return false;
+            }
+        }
+        try {
+            (void)decodeImageDescriptor(candidate, image);
+        } catch (const std::exception&) {
+            return false;
+        }
+        return true;
+    };
+    std::vector<std::pair<DescriptorValue, std::uint32_t>> seen;
+    for (std::uint64_t at = table.offset, entry = 0; at + 32u <= size && entry < 256u; at += table.stride, entry++) {
+        DescriptorValue candidate;
+        candidate.dwordCount = 8u;
+        bool readable = true;
+        for (std::uint32_t dword = 0; dword < 8u && readable; dword++) {
+            readable = runtime.readMemory(runtime.userContext, base + at + dword * sizeof(std::uint32_t), &candidate.dwords[dword]);
+        }
+        if (!readable || !plausible(candidate)) {
+            continue;
+        }
+        const auto match = std::find_if(seen.begin(), seen.end(), [&](const auto& item) { return item.first.dwords == candidate.dwords; });
+        if (match == seen.end()) {
+            seen.emplace_back(candidate, 1u);
+        } else {
+            match->second++;
+        }
+    }
+    if (seen.empty()) {
+        return;
+    }
+    const auto chosen = std::max_element(seen.begin(), seen.end(), [](const auto& left, const auto& right) { return left.second < right.second; });
+    resolved = chosen->first;
+    if (seen.size() > 1u) {
+        static std::atomic<int> reported{0};
+        if (reported.fetch_add(1) < 8) {
+            std::fprintf(stderr, "image table at 0x%llx (stride %u) holds %zu different images; every entry reads the most common one\n", static_cast<unsigned long long>(base + table.offset), table.stride, seen.size());
+        }
+    }
+}
+
 void materializeSnapshot(const IrResourcePlan& plan, const SrtRuntime& runtime, SrtWalker& walker, ResourceSnapshot& snapshot, std::vector<std::vector<DescriptorValue>>& indirectCandidates) {
     snapshot = ResourceSnapshot{};
     if (plan.uniformFill.fill.kind != UniformFillKind::None) {
@@ -243,6 +308,23 @@ void materializeSnapshot(const IrResourcePlan& plan, const SrtRuntime& runtime, 
         throw std::runtime_error("materialization sources are missing buffer descriptors");
     }
     snapshot.buffers.assign(values.begin(), values.begin() + plan.info.buffers.size());
+    for (std::uint32_t i = 0; i < plan.info.buffers.size(); i++) {
+        if (!plan.info.buffers[i].optional) continue;
+        const ShaderBufferResource decoded = decodeBufferDescriptor(snapshot.buffers[i]);
+        bool usable = (decoded.Type() == 0u || decoded.Type() == 3u) && (decoded.fields[1] & 0x40000000u) == 0u && decoded.Base48() != 0u && decoded.GetSize() <= (256ull << 20u);
+        if (usable && plan.info.buffers[i].formatted) {
+            try {
+                (void)GetFormatComponentType(decoded.Format());
+            } catch (const std::exception&) {
+                usable = false;
+            }
+            for (std::uint32_t component = 0; component < 4u; component++) {
+                const auto selector = (decoded.DstSelXYZW() >> (component * 3u)) & 7u;
+                if (selector == 2u || selector == 3u) usable = false;
+            }
+        }
+        if (!usable) snapshot.buffers[i].dwords.fill(0u);
+    }
     cursor += plan.info.buffers.size();
 
     snapshot.images.resize(plan.info.images.size());
@@ -253,6 +335,10 @@ void materializeSnapshot(const IrResourcePlan& plan, const SrtRuntime& runtime, 
             throw std::runtime_error("image resource references an unknown descriptor source");
         }
         const auto& source = plan.descriptorSources[image.source];
+        if (source.tableImage.has_value()) {
+            resolveTableImage(plan, i, *source.tableImage, runtime, walker, snapshot.images[i]);
+            continue;
+        }
         if (source.indirectImage.has_value()) {
             if (image.source < activeSources.size() && activeSources[image.source] == 0u) {
                 snapshot.images[i].dwordCount = 8u;
@@ -625,7 +711,7 @@ IrResourcePlan ResourceMaterializer::ExtractPlan(const IrProgram& program) const
         if (image.source >= plan.descriptorSources.size()) {
             throw std::runtime_error("ResourceMaterializer::ExtractPlan image references an unknown descriptor source");
         }
-        if (plan.descriptorSources[image.source].indirectImage.has_value()) {
+        if (plan.descriptorSources[image.source].indirectImage.has_value() || plan.descriptorSources[image.source].tableImage.has_value()) {
             plan.requiresSpecializationMemory = true;
         } else {
             addSource(image.source);

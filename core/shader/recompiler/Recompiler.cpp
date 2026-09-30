@@ -3,6 +3,7 @@
 #include <future>
 #include "CacheKey.hpp"
 #include <mutex>
+#include <string_view>
 #include <shared_mutex>
 #include <unordered_map>
 #include "ControlFlow/include/ControlFlow/GraphBuilder.hpp"
@@ -13,6 +14,7 @@
 #include "Optimization/include/Optimization/ConstantFolder.hpp"
 #include "Optimization/include/Optimization/DeadCodeEliminator.hpp"
 #include "Optimization/include/Optimization/DescriptorBindingBuilder.hpp"
+#include "Optimization/include/Optimization/IndirectBufferExpander.hpp"
 #include "Optimization/include/Optimization/ReadLaneEliminator.hpp"
 #include "Optimization/include/Optimization/RequestMemoryView.hpp"
 #include "Optimization/include/Optimization/ResourceMaterializer.hpp"
@@ -61,7 +63,7 @@ ShaderStageKind toShaderStageKind(ShaderStage stage) {
 
 }
 
-IrProgram PrepareResourceProgram(const RecompileRequest& request) {
+IrProgram PrepareResourceProgram(const RecompileRequest& request, bool expandIndirectBuffers) {
     const auto stageKind = toShaderStageKind(request.shader.stage);
     const auto inputInfo = BuildShaderStageInputInfo(stageKind, request.context, request.target.subgroupSize);
 
@@ -114,6 +116,9 @@ IrProgram PrepareResourceProgram(const RecompileRequest& request) {
         deadCodeEliminator.Eliminate(program);
     }
 
+    constexpr IndirectBufferExpander indirectBufferExpander;
+    if (expandIndirectBuffers && indirectBufferExpander.Expand(program) != 0u) deadCodeEliminator.Eliminate(program);
+
     constexpr SrtWalker srtWalker;
     srtWalker.BuildPlan(program);
     deadCodeEliminator.Eliminate(program);
@@ -123,6 +128,15 @@ IrProgram PrepareResourceProgram(const RecompileRequest& request) {
     deadCodeEliminator.Eliminate(program);
 
     return program;
+}
+
+IrProgram PrepareResourceProgram(const RecompileRequest& request) {
+    try {
+        return PrepareResourceProgram(request, false);
+    } catch (const std::runtime_error& error) {
+        if (std::string_view(error.what()).find("is not a valid runtime value") == std::string_view::npos) throw;
+        return PrepareResourceProgram(request, true);
+    }
 }
 
 namespace {
@@ -251,6 +265,7 @@ CompiledVariant compileVariant(const RecompileRequest& request, IrProgram progra
         result.spirvHash = hash != 0 ? hash : 1;
     }
     result.bdaAbiVersion = program.Info().usesDma ? request.target.bdaAbiVersion : 0u;
+    result.unresolvedImages = program.Resources().unresolvedImages;
     result.vertexOffsetSgpr = program.Info().vertexOffsetSgpr;
     result.instanceOffsetSgpr = program.Info().instanceOffsetSgpr;
     for (const auto& output : program.Info().outputs) {
