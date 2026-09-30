@@ -95,7 +95,7 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
             return;
         }
     }
-    ValidateShaders(shaders, state, context.subgroup, context.fragmentShaderBarycentric);
+    Require(!shaders.empty() && shaders.front().program != nullptr, "missing compiled shader");
     const auto shaderStages = PipelineStages(shaders);
     std::uint32_t meshGroups = 0;
     if (state.stages.mesh) {
@@ -112,6 +112,7 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
     if (state.stages.tessellation) Require(draw.indexCount % state.stages.tessellation->inputControlPoints == 0, "incomplete tessellation patch");
     timing.Mark("validate");
     Require(context.renderCache != nullptr && context.drawQueue != nullptr && context.graphicsPipelines != nullptr, "device graphics execution caches are unavailable");
+    const auto& attributes = shaders.front().program->vertexAttributes;
     auto storage = std::make_shared<DrawStorage>();
     auto& indices = storage->indices;
     std::uint32_t maxIndex = draw.indexed ? 0u : draw.firstVertex + draw.indexCount - 1u;
@@ -131,26 +132,26 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
             indexHandle = indices->Handle();
             indexData = indices->Bytes();
         }
-        for (std::size_t offset = 0; offset < indexBytes; offset += draw.indexSize) {
-            std::uint32_t index = 0;
-            if (draw.indexSize == 2) {
-                std::uint16_t value = 0;
-                std::memcpy(&value, indexData.data() + offset, sizeof(value));
-                index = value;
-            } else {
-                std::memcpy(&index, indexData.data() + offset, sizeof(index));
+        if (!attributes.empty() || context.limits.maxDrawIndexedIndexValue != std::numeric_limits<std::uint32_t>::max()) {
+            for (std::size_t offset = 0; offset < indexBytes; offset += draw.indexSize) {
+                std::uint32_t index = 0;
+                if (draw.indexSize == 2) {
+                    std::uint16_t value = 0;
+                    std::memcpy(&value, indexData.data() + offset, sizeof(value));
+                    index = value;
+                } else {
+                    std::memcpy(&index, indexData.data() + offset, sizeof(index));
+                }
+                Require(index <= context.limits.maxDrawIndexedIndexValue, "index exceeds the device's indexed draw limit");
+                maxIndex = std::max(maxIndex, index);
             }
-            Require(index <= context.limits.maxDrawIndexedIndexValue, "index exceeds the device's indexed draw limit");
-            maxIndex = std::max(maxIndex, index);
+            const auto baseVertex = static_cast<std::int64_t>(static_cast<std::int32_t>(draw.firstVertex));
+            const auto highest = static_cast<std::int64_t>(maxIndex) + baseVertex;
+            Require(highest >= 0 && highest <= static_cast<std::int64_t>(std::numeric_limits<std::uint32_t>::max()), "indexed draw base vertex moves the fetch range outside the vertex domain");
+            maxIndex = static_cast<std::uint32_t>(highest);
         }
-        const auto baseVertex = static_cast<std::int64_t>(static_cast<std::int32_t>(draw.firstVertex));
-        const auto highest = static_cast<std::int64_t>(maxIndex) + baseVertex;
-        Require(highest >= 0 && highest <= static_cast<std::int64_t>(std::numeric_limits<std::uint32_t>::max()), "indexed draw base vertex moves the fetch range outside the vertex domain");
-        maxIndex = static_cast<std::uint32_t>(highest);
     }
     timing.Mark("index_upload");
-    const auto& attributes = shaders.front().program->vertexAttributes;
-    static_cast<void>(BuildVertexInputLayout(context, attributes));
     auto& vertexBuffers = storage->vertices;
     std::vector<VkBuffer> vertexHandles;
     std::vector<VkDeviceSize> vertexOffsets(attributes.size(), 0);
