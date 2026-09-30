@@ -22,7 +22,7 @@ public:
     const std::vector<std::pair<std::uint32_t, std::uint32_t>>& TextureBindings() const { return textureBindings; }
     std::string DescribeTextures() const;
     ShaderResources(const Context& context, const ShaderRecompiler::RecompileResult& vertex, const ShaderRecompiler::RecompileResult& fragment, const ColorTarget& target, std::uint64_t indexAddress, std::size_t indexBytes);
-    ShaderResources(const Context& context, std::span<const CompiledShader> shaders, const ColorTarget& target, std::uint64_t indexAddress, std::size_t indexBytes, std::span<const GuestMemorySnapshot> snapshots = {});
+    ShaderResources(const Context& context, std::span<const CompiledShader> shaders, const ColorTarget& target, std::uint64_t indexAddress, std::size_t indexBytes, std::span<const GuestMemorySnapshot> snapshots = {}, const DepthImage* attachedDepth = nullptr);
     ShaderResources(const Context& context, const CompiledShader& compute, std::span<const GuestMemorySnapshot> snapshots = {});
     ~ShaderResources();
     ShaderResources(const ShaderResources&) = delete;
@@ -56,12 +56,12 @@ private:
         std::vector<std::size_t> imageAllocations;
     };
 
-    void build(std::span<const CompiledShader> shaders, const ColorTarget* target, std::uint64_t indexAddress, std::size_t indexBytes);
+    void build(std::span<const CompiledShader> shaders, const ColorTarget* target, std::uint64_t indexAddress, std::size_t indexBytes, const DepthImage* attachedDepth);
     bool usableOptionalBuffer(std::span<const std::uint32_t> words) const;
     std::size_t addGuestBuffer(std::span<const std::uint32_t> words, bool written, bool read, const ColorTarget* target, std::uint64_t indexAddress, std::size_t indexBytes);
     std::size_t addDataBuffer(std::span<const std::uint32_t> words);
     std::size_t addZeroBuffer(std::uint64_t address, std::size_t size);
-    void addImageBinding(const ShaderRecompiler::DescriptorBinding& binding, VkShaderStageFlags flags, std::vector<Binding>& bindings);
+    void addImageBinding(const ShaderRecompiler::DescriptorBinding& binding, VkShaderStageFlags flags, std::vector<Binding>& bindings, const DepthImage* attachedDepth);
     void release() noexcept;
     void prepareAddressBindings(std::span<const CompiledShader> shaders, std::span<const GuestMemorySnapshot> snapshots);
     VkDescriptorBufferInfo descriptor(const Allocation& allocation) const;

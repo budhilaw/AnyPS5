@@ -215,8 +215,12 @@ DepthImage::DepthImage(const Context& context, const DepthTarget& target) : cont
     VkFormatProperties properties{};
     context.formatProperties(context.physical, target.format, &properties);
     Require((properties.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) != 0, "depth format is not supported as an attachment");
-    constexpr auto usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    static const bool copies = std::getenv("ANYPS5_DEPTH_COPY") != nullptr;
+    VkImageUsageFlags usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     VkImageFormatProperties supported{};
+    sampled = !copies && (properties.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) != 0 && context.imageFormatProperties(context.physical, target.format, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL, usage | VK_IMAGE_USAGE_SAMPLED_BIT, 0, &supported) == VK_SUCCESS;
+    filterable = sampled && (properties.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) != 0;
+    if (sampled) usage |= VK_IMAGE_USAGE_SAMPLED_BIT;
     Check(context.imageFormatProperties(context.physical, target.format, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL, usage, 0, &supported), "vkGetPhysicalDeviceImageFormatProperties depth");
     Require(target.extent.width <= supported.maxExtent.width && target.extent.height <= supported.maxExtent.height, "depth target exceeds device image limits");
     try {
@@ -256,27 +260,66 @@ DepthImage::~DepthImage() {
 }
 
 void DepthImage::release() noexcept {
+    for (std::uint32_t index = 0; index < sampledViewCount; ++index) ReleaseImage(context, sampledViews[index].view, VK_NULL_HANDLE, VK_NULL_HANDLE);
+    sampledViewCount = 0;
     ReleaseImage(context, view, image, memory);
 }
 
-void DepthImage::Prepare(VkCommandBuffer commands) {
-    ++generation;
+VkImageView DepthImage::SampledView(bool stencil, bool arrayed, VkComponentMapping components) {
+    for (std::uint32_t index = 0; index < sampledViewCount; ++index) {
+        const auto& cached = sampledViews[index];
+        if (cached.stencil == stencil && cached.arrayed == arrayed && cached.components.r == components.r && cached.components.g == components.g && cached.components.b == components.b && cached.components.a == components.a) return cached.view;
+    }
+    if (!sampled || (stencil && !target.stencil) || sampledViewCount == sampledViews.size()) return VK_NULL_HANDLE;
+    VkImageViewUsageCreateInfo viewUsage{VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO};
+    viewUsage.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
+    VkImageViewCreateInfo viewInfo{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    viewInfo.pNext = &viewUsage;
+    viewInfo.image = image;
+    viewInfo.viewType = arrayed ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
+    viewInfo.format = target.format;
+    viewInfo.components = components;
+    viewInfo.subresourceRange = {static_cast<VkImageAspectFlags>(stencil ? VK_IMAGE_ASPECT_STENCIL_BIT : VK_IMAGE_ASPECT_DEPTH_BIT), 0, 1, 0, 1};
+    VkImageView created = VK_NULL_HANDLE;
+    Check(context.Function<PFN_vkCreateImageView>("vkCreateImageView")(context.device, &viewInfo, nullptr, &created), "vkCreateImageView sampled depth");
+    sampledViews[sampledViewCount++] = {stencil, arrayed, components, created};
+    return created;
+}
+
+void DepthImage::Prepare(VkCommandBuffer commands, bool writes) {
+    if (writes) ++generation;
     Transition(commands, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
 }
 
 void DepthImage::Transition(VkCommandBuffer commands, VkImageLayout newLayout) {
-    const auto attachmentAccess = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    const VkPipelineStageFlags shaderStages = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | (context.tessellationShader ? VK_PIPELINE_STAGE_TESSELLATION_CONTROL_SHADER_BIT | VK_PIPELINE_STAGE_TESSELLATION_EVALUATION_SHADER_BIT : 0u) | (context.meshShader ? static_cast<VkPipelineStageFlags>(VK_PIPELINE_STAGE_MESH_SHADER_BIT_EXT) : 0u);
+    const VkPipelineStageFlags testStages = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
     VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
-    barrier.srcAccessMask = layout == VK_IMAGE_LAYOUT_UNDEFINED ? 0u : layout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL ? VK_ACCESS_TRANSFER_READ_BIT : attachmentAccess;
-    barrier.dstAccessMask = newLayout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL ? VK_ACCESS_TRANSFER_READ_BIT : attachmentAccess;
+    VkPipelineStageFlags sourceStages = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+    if (layout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL) {
+        sourceStages = testStages;
+        barrier.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    } else if (layout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL) {
+        sourceStages = shaderStages;
+    } else if (layout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL) {
+        sourceStages = VK_PIPELINE_STAGE_TRANSFER_BIT;
+    }
+    VkPipelineStageFlags destinationStages = testStages;
+    barrier.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    if (newLayout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL) {
+        destinationStages = VK_PIPELINE_STAGE_TRANSFER_BIT;
+        barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    } else if (newLayout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL) {
+        destinationStages = shaderStages;
+        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    }
     barrier.oldLayout = layout;
     barrier.newLayout = newLayout;
     barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     barrier.image = image;
     barrier.subresourceRange = {aspects, 0, 1, 0, 1};
-    const auto destinationStages = newLayout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL ? VK_PIPELINE_STAGE_TRANSFER_BIT : VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
-    context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, destinationStages, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+    context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(commands, sourceStages, destinationStages, 0, 0, nullptr, 0, nullptr, 1, &barrier);
     layout = newLayout;
 }
 

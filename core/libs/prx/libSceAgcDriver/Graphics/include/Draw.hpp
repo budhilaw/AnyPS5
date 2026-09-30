@@ -7,6 +7,7 @@
 namespace AgcDriver::Graphics {
 
 void Draw(const Context& context, const State& state, const Pm4::DrawParameters& draw, std::span<const CompiledShader> shaders, std::span<const GuestMemorySnapshot> snapshots = {});
+bool WritesDepthStencil(const DepthState& depthState);
 
 }
 

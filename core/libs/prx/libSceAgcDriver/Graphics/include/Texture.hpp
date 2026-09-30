@@ -29,6 +29,8 @@ public:
     bool IsDirectView() const { return directView; }
     Texture(const Context& context, const std::shared_ptr<Texture>& shared, const GuestTextureResource& descriptor, VkComponentMapping components);
     Texture(const Context& context, std::span<const std::shared_ptr<DepthImage>> sources, bool stencil, const GuestTextureResource& descriptor, VkComponentMapping components, bool compare = false);
+    struct DirectDepthView {};
+    Texture(const Context& context, const std::shared_ptr<DepthImage>& depth, VkImageView sampledView, bool stencil, const GuestTextureResource& descriptor, DirectDepthView);
     Texture(const Context& context, TextureDimension dimension, TextureNumericClass numericClass);
     ~Texture();
     Texture(const Texture&) = delete;
@@ -85,6 +87,7 @@ private:
     std::uint32_t imageLayers = 0;
     std::shared_ptr<Texture> sharedImage;
     bool ownsImage = true;
+    bool ownsView = true;
     bool directView = false;
     std::unique_ptr<Buffer> staging;
     std::unique_ptr<Buffer> linear;

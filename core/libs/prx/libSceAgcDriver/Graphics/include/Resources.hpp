@@ -2,6 +2,7 @@
 #define CORE_LIBS_PRX_LIBSCEAGCDRIVER_GRAPHICS_INCLUDE_RESOURCES_HPP
 
 #include "prx/libSceAgcDriver/Graphics/include/State.hpp"
+#include <array>
 #include <chrono>
 #include <span>
 
@@ -70,13 +71,23 @@ public:
     VkImageView View() const { return view; }
     VkImageAspectFlags Aspects() const { return aspects; }
     const DepthTarget& Description() const { return target; }
-    void Prepare(VkCommandBuffer commands);
+    void Prepare(VkCommandBuffer commands, bool writes);
     bool Attached() const { return layout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL; }
-    void Continue() { ++generation; }
+    bool ReadOnly() const { return layout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL; }
+    void Continue(bool writes) { if (writes) ++generation; }
     void Transition(VkCommandBuffer commands, VkImageLayout newLayout);
     std::uint64_t Generation() const { return generation; }
+    bool Sampled() const { return sampled; }
+    bool Filterable() const { return filterable; }
+    VkImageView SampledView(bool stencil, bool arrayed, VkComponentMapping components);
 
 private:
+    struct CachedView {
+        bool stencil = false;
+        bool arrayed = false;
+        VkComponentMapping components{};
+        VkImageView view = VK_NULL_HANDLE;
+    };
     void release() noexcept;
     Context context;
     DepthTarget target;
@@ -86,6 +97,10 @@ private:
     VkImage image = VK_NULL_HANDLE;
     VkImageView view = VK_NULL_HANDLE;
     VkDeviceMemory memory = VK_NULL_HANDLE;
+    bool sampled = false;
+    bool filterable = false;
+    std::array<CachedView, 4> sampledViews{};
+    std::uint32_t sampledViewCount = 0;
 };
 
 class CommandBatch {

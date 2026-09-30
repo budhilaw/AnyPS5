@@ -9,12 +9,16 @@
 #include <memory>
 #include <vector>
 
+namespace AgcDriver {
+class PerformanceTimer;
+}
+
 namespace AgcDriver::Graphics {
 
 class TextureCache {
 public:
     explicit TextureCache(const Context& context);
-    std::shared_ptr<Texture> Get(std::span<const std::uint32_t> words, const GuestTextureResource& resource, VkComponentMapping components, bool storage = false, bool compare = false);
+    std::shared_ptr<Texture> Get(std::span<const std::uint32_t> words, const GuestTextureResource& resource, VkComponentMapping components, bool storage = false, bool compare = false, const DepthImage* attachedDepth = nullptr);
     std::shared_ptr<Texture> Null(TextureDimension dimension, TextureNumericClass numericClass = TextureNumericClass::Float);
     std::shared_ptr<Texture> NullStorage(TextureDimension dimension, TextureNumericClass numericClass = TextureNumericClass::Float);
     void DumpTextures(const std::string& prefix);
@@ -39,11 +43,14 @@ private:
         std::uint64_t generation = 0;
         std::uint64_t retained = 0;
         bool compare = false;
+        bool depthView = false;
     };
     void trim();
     std::list<Entry>::iterator eraseEntry(std::list<Entry>::iterator it);
-    std::list<Entry>::iterator findEntry(const std::array<std::uint32_t, 8>& descriptor, TextureDimension viewDimension, bool compare = false);
+    std::list<Entry>::iterator findEntry(const std::array<std::uint32_t, 8>& descriptor, TextureDimension viewDimension, bool compare = false, bool depthView = false);
     void addEntry(Entry entry);
+    bool depthResident(const Entry& entry) const;
+    std::shared_ptr<Texture> directDepth(const std::array<std::uint32_t, 8>& key, const std::shared_ptr<DepthImage>& image, bool stencil, const GuestTextureResource& resource, VkComponentMapping components, bool compare, PerformanceTimer& timing);
     static std::uint64_t descriptorHash(const std::array<std::uint32_t, 8>& descriptor);
     static bool SameSurface(const GuestTextureResource& a, const GuestTextureResource& b);
     Context context;

@@ -338,7 +338,7 @@ void Texture::release() noexcept {
     staging.reset();
     linear.reset();
     ReleaseImage(context, storageView, VK_NULL_HANDLE, VK_NULL_HANDLE);
-    ReleaseImage(context, view, ownsImage ? image : VK_NULL_HANDLE, ownsImage ? memory : VK_NULL_HANDLE);
+    ReleaseImage(context, ownsView ? view : VK_NULL_HANDLE, ownsImage ? image : VK_NULL_HANDLE, ownsImage ? memory : VK_NULL_HANDLE);
     sharedImage.reset();
 }
 

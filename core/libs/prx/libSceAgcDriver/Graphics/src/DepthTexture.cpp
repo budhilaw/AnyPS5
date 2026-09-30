@@ -94,12 +94,14 @@ Texture::Texture(const Context& context, std::span<const std::shared_ptr<DepthIm
         upload = std::make_unique<CommandBatch>(context);
         const auto commands = upload->Handle();
         for (std::uint32_t layer = 0; layer < layers; ++layer) {
+            const bool readOnly = sources[layer]->ReadOnly();
             sources[layer]->Transition(commands, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
             VkBufferImageCopy toBuffer{};
             toBuffer.bufferOffset = sliceBytes * layer;
             toBuffer.imageSubresource = {stencil ? VK_IMAGE_ASPECT_STENCIL_BIT : VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1};
             toBuffer.imageExtent = info.extent;
             context.Function<PFN_vkCmdCopyImageToBuffer>("vkCmdCopyImageToBuffer")(commands, sources[layer]->Image(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, staging->Handle(), 1, &toBuffer);
+            if (readOnly) sources[layer]->Transition(commands, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL);
         }
         const auto pipelineBarrier = context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier");
         VkBufferMemoryBarrier bufferBarrier{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
@@ -133,6 +135,24 @@ Texture::Texture(const Context& context, std::span<const std::shared_ptr<DepthIm
         release();
         throw;
     }
+}
+
+Texture::Texture(const Context& context, const std::shared_ptr<DepthImage>& depth, VkImageView sampledView, bool stencil, const GuestTextureResource& descriptor, DirectDepthView) : context(context), depthSources{depth}, ownsImage(false), ownsView(false), directView(true) {
+    Require(depth != nullptr && sampledView != VK_NULL_HANDLE, "direct depth texture view has no sampled view");
+    const auto& target = depth->Description();
+    Require(!stencil || target.stencil, "stencil texture view of a depth target without stencil");
+    view = sampledView;
+    layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+    extent = {descriptor.width, descriptor.height};
+    imageLayers = 1;
+    guestAddress = descriptor.baseAddress;
+    guestTileMode = descriptor.tileMode;
+    guestFormat = target.format;
+    guestTexelBytes = stencil ? 1u : target.format == VK_FORMAT_D16_UNORM ? 2u : 4u;
+    guest2D = descriptor.dimension == TextureDimension::k2D;
+    guestMipCount = 1;
+    guestLayers = 1;
+    guestDimension = static_cast<std::uint32_t>(descriptor.dimension);
 }
 
 }

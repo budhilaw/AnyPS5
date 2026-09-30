@@ -59,10 +59,10 @@ void TextureCache::addEntry(Entry entry) {
     index.emplace(hash, std::prev(entries.end()));
 }
 
-std::list<TextureCache::Entry>::iterator TextureCache::findEntry(const std::array<std::uint32_t, 8>& descriptor, TextureDimension viewDimension, bool compare) {
+std::list<TextureCache::Entry>::iterator TextureCache::findEntry(const std::array<std::uint32_t, 8>& descriptor, TextureDimension viewDimension, bool compare, bool depthView) {
     if (++lookupsSinceSweep >= 1024) {
         lookupsSinceSweep = 0;
-        for (auto it = entries.begin(); it != entries.end();) it = it->surface && it->surface->stale ? eraseEntry(it) : std::next(it);
+        for (auto it = entries.begin(); it != entries.end();) it = (it->surface && it->surface->stale) || !depthResident(*it) ? eraseEntry(it) : std::next(it);
     }
     auto [first, last] = index.equal_range(descriptorHash(descriptor));
     while (first != last) {
@@ -72,16 +72,53 @@ std::list<TextureCache::Entry>::iterator TextureCache::findEntry(const std::arra
             eraseEntry(it);
             continue;
         }
-        if (it->descriptor == descriptor && it->viewDimension == viewDimension && it->compare == compare) return it;
+        if (it->descriptor == descriptor && it->viewDimension == viewDimension && it->compare == compare && it->depthView == depthView) return it;
     }
     return entries.end();
+}
+
+bool TextureCache::depthResident(const Entry& entry) const {
+    if (context.renderCache == nullptr) return true;
+    return std::all_of(entry.depthSources.begin(), entry.depthSources.end(), [&](const std::weak_ptr<DepthImage>& source) {
+        const auto image = source.lock();
+        return image != nullptr && context.renderCache->FindDepth(image->Description().address) == image;
+    });
+}
+
+std::shared_ptr<Texture> TextureCache::directDepth(const std::array<std::uint32_t, 8>& key, const std::shared_ptr<DepthImage>& image, bool stencil, const GuestTextureResource& resource, VkComponentMapping components, bool compare, PerformanceTimer& timing) {
+    const auto& target = image->Description();
+    const bool knownFormat = target.format == VK_FORMAT_D16_UNORM || target.format == VK_FORMAT_D32_SFLOAT || target.format == VK_FORMAT_D32_SFLOAT_S8_UINT;
+    const auto aspectBytes = stencil ? 1u : target.format == VK_FORMAT_D16_UNORM ? 2u : 4u;
+    const bool singleSlice = resource.dimension == TextureDimension::k2D || (resource.dimension == TextureDimension::k2DArray && resource.depthOrLastArray == 0);
+    const bool planarView = resource.viewDimension == TextureDimension::k2D || resource.viewDimension == TextureDimension::k2DArray;
+    if (context.drawQueue == nullptr || !image->Sampled() || (!stencil && !image->Filterable()) || (stencil && !target.stencil) || !knownFormat) return nullptr;
+    if (!singleSlice || !planarView || resource.mipCount != 1 || resource.baseLevel != 0 || resource.baseArray != 0 || resource.width != target.extent.width || resource.height != target.extent.height) return nullptr;
+    if (IsBlockCompressed(resource.format) || BytesPerElement(resource.format) != aspectBytes) return nullptr;
+    const auto view = image->SampledView(stencil, resource.viewDimension == TextureDimension::k2DArray, components);
+    if (view == VK_NULL_HANDLE) return nullptr;
+    if (!image->ReadOnly()) image->Transition(context.drawQueue->BeginBarrier(context), VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL);
+    const bool depthCompare = compare && !stencil;
+    if (const auto it = findEntry(key, resource.viewDimension, depthCompare, true); it != entries.end()) {
+        if (it->depthSources.size() == 1 && it->depthSources.front().lock() == image) {
+            auto result = it->texture;
+            entries.splice(entries.end(), entries, it);
+            timing.Mark("depth_view_hit");
+            return result;
+        }
+        eraseEntry(it);
+    }
+    auto texture = std::make_shared<Texture>(context, image, view, stencil, resource, Texture::DirectDepthView{});
+    addEntry({key, resource.viewDimension, texture, nullptr, {}, {image}, 0, 0, depthCompare, true});
+    trim();
+    timing.Mark("depth_view");
+    return texture;
 }
 
 bool TextureCache::SameSurface(const GuestTextureResource& a, const GuestTextureResource& b) {
     return a.baseAddress == b.baseAddress && a.width == b.width && a.height == b.height && a.mipCount == b.mipCount && a.tileMode == b.tileMode && FullArrayLayers(a) == FullArrayLayers(b) && (a.dimension == b.dimension || (a.dimension != TextureDimension::k3D && b.dimension != TextureDimension::k3D && a.dimension != TextureDimension::kCube && b.dimension != TextureDimension::kCube && a.dimension != TextureDimension::k1D && b.dimension != TextureDimension::k1D)) && ResolveTextureFormat(a.format) == ResolveTextureFormat(b.format);
 }
 
-std::shared_ptr<Texture> TextureCache::Get(std::span<const std::uint32_t> words, const GuestTextureResource& resource, VkComponentMapping components, bool storage, bool compare) {
+std::shared_ptr<Texture> TextureCache::Get(std::span<const std::uint32_t> words, const GuestTextureResource& resource, VkComponentMapping components, bool storage, bool compare, const DepthImage* attachedDepth) {
     Require(words.size() == 8, "texture cache descriptor must contain eight DWORDs");
     PerformanceTimer timing("Graphics.TextureCache");
     trim();
@@ -91,6 +128,8 @@ std::shared_ptr<Texture> TextureCache::Get(std::span<const std::uint32_t> words,
     bool stencil = false;
     if (resource.tileMode == TextureTileMode::Depth64KB && context.renderCache && !storage) {
         if (auto first = context.renderCache->FindDepth(resource.baseAddress, &stencil)) {
+            if (first.get() == attachedDepth) timing.Mark("depth_feedback_copy");
+            else if (auto direct = directDepth(key, first, stencil, resource, components, compare, timing)) return direct;
             const auto layers = FullArrayLayers(resource);
             const auto sliceBytes = DepthSliceBytes(BytesPerElement(resource.format), resource.width, resource.height);
             depthSources.push_back(std::move(first));

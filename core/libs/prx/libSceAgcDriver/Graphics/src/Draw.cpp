@@ -50,6 +50,11 @@ bool samplesAttachment(const std::vector<std::shared_ptr<Texture>>& textures, Dr
 
 }
 
+bool WritesDepthStencil(const DepthState& depthState) {
+    const auto writesFace = [](const VkStencilOpState& face) { return face.writeMask != 0 && (face.failOp != VK_STENCIL_OP_KEEP || face.passOp != VK_STENCIL_OP_KEEP || face.depthFailOp != VK_STENCIL_OP_KEEP); };
+    return depthState.write || depthState.clearDepth || depthState.clearStencil || (depthState.stencilTest && (writesFace(depthState.front) || writesFace(depthState.back)));
+}
+
 void Draw(const Context& context, const State& state, const Pm4::DrawParameters& draw, std::span<const CompiledShader> shaders, std::span<const GuestMemorySnapshot> snapshots) {
     PerformanceTimer timing("Graphics.Draw");
     {
@@ -197,7 +202,8 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
         vertexBuffers.push_back(std::move(buffer));
     }
     timing.Mark("vertex_upload");
-    auto resources = std::make_shared<ShaderResources>(context, shaders, state.color, draw.indexAddress, static_cast<std::size_t>(indexBytes), snapshots);
+    if (state.hasDepthTarget) storage->depth = context.renderCache->GetDepth(state.depth);
+    auto resources = std::make_shared<ShaderResources>(context, shaders, state.color, draw.indexAddress, static_cast<std::size_t>(indexBytes), snapshots, storage->depth.get());
     timing.Mark("shader_resources");
     {
         static const bool journalTextures = std::getenv("ANYPS5_DUMP_FRAME") != nullptr;
@@ -484,7 +490,6 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
             storage->extraColors.push_back(context.renderCache->Get(extra, state.extraBlends[i].blendEnable != 0));
         }
     }
-    if (state.hasDepthTarget) storage->depth = context.renderCache->GetDepth(state.depth);
     timing.Mark("render_target_cache");
     if (FrameTiming::Enabled() && samplesAttachment(resources->Textures(), *storage)) timing.Mark("feedback");
     RequireValidViewport(context, state);
@@ -504,6 +509,7 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
     if (storage->depth) passKey.views[passKey.viewCount++] = storage->depth->View();
     passKey.extent = state.renderExtent;
     const bool clears = state.hasDepthTarget && (state.depthState.clearDepth || (state.depth.stencil && state.depthState.clearStencil));
+    const bool depthWrites = WritesDepthStencil(state.depthState);
     const bool writes = resources->Writes();
     if (static const bool traceWrites = std::getenv("ANYPS5_TRACE_WAITS") != nullptr; traceWrites && writes) {
         static int reported = 0;
@@ -525,7 +531,7 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
     if (commands != VK_NULL_HANDLE) {
         if (storage->color) storage->color->Continue();
         for (const auto& extra : storage->extraColors) extra->Continue();
-        if (storage->depth) storage->depth->Continue();
+        if (storage->depth) storage->depth->Continue(depthWrites);
     } else {
         commands = context.drawQueue->Begin(context);
         VkMemoryBarrier upload{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
@@ -534,7 +540,7 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
         context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(commands, VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_VERTEX_INPUT_BIT | shaderStages, 0, 1, &upload, 0, nullptr, 0, nullptr);
         if (storage->color) storage->color->Begin(commands);
         for (const auto& extra : storage->extraColors) extra->Begin(commands);
-        if (storage->depth) storage->depth->Prepare(commands);
+        if (storage->depth) storage->depth->Prepare(commands, depthWrites);
         pipeline.BeginPass(commands, state.renderExtent);
         context.drawQueue->OpenPass(context, passKey);
     }

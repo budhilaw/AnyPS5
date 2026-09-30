@@ -137,18 +137,18 @@ void reportFallback(const char* kind, std::span<const std::uint32_t> words, cons
 
 ShaderResources::ShaderResources(const Context& context, const ShaderRecompiler::RecompileResult& vertex, const ShaderRecompiler::RecompileResult& fragment, const ColorTarget& target, std::uint64_t indexAddress, std::size_t indexBytes) : ShaderResources(context, std::array<CompiledShader, 2>{{{ShaderRecompiler::ShaderStage::Vertex, &vertex, 0}, {ShaderRecompiler::ShaderStage::Fragment, &fragment, static_cast<std::uint32_t>(vertex.pushConstants.size())}}}, target, indexAddress, indexBytes) {}
 
-ShaderResources::ShaderResources(const Context& context, std::span<const CompiledShader> shaders, const ColorTarget& target, std::uint64_t indexAddress, std::size_t indexBytes, std::span<const GuestMemorySnapshot> snapshots) : context(context), guestMemory(context) {
+ShaderResources::ShaderResources(const Context& context, std::span<const CompiledShader> shaders, const ColorTarget& target, std::uint64_t indexAddress, std::size_t indexBytes, std::span<const GuestMemorySnapshot> snapshots, const DepthImage* attachedDepth) : context(context), guestMemory(context) {
     prepareAddressBindings(shaders, snapshots);
-    build(shaders, &target, indexAddress, indexBytes);
+    build(shaders, &target, indexAddress, indexBytes, attachedDepth);
 }
 
 ShaderResources::ShaderResources(const Context& context, const CompiledShader& compute, std::span<const GuestMemorySnapshot> snapshots) : context(context), guestMemory(context) {
     Require(compute.stage == ShaderRecompiler::ShaderStage::Compute, "compute resources require a compute shader");
     prepareAddressBindings(std::span<const CompiledShader>(&compute, 1), snapshots);
-    build(std::span<const CompiledShader>(&compute, 1), nullptr, 0, 0);
+    build(std::span<const CompiledShader>(&compute, 1), nullptr, 0, 0, nullptr);
 }
 
-void ShaderResources::build(std::span<const CompiledShader> shaders, const ColorTarget* target, std::uint64_t indexAddress, std::size_t indexBytes) {
+void ShaderResources::build(std::span<const CompiledShader> shaders, const ColorTarget* target, std::uint64_t indexAddress, std::size_t indexBytes, const DepthImage* attachedDepth) {
     PerformanceTimer timing("Graphics.ShaderResources");
     try {
         Require(!shaders.empty() && context.limits.maxBoundDescriptorSets >= 1, "shader descriptor set exceeds device limits");
@@ -169,7 +169,7 @@ void ShaderResources::build(std::span<const CompiledShader> shaders, const Color
                 const bool imageRole = binding.role == ShaderRecompiler::DescriptorRole::GuestImages || binding.role == ShaderRecompiler::DescriptorRole::GuestSamplers;
                 if (imageRole) {
                     PerformanceTimer imageTiming("Graphics.ImageBinding");
-                    addImageBinding(binding, flags, bindings);
+                    addImageBinding(binding, flags, bindings, attachedDepth);
                     continue;
                 }
                 if (!bufferRole) Require(false, std::string("unsupported descriptor role ") + roleName(binding.role));
@@ -342,7 +342,7 @@ std::size_t ShaderResources::addDataBuffer(std::span<const std::uint32_t> words)
     return allocations.size() - 1;
 }
 
-void ShaderResources::addImageBinding(const ShaderRecompiler::DescriptorBinding& binding, VkShaderStageFlags flags, std::vector<Binding>& bindings) {
+void ShaderResources::addImageBinding(const ShaderRecompiler::DescriptorBinding& binding, VkShaderStageFlags flags, std::vector<Binding>& bindings, const DepthImage* attachedDepth) {
     Require(binding.count != 0, "empty descriptor binding");
     const bool sampledImage = binding.kind == ShaderRecompiler::DescriptorKind::SampledImage;
     const bool storageImage = binding.kind == ShaderRecompiler::DescriptorKind::StorageImage;
@@ -383,7 +383,7 @@ void ShaderResources::addImageBinding(const ShaderRecompiler::DescriptorBinding&
             const auto& resource = *decoded;
             const VkComponentMapping components{ComponentSwizzleFor(resource.dstSelX), ComponentSwizzleFor(resource.dstSelY), ComponentSwizzleFor(resource.dstSelZ), ComponentSwizzleFor(resource.dstSelW)};
             static const std::uint64_t replaced = std::getenv("ANYPS5_DEBUG_NULL_TEXTURE") != nullptr ? std::strtoull(std::getenv("ANYPS5_DEBUG_NULL_TEXTURE"), nullptr, 16) : 0u;
-            auto texture = replaced != 0 && resource.baseAddress == replaced ? nullTexture(resource.viewDimension) : context.textureCache->Get(words, resource, components, storageImage, binding.imageDepthCompare);
+            auto texture = replaced != 0 && resource.baseAddress == replaced ? nullTexture(resource.viewDimension) : context.textureCache->Get(words, resource, components, storageImage, binding.imageDepthCompare, attachedDepth);
             if (storageImage && texture->StorageView() == VK_NULL_HANDLE) {
                 char message[200];
                 std::snprintf(message, sizeof(message), "AGC graphics: storage image 0x%llx (%ux%u format 0x%x tile %u dimension %u mips %u) does not support shader stores", static_cast<unsigned long long>(resource.baseAddress), resource.width, resource.height, resource.format, static_cast<unsigned>(resource.tileMode), static_cast<unsigned>(resource.dimension), resource.mipCount);
