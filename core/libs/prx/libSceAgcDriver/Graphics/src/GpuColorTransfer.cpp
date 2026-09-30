@@ -10,7 +10,22 @@
 
 namespace AgcDriver::Graphics {
 
-GpuColorTransfer::GpuColorTransfer(const Context& context) : context(context) {
+GpuColorTransfer::GpuColorTransfer(const Context& context) : GpuColorTransfer(context, nullptr) {}
+
+GpuColorTransfer::GpuColorTransfer(const Context& context, const GpuColorTransfer* shared) : context(context) {
+    if (shared != nullptr) {
+        descriptorLayout = shared->descriptorLayout;
+        pipelineLayout = shared->pipelineLayout;
+        pipeline = shared->pipeline;
+        sharedPipeline = true;
+        try {
+            createDescriptorSet();
+        } catch (...) {
+            release();
+            throw;
+        }
+        return;
+    }
     VkShaderModule module = VK_NULL_HANDLE;
     try {
         std::array<VkDescriptorSetLayoutBinding, 2> bindings{};
@@ -41,17 +56,7 @@ GpuColorTransfer::GpuColorTransfer(const Context& context) : context(context) {
         Check(context.Function<PFN_vkCreateComputePipelines>("vkCreateComputePipelines")(context.device, context.pipelineCache, 1, &pipelineInfo, nullptr, &pipeline), "vkCreateComputePipelines color transfer");
         context.Function<PFN_vkDestroyShaderModule>("vkDestroyShaderModule")(context.device, module, nullptr);
         module = VK_NULL_HANDLE;
-        const VkDescriptorPoolSize size{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2};
-        VkDescriptorPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-        poolInfo.maxSets = 1;
-        poolInfo.poolSizeCount = 1;
-        poolInfo.pPoolSizes = &size;
-        Check(context.Function<PFN_vkCreateDescriptorPool>("vkCreateDescriptorPool")(context.device, &poolInfo, nullptr, &descriptorPool), "vkCreateDescriptorPool color transfer");
-        VkDescriptorSetAllocateInfo allocation{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-        allocation.descriptorPool = descriptorPool;
-        allocation.descriptorSetCount = 1;
-        allocation.pSetLayouts = &descriptorLayout;
-        Check(context.Function<PFN_vkAllocateDescriptorSets>("vkAllocateDescriptorSets")(context.device, &allocation, &descriptorSet), "vkAllocateDescriptorSets color transfer");
+        createDescriptorSet();
     } catch (...) {
         if (module) context.Function<PFN_vkDestroyShaderModule>("vkDestroyShaderModule")(context.device, module, nullptr);
         release();
@@ -59,12 +64,26 @@ GpuColorTransfer::GpuColorTransfer(const Context& context) : context(context) {
     }
 }
 
+void GpuColorTransfer::createDescriptorSet() {
+    const VkDescriptorPoolSize size{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2};
+    VkDescriptorPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    poolInfo.maxSets = 1;
+    poolInfo.poolSizeCount = 1;
+    poolInfo.pPoolSizes = &size;
+    Check(context.Function<PFN_vkCreateDescriptorPool>("vkCreateDescriptorPool")(context.device, &poolInfo, nullptr, &descriptorPool), "vkCreateDescriptorPool color transfer");
+    VkDescriptorSetAllocateInfo allocation{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    allocation.descriptorPool = descriptorPool;
+    allocation.descriptorSetCount = 1;
+    allocation.pSetLayouts = &descriptorLayout;
+    Check(context.Function<PFN_vkAllocateDescriptorSets>("vkAllocateDescriptorSets")(context.device, &allocation, &descriptorSet), "vkAllocateDescriptorSets color transfer");
+}
+
 GpuColorTransfer::~GpuColorTransfer() {
     release();
 }
 
 void GpuColorTransfer::release() noexcept {
-    Release(context.releaseQueue, [device = context.device, destroyPool = context.Function<PFN_vkDestroyDescriptorPool>("vkDestroyDescriptorPool"), destroyPipeline = context.Function<PFN_vkDestroyPipeline>("vkDestroyPipeline"), destroyPipelineLayout = context.Function<PFN_vkDestroyPipelineLayout>("vkDestroyPipelineLayout"), destroyDescriptorLayout = context.Function<PFN_vkDestroyDescriptorSetLayout>("vkDestroyDescriptorSetLayout"), descriptorPool = descriptorPool, pipeline = pipeline, pipelineLayout = pipelineLayout, descriptorLayout = descriptorLayout] {
+    Release(context.releaseQueue, [device = context.device, destroyPool = context.Function<PFN_vkDestroyDescriptorPool>("vkDestroyDescriptorPool"), destroyPipeline = context.Function<PFN_vkDestroyPipeline>("vkDestroyPipeline"), destroyPipelineLayout = context.Function<PFN_vkDestroyPipelineLayout>("vkDestroyPipelineLayout"), destroyDescriptorLayout = context.Function<PFN_vkDestroyDescriptorSetLayout>("vkDestroyDescriptorSetLayout"), descriptorPool = descriptorPool, pipeline = sharedPipeline ? VK_NULL_HANDLE : pipeline, pipelineLayout = sharedPipeline ? VK_NULL_HANDLE : pipelineLayout, descriptorLayout = sharedPipeline ? VK_NULL_HANDLE : descriptorLayout] {
         if (descriptorPool) destroyPool(device, descriptorPool, nullptr);
         if (pipeline) destroyPipeline(device, pipeline, nullptr);
         if (pipelineLayout) destroyPipelineLayout(device, pipelineLayout, nullptr);

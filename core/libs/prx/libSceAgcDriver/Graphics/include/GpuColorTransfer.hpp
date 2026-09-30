@@ -9,6 +9,7 @@ namespace AgcDriver::Graphics {
 class GpuColorTransfer {
 public:
     explicit GpuColorTransfer(const Context& context);
+    GpuColorTransfer(const Context& context, const GpuColorTransfer* shared);
     ~GpuColorTransfer();
     GpuColorTransfer(const GpuColorTransfer&) = delete;
     GpuColorTransfer& operator=(const GpuColorTransfer&) = delete;
@@ -28,6 +29,7 @@ private:
     void writeBack(std::uint64_t address, bool tracked);
     void prepare(std::uint32_t width, std::uint32_t height, ColorTileMode mode);
     void convert(VkCommandBuffer commands, bool toTiled, bool swapRedBlue);
+    void createDescriptorSet();
     void release() noexcept;
     Context context;
     VkDescriptorSetLayout descriptorLayout = VK_NULL_HANDLE;
@@ -48,6 +50,7 @@ private:
     VkExtent2D targetExtent{};
     VkFormat targetFormat = VK_FORMAT_UNDEFINED;
     bool targetBlending = false;
+    bool sharedPipeline = false;
 };
 
 }

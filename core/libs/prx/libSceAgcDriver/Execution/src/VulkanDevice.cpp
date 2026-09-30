@@ -537,10 +537,10 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
     state->guestBufferCache = std::make_unique<Graphics::GuestBufferCache>(graphicsContext());
     state->gds = std::make_unique<Graphics::Buffer>(graphicsContext(), GdsBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
     std::memset(state->gds->Bytes().data(), 0, GdsBytes);
+    state->colorTransfer = std::make_unique<Graphics::GpuColorTransfer>(graphicsContext());
     state->renderCache = std::make_unique<Graphics::RenderCache>(graphicsContext());
     state->graphicsPipelines = std::make_unique<Graphics::GraphicsPipelineCache>(graphicsContext());
     state->textureCache = std::make_unique<Graphics::TextureCache>(graphicsContext());
-    state->colorTransfer = std::make_unique<Graphics::GpuColorTransfer>(graphicsContext());
     if (window != nullptr) {
         require(window->getDrawableSize != nullptr, "missing window drawable size query");
         std::uint32_t drawableWidth = 0;

@@ -8,7 +8,7 @@
 
 namespace AgcDriver::Graphics {
 
-ResidentColor::ResidentColor(const Context& context, const ColorTarget& color) : context(context), color(color), transfer(context) {
+ResidentColor::ResidentColor(const Context& context, const ColorTarget& color) : context(context), color(color), transfer(context, context.colorTransfer) {
     if (color.gpuOnly) return;
     if (context.guestBufferCache != nullptr) context.guestBufferCache->ReleaseTracking(color.address, color.bytes);
     memoryWatch = std::make_unique<GuestMemoryTracking::Watch>(color.address, color.bytes, this, [](void* owner, GuestMemoryTracking::Access access) {
