@@ -3,6 +3,8 @@
 #include "IntermediateRepresentation/IrBuilder.hpp"
 #include "Optimization/ShaderStageInputInfo.hpp"
 #include "RdnaDecoder/RdnaDescriptorFormat.hpp"
+#include "RdnaDecoder/RdnaInstructionDecoder.hpp"
+#include "SpirvBackend/SpirvEmitterState.hpp"
 #include <algorithm>
 #include <atomic>
 #include <cstdio>
@@ -28,6 +30,7 @@ struct DecodedImage {
     std::uint32_t shaderSwizzle = ShaderImageIdentitySwizzle;
     bool cube = false;
     bool fmask = false;
+    bool reshaped = false;
 };
 
 ShaderBufferResource decodeBufferDescriptor(const DescriptorValue& value) {
@@ -85,6 +88,41 @@ RdnaImageDimension descriptorDimension(const DescriptorValue& descriptor, RdnaIm
     }
 }
 
+bool takesInstructionDimension(RdnaImageDimension descriptor, RdnaImageDimension instruction) {
+    return RdnaImageDimensionInfoFor(descriptor).coordinateComponents > RdnaImageDimensionInfoFor(instruction).coordinateComponents || (descriptor == RdnaImageDimension::Dim2D && instruction == RdnaImageDimension::Dim2DArray);
+}
+
+const char* imageTypeName(ImageType type) {
+    switch (type) {
+        case ImageType::Color1D:
+            return "1d";
+        case ImageType::Color2D:
+            return "2d";
+        case ImageType::Color3D:
+            return "3d";
+        case ImageType::Cube:
+            return "cube";
+        case ImageType::Color1DArray:
+            return "1d_array";
+        case ImageType::Color2DArray:
+            return "2d_array";
+        case ImageType::Color2DMsaa:
+            return "2d_msaa";
+        case ImageType::Color2DMsaaArray:
+            return "2d_msaa_array";
+    }
+    return "unknown";
+}
+
+void reportReshapedImage(ImageType type, RdnaImageDimension instruction) {
+    static std::atomic<std::uint64_t> reported{0};
+    const std::uint64_t pair = std::uint64_t{1} << (((static_cast<std::uint32_t>(type) & 7u) << 3u) | (static_cast<std::uint32_t>(instruction) & 7u));
+    if ((reported.load(std::memory_order_relaxed) & pair) != 0u || (reported.fetch_or(pair, std::memory_order_relaxed) & pair) != 0u) {
+        return;
+    }
+    std::fprintf(stderr, "shader recompiler: %s image descriptors read by %s image instructions are specialized to the instruction's dimension\n", imageTypeName(type), RdnaImageDimensionToString(instruction));
+}
+
 bool validImageDescriptor(const DescriptorValue& descriptor, bool r128) {
     const auto type = rawImageType(descriptor);
     const auto format = rawImageFormat(descriptor);
@@ -136,6 +174,11 @@ DecodedImage decodeImageDescriptor(const DescriptorValue& descriptor, const Imag
     }
     decoded.dimension = descriptorDimension(descriptor, base.dimension);
     decoded.cube = descriptorIsCube(descriptor);
+    if (takesInstructionDimension(decoded.dimension, base.dimension)) {
+        decoded.dimension = base.dimension;
+        decoded.cube = false;
+        decoded.reshaped = true;
+    }
     const auto format = rawImageFormat(descriptor);
     if (base.atomic && format != IrBufferFormat::Format32UInt) {
         throw std::runtime_error("atomic image descriptor uses an unsupported format");
@@ -229,8 +272,13 @@ void resolveTableImage(const IrResourcePlan& plan, std::uint32_t imageIndex, con
     if (base == 0u) {
         return;
     }
+    const auto& instruction = RdnaImageDimensionInfoFor(image.dimension);
     const auto plausible = [&](const DescriptorValue& candidate) {
         if (!validImageDescriptor(candidate, image.r128) || (candidate.dwords[0] | (candidate.dwords[1] & 0xffu)) == 0u) {
+            return false;
+        }
+        const auto& entry = RdnaImageDimensionInfoFor(descriptorDimension(candidate, image.dimension));
+        if (entry.coordinateComponents > instruction.coordinateComponents || entry.spatialComponents != instruction.spatialComponents || entry.multisampled != instruction.multisampled) {
             return false;
         }
         for (std::uint32_t component = 0; component < 4u; component++) {
@@ -397,6 +445,9 @@ void buildResourceSpecialization(const IrResourcePlan& plan, ResourceSnapshot& s
     for (std::uint32_t i = 0; i < plan.info.images.size(); i++) {
         const auto& image = plan.info.images[i];
         const DecodedImage decoded = decodeImageDescriptor(snapshot.images[i], image);
+        if (decoded.reshaped) {
+            reportReshapedImage(rawImageType(snapshot.images[i]), image.dimension);
+        }
         if (decoded.fmask && std::any_of(plan.info.sampledPairs.begin(), plan.info.sampledPairs.end(), [i](const SampledResourcePair& pair) { return pair.image == i; })) {
             throw std::runtime_error("FMASK requires a direct image load");
         }
@@ -424,6 +475,9 @@ void buildResourceSpecialization(const IrResourcePlan& plan, ResourceSnapshot& s
         snapshot.flattenedSrt.push_back(static_cast<std::uint32_t>(candidates.size()));
         for (const auto& candidate : candidates) {
             const DecodedImage decodedCandidate = decodeImageDescriptor(candidate, image);
+            if (decodedCandidate.reshaped) {
+                reportReshapedImage(rawImageType(candidate), image.dimension);
+            }
             ResourceSpecialization::Image entry;
             entry.numericClass = decodedCandidate.numericClass;
             entry.dimension = decodedCandidate.dimension;

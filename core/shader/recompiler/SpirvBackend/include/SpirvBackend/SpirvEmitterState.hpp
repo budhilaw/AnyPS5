@@ -33,6 +33,8 @@ struct RdnaImageDimensionInfo {
     std::uint32_t multisampled;
 };
 
+const RdnaImageDimensionInfo& RdnaImageDimensionInfoFor(RdnaImageDimension dimension);
+
 enum class VertexInputScalarKind { Float, Sint, Uint };
 
 struct DppTargetLane {
