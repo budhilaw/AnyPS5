@@ -95,6 +95,7 @@ public:
         if (!m_program.Resources().srtPlanComplete) {
             fail("SRT plan is not ready");
         }
+        resolveSelectorBounds();
         PlanIndirectImages();
         for (auto& block : m_program.Blocks()) {
             for (IrValue* inst : block->Instructions()) {
@@ -236,6 +237,31 @@ private:
         }
         result = value->ImmediateU32();
         return true;
+    }
+
+    void resolveSelectorBounds() {
+        auto& resources = m_program.Resources();
+        for (auto& bound : resources.selectorBounds) {
+            bound.flatSlot = SelectorBound::NoFlatSlot;
+            const IrValue* compare = bound.compare;
+            if (compare == nullptr || compare->Parent() == nullptr || compare->ArgumentCount() != 2u || bound.selectorArgument > 1u) {
+                continue;
+            }
+            IrValue* limit = compare->Argument(1u - bound.selectorArgument)->Resolve();
+            std::uint32_t slot = 0;
+            if (limit->Opcode() != IrOpcode::ReadConst || limit->ArgumentCount() != 2u || limit->Argument(0)->Resolve()->Opcode() != IrOpcode::GetSrtResource || !immediateU32(limit->Argument(1), slot) || slot >= resources.srtReads.size()) {
+                continue;
+            }
+            bound.flatSlot = resources.srtReads[slot].flatOffset;
+        }
+    }
+
+    std::uint32_t resolvedSelectorBound(const MemoryInfo& memory) const {
+        const auto& bounds = m_program.Resources().selectorBounds;
+        if (!memory.indirectCandidate || memory.selectorBound >= bounds.size() || bounds[memory.selectorBound].flatSlot == SelectorBound::NoFlatSlot) {
+            return NoSelectorBound;
+        }
+        return memory.selectorBound;
     }
 
     static bool usesOnly(const IrValue& value, std::span<const IrValue* const> users) {
@@ -544,10 +570,15 @@ private:
     }
 
     std::uint32_t AddBuffer(std::uint32_t source, const MemoryInfo& memory, IrOpcode op, std::uint32_t pc) {
+        const auto selectorBound = resolvedSelectorBound(memory);
         for (std::uint32_t i = 0; i < m_info.buffers.size(); i++) {
             if (m_info.buffers[i].source == source) {
-                m_info.buffers[i].optional = m_info.buffers[i].optional && memory.indirectCandidate;
-                Merge(m_info.buffers[i], memory, op, pc);
+                auto& buffer = m_info.buffers[i];
+                buffer.optional = buffer.optional && memory.indirectCandidate;
+                if (buffer.selectorBound != selectorBound || buffer.candidate != memory.candidate) {
+                    buffer.selectorBound = NoSelectorBound;
+                }
+                Merge(buffer, memory, op, pc);
                 return i;
             }
         }
@@ -558,6 +589,8 @@ private:
         resource.source = source;
         resource.firstUsePc = pc;
         resource.optional = memory.indirectCandidate;
+        resource.candidate = memory.candidate;
+        resource.selectorBound = selectorBound;
         Merge(resource, memory, op, pc);
         m_info.buffers.push_back(resource);
         return static_cast<std::uint32_t>(m_info.buffers.size() - 1);

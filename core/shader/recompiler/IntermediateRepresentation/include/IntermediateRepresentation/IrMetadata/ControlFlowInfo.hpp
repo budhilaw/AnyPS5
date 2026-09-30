@@ -5,6 +5,7 @@
 #include "IntermediateRepresentation/IrValue.hpp"
 #include <array>
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <vector>
 
@@ -51,6 +52,17 @@ struct SrtRead {
     std::uint32_t flatOffset = 0;
 
     bool operator==(const SrtRead& other) const = default;
+};
+
+struct SelectorBound {
+    static constexpr std::uint32_t NoFlatSlot = std::numeric_limits<std::uint32_t>::max();
+
+    IrValue* compare = nullptr;
+    std::uint32_t selectorArgument = 0;
+    bool holds = true;
+    std::uint32_t flatSlot = NoFlatSlot;
+
+    bool operator==(const SelectorBound& other) const = default;
 };
 
 struct ResourceBlock {

@@ -2,6 +2,7 @@
 #define CORE_SHADER_RECOMPILIER_INTERMEDIATEREPRESENTATION_INCLUDE_INTERMEDIATEREPRESENTATION_IRMETADATA_RESOURCES_HPP
 
 #include "IntermediateRepresentation/IrMetadata/BufferFormat.hpp"
+#include "IntermediateRepresentation/IrMetadata/ResourceInfo.hpp"
 #include "IntermediateRepresentation/IrOpcode.hpp"
 #include "RdnaDecoder/RdnaInstruction.hpp"
 #include <cstdint>
@@ -21,6 +22,8 @@ struct BufferResource {
     std::uint32_t descriptorSwizzle = 0x00000facu;
     std::uint32_t swizzledDwords = 0;
     std::uint32_t imageAlias = NoImageAlias;
+    std::uint32_t candidate = 0;
+    std::uint32_t selectorBound = NoSelectorBound;
     bool read = false;
     bool written = false;
     bool atomic = false;

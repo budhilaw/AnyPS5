@@ -149,6 +149,71 @@ std::uint32_t CandidateCount(IrProgram& program, const IndirectHandle& match) {
     return std::min(count, MaxCandidates);
 }
 
+bool IsOrderedCompare(IrOpcode opcode) {
+    switch (opcode) {
+        case IrOpcode::SLessThan32:
+        case IrOpcode::ULessThan32:
+        case IrOpcode::SLessThanEqual32:
+        case IrOpcode::ULessThanEqual32:
+        case IrOpcode::SGreaterThan32:
+        case IrOpcode::UGreaterThan32:
+        case IrOpcode::SGreaterThanEqual32:
+        case IrOpcode::UGreaterThanEqual32:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool MatchSelectorBound(IrValue* condition, IrValue* selector, bool holds, SelectorBound& bound) {
+    condition = condition->Resolve();
+    while (condition->Opcode() == IrOpcode::LogicalNot && condition->ArgumentCount() == 1u) {
+        condition = condition->Argument(0)->Resolve();
+        holds = !holds;
+    }
+    if (!IsOrderedCompare(condition->Opcode()) || condition->ArgumentCount() != 2u) return false;
+    for (std::uint32_t argument = 0; argument < 2u; ++argument) {
+        if (condition->Argument(argument)->Resolve() == selector && condition->Argument(1u - argument)->Resolve() != selector) {
+            bound = SelectorBound{condition, argument, holds};
+            return true;
+        }
+    }
+    return false;
+}
+
+const BlockInfo* InfoOf(const IrProgram& program, const IrBlock* block) {
+    const auto& order = program.BlockOrder();
+    const auto& info = program.Metadata().blockInfo;
+    for (std::size_t index = 0; index < order.size() && index < info.size(); ++index) {
+        if (order[index] == block) return &info[index];
+    }
+    return nullptr;
+}
+
+std::uint32_t FindSelectorBound(IrProgram& program, IrBlock& block, IrValue* selector) {
+    IrBlock* current = &block;
+    for (std::size_t step = 0; step < program.BlockOrder().size() && current->Predecessors().size() == 1u; ++step) {
+        IrBlock* predecessor = current->Predecessors().front();
+        const BlockInfo* branch = InfoOf(program, predecessor);
+        const BlockInfo* target = InfoOf(program, current);
+        if (predecessor == current || branch == nullptr || target == nullptr) return NoSelectorBound;
+        if (branch->terminator.kind == TerminatorKind::ConditionalBranch) {
+            const bool taken = branch->terminator.trueBlock == target->id;
+            if (taken == (branch->terminator.falseBlock == target->id)) return NoSelectorBound;
+            SelectorBound bound;
+            if (branch->condition != nullptr && MatchSelectorBound(branch->condition, selector, taken, bound)) {
+                auto& bounds = program.Resources().selectorBounds;
+                const auto found = std::find(bounds.begin(), bounds.end(), bound);
+                if (found != bounds.end()) return static_cast<std::uint32_t>(found - bounds.begin());
+                bounds.push_back(bound);
+                return static_cast<std::uint32_t>(bounds.size() - 1u);
+            }
+        }
+        current = predecessor;
+    }
+    return NoSelectorBound;
+}
+
 bool ExpandAccess(IrProgram& program, IrBuilder& builder, IrBlock& block, IrValue* access) {
     if (access->ArgumentCount() < 2u || access->Argument(access->ArgumentCount() - 1u)->Resolve()->Type() != IrType::Bool) return false;
     if (access->Type() != IrType::Void && access->Type() != IrType::U32) return false;
@@ -156,9 +221,10 @@ bool ExpandAccess(IrProgram& program, IrBuilder& builder, IrBlock& block, IrValu
     if (!MatchIndirectHandle(program, access->Argument(0), match)) return false;
     const auto count = CandidateCount(program, match);
     if (count == 0u) return false;
-    auto& memoryInfo = program.Resources().memoryInfo;
     const auto accessFlags = access->Flags<MemoryFlags>();
-    if (accessFlags.index >= memoryInfo.size()) return false;
+    if (accessFlags.index >= program.Resources().memoryInfo.size()) return false;
+    const auto selectorBound = FindSelectorBound(program, block, match.selector);
+    auto& memoryInfo = program.Resources().memoryInfo;
     IrValue* handle = access->Argument(0)->Resolve();
     IrValue* predicate = access->Argument(access->ArgumentCount() - 1u);
     const auto insert = [&](IrValue& value) {
@@ -193,6 +259,8 @@ bool ExpandAccess(IrProgram& program, IrBuilder& builder, IrBlock& block, IrValu
         insert(enabled);
         MemoryInfo info = memoryInfo.at(accessFlags.index);
         info.indirectCandidate = true;
+        info.candidate = candidate;
+        info.selectorBound = selectorBound;
         memoryInfo.push_back(info);
         IrValue& clone = program.CreateValue(access->Opcode(), access->Type(), PackFlags(MemoryFlags{static_cast<std::uint32_t>(memoryInfo.size() - 1u), accessFlags.pc}));
         clone.AddArgument(&candidateHandle);

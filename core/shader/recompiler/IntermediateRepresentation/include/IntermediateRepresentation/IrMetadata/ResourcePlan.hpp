@@ -60,6 +60,7 @@ struct IrResourcePlan {
     std::vector<ResourceBlock> controlFlow;
     std::vector<std::uint32_t> materializationSources;
     std::vector<SrtRead> srtReads;
+    std::vector<SelectorBound> selectorBounds;
     std::vector<std::uint8_t> cleanFlatSlots;
     bool requiresSpecializationMemory = false;
     bool srtPlanComplete = false;

@@ -3,8 +3,11 @@
 
 #include "RdnaDecoder/RdnaInstruction.hpp"
 #include <cstdint>
+#include <limits>
 
 namespace ShaderRecompiler {
+
+inline constexpr std::uint32_t NoSelectorBound = std::numeric_limits<std::uint32_t>::max();
 
 enum class ResourceKind {
     None,
@@ -46,6 +49,8 @@ struct MemoryInfo {
     bool offen = false;
     bool planningOnly = false;
     bool indirectCandidate = false;
+    std::uint32_t candidate = 0;
+    std::uint32_t selectorBound = NoSelectorBound;
 
     bool operator==(const MemoryInfo& other) const = default;
 };

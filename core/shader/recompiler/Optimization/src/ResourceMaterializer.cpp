@@ -7,6 +7,7 @@
 #include "SpirvBackend/SpirvEmitterState.hpp"
 #include <algorithm>
 #include <atomic>
+#include <bit>
 #include <cstdio>
 #include <array>
 #include <cstdint>
@@ -42,6 +43,40 @@ ShaderBufferResource decodeBufferDescriptor(const DescriptorValue& value) {
         result.fields[i] = value.dwords[i];
     }
     return result;
+}
+
+bool reachableCandidate(const IrResourcePlan& plan, const BufferResource& buffer, std::span<const std::uint32_t> flattenedSrt) {
+    if (buffer.selectorBound >= plan.selectorBounds.size()) {
+        return true;
+    }
+    const auto& bound = plan.selectorBounds[buffer.selectorBound];
+    if (bound.compare == nullptr || bound.flatSlot >= flattenedSrt.size()) {
+        return true;
+    }
+    const auto left = bound.selectorArgument == 0u ? buffer.candidate : flattenedSrt[bound.flatSlot];
+    const auto right = bound.selectorArgument == 0u ? flattenedSrt[bound.flatSlot] : buffer.candidate;
+    const auto signedLeft = std::bit_cast<std::int32_t>(left);
+    const auto signedRight = std::bit_cast<std::int32_t>(right);
+    switch (bound.compare->Opcode()) {
+        case IrOpcode::ULessThan32:
+            return (left < right) == bound.holds;
+        case IrOpcode::ULessThanEqual32:
+            return (left <= right) == bound.holds;
+        case IrOpcode::UGreaterThan32:
+            return (left > right) == bound.holds;
+        case IrOpcode::UGreaterThanEqual32:
+            return (left >= right) == bound.holds;
+        case IrOpcode::SLessThan32:
+            return (signedLeft < signedRight) == bound.holds;
+        case IrOpcode::SLessThanEqual32:
+            return (signedLeft <= signedRight) == bound.holds;
+        case IrOpcode::SGreaterThan32:
+            return (signedLeft > signedRight) == bound.holds;
+        case IrOpcode::SGreaterThanEqual32:
+            return (signedLeft >= signedRight) == bound.holds;
+        default:
+            return true;
+    }
 }
 
 bool nullImageDescriptor(const DescriptorValue& descriptor) {
@@ -358,6 +393,10 @@ void materializeSnapshot(const IrResourcePlan& plan, const SrtRuntime& runtime, 
     snapshot.buffers.assign(values.begin(), values.begin() + plan.info.buffers.size());
     for (std::uint32_t i = 0; i < plan.info.buffers.size(); i++) {
         if (!plan.info.buffers[i].optional) continue;
+        if (!reachableCandidate(plan, plan.info.buffers[i], snapshot.flattenedSrt)) {
+            snapshot.buffers[i].dwords.fill(0u);
+            continue;
+        }
         const ShaderBufferResource decoded = decodeBufferDescriptor(snapshot.buffers[i]);
         bool usable = (decoded.Type() == 0u || decoded.Type() == 3u) && (decoded.fields[1] & 0x40000000u) == 0u && decoded.Base48() != 0u && decoded.GetSize() <= (256ull << 20u);
         if (usable && plan.info.buffers[i].formatted) {
@@ -750,6 +789,7 @@ IrResourcePlan ResourceMaterializer::ExtractPlan(const IrProgram& program) const
     plan.descriptorSources = source.descriptorSources;
     plan.controlFlow = source.controlFlow;
     plan.srtReads = source.srtReads;
+    plan.selectorBounds = source.selectorBounds;
     plan.cleanFlatSlots = source.cleanFlatSlots;
     plan.requiresSpecializationMemory = source.requiresSpecializationMemory;
     plan.srtPlanComplete = source.srtPlanComplete;
