@@ -1,8 +1,12 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstdio>
+#ifdef _WIN32
+#include <windows.h>
+#elif defined(__APPLE__)
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
+#endif
 #include <mutex>
 #include <set>
 #include <string>
@@ -13,6 +17,13 @@ namespace {
 
 bool readable(std::uint64_t address) {
     if (address == 0) return false;
+#ifdef _WIN32
+    MEMORY_BASIC_INFORMATION info{};
+    if (VirtualQuery(reinterpret_cast<const void*>(address), &info, sizeof(info)) != sizeof(info) || info.State != MEM_COMMIT) return false;
+    const auto end = reinterpret_cast<std::uint64_t>(info.BaseAddress) + info.RegionSize;
+    const auto readable = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+    return address + 32 <= end && (info.Protect & readable) != 0 && (info.Protect & PAGE_GUARD) == 0;
+#elif defined(__APPLE__)
     mach_vm_address_t start = address;
     mach_vm_size_t size = 0;
     vm_region_basic_info_data_64_t info{};
@@ -20,6 +31,9 @@ bool readable(std::uint64_t address) {
     mach_port_t object = MACH_PORT_NULL;
     if (mach_vm_region(mach_task_self(), &start, &size, VM_REGION_BASIC_INFO_64, reinterpret_cast<vm_region_info_t>(&info), &count, &object) != KERN_SUCCESS) return false;
     return start <= address && address + 32 <= start + size && (info.protection & VM_PROT_READ) != 0;
+#else
+    return false;
+#endif
 }
 
 std::string describe(std::uint64_t value) {

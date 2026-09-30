@@ -7,7 +7,7 @@
 #include <regex>
 #include <stdexcept>
 #include <string>
-#include <sys/statvfs.h>
+#include <system_error>
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 
@@ -106,9 +106,10 @@ int APS5_VABI sceAppContentTemporaryDataGetAvailableSpaceKb(const AppContentMoun
     if (mount_point == nullptr || available_space_kb == nullptr || std::strncmp(mount_point->data, TemporaryMount, sizeof(mount_point->data)) != 0) return SCE_APP_CONTENT_ERROR_PARAMETER;
     std::lock_guard lock(appMutex);
     if (!temporaryMounted) return SCE_APP_CONTENT_ERROR_NOT_MOUNTED;
-    struct statvfs space{};
-    if (::statvfs(ResolvePath_nid_no_patch(TemporaryMount).c_str(), &space) != 0) throw std::runtime_error("sceAppContentTemporaryDataGetAvailableSpaceKb: statvfs failed");
-    *available_space_kb = static_cast<size_t>(space.f_bavail) * space.f_frsize / 1024;
+    std::error_code error;
+    const auto space = std::filesystem::space(ResolvePath_nid_no_patch(TemporaryMount), error);
+    if (error) throw std::runtime_error("sceAppContentTemporaryDataGetAvailableSpaceKb: " + error.message());
+    *available_space_kb = static_cast<size_t>(space.available / 1024);
     return 0;
 }
 
