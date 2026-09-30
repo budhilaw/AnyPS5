@@ -217,6 +217,7 @@ void GuestAllocationsRemove_nid_postfix(void* mutation, const void* pointer) {
     const auto range = GuestAllocationsFind_nid_postfix(mutation, pointer);
     GuestAllocationsRequireUnpinned_nid_postfix(mutation, pointer, range.bytes);
     std::erase_if(registry().ranges, [&](const auto& entry) { return entry.second->allocationAddress == range.address; });
+    guestMapEpoch().fetch_add(1, std::memory_order_acq_rel);
 }
 
 namespace {
@@ -344,6 +345,7 @@ void GuestAllocationsProtect_nid_postfix(void* mutation, const void* pointer, st
     auto replacement = replaceRange(pointer, bytes, false, readable, writable);
     apply();
     registry().ranges.swap(replacement);
+    guestMapEpoch().fetch_add(1, std::memory_order_acq_rel);
 }
 
 void GuestAllocationsUnmap_nid_postfix(void* mutation, const void* pointer, std::size_t bytes, const std::function<void(const void*, bool)>& apply) {
@@ -362,6 +364,7 @@ void GuestAllocationsUnmap_nid_postfix(void* mutation, const void* pointer, std:
     }
     apply(reinterpret_cast<const void*>(range.allocationAddress), last);
     registry().ranges.swap(replacement);
+    guestMapEpoch().fetch_add(1, std::memory_order_acq_rel);
 }
 
 void GuestAllocationsAddReleaseHook_nid_postfix(void* context, void (*release)(void*)) {
