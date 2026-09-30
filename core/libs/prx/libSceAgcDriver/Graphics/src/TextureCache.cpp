@@ -436,15 +436,15 @@ void TextureCache::DumpTextures(const std::string& prefix) {
     APS5_LOG_OUT("texture cache dump: %zu entries, %zu dumped, %zu compressed, %zu other shapes", entries.size(), dumped, compressed, other);
 }
 
-std::shared_ptr<Texture> TextureCache::Null(TextureDimension dimension) {
-    auto& texture = nulls[dimension];
-    if (!texture) texture = std::make_shared<Texture>(context, dimension);
+std::shared_ptr<Texture> TextureCache::Null(TextureDimension dimension, TextureNumericClass numericClass) {
+    auto& texture = nulls[{dimension, numericClass}];
+    if (!texture) texture = std::make_shared<Texture>(context, dimension, numericClass);
     return texture;
 }
 
-std::shared_ptr<Texture> TextureCache::NullStorage(TextureDimension dimension) {
-    auto& texture = storageNulls[dimension];
-    if (!texture) texture = std::make_shared<Texture>(context, dimension);
+std::shared_ptr<Texture> TextureCache::NullStorage(TextureDimension dimension, TextureNumericClass numericClass) {
+    auto& texture = storageNulls[{dimension, numericClass}];
+    if (!texture) texture = std::make_shared<Texture>(context, dimension, numericClass);
     return texture;
 }
 

@@ -8,6 +8,7 @@
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
 #include "prx/libc/include/General.hpp"
 #include "Optimization/include/Optimization/ShaderStageInputInfo.hpp"
+#include "IntermediateRepresentation/IrMetadata/DescriptorBinding.hpp"
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
@@ -79,6 +80,18 @@ const char* kindName(ShaderRecompiler::DescriptorKind kind) {
         case ShaderRecompiler::DescriptorKind::Sampler: return "Sampler";
     }
     throw std::runtime_error("AGC graphics: unknown descriptor kind");
+}
+
+TextureNumericClass imageBindingClass(std::uint32_t binding) {
+    constexpr auto sampled = ShaderRecompiler::FirstImageBinding;
+    constexpr auto sampledSlots = ShaderRecompiler::SampledImageDimensionSlots;
+    constexpr auto storage = ShaderRecompiler::FirstStorageImageBinding;
+    constexpr auto storageSlots = ShaderRecompiler::StorageImageDimensionSlots;
+    const auto kind = binding % static_cast<std::uint32_t>(ShaderRecompiler::DescriptorBindingKind::Count);
+    if (kind >= sampled + sampledSlots && kind < sampled + 2u * sampledSlots) return TextureNumericClass::Uint;
+    if (kind >= sampled + 2u * sampledSlots && kind < sampled + 3u * sampledSlots) return TextureNumericClass::Sint;
+    if (kind >= storage + storageSlots && kind < storage + 3u * storageSlots) return TextureNumericClass::Uint;
+    return TextureNumericClass::Float;
 }
 
 TextureDimension nullDimension(ShaderRecompiler::DescriptorImageShape shape) {
@@ -350,7 +363,8 @@ void ShaderResources::addImageBinding(const ShaderRecompiler::DescriptorBinding&
         Require(!storageImage || context.storageImages, "device does not support format-less storage images");
         Require(binding.count <= (storageImage ? context.limits.maxPerStageDescriptorStorageImages : context.limits.maxPerStageDescriptorSampledImages), "shader image descriptors exceed per-stage limits");
         const auto shape = *binding.imageShape;
-        const auto nullTexture = [&](TextureDimension dimension) { return storageImage ? context.textureCache->NullStorage(dimension) : context.textureCache->Null(dimension); };
+        const auto numericClass = imageBindingClass(binding.binding);
+        const auto nullTexture = [&](TextureDimension dimension) { return storageImage ? context.textureCache->NullStorage(dimension, numericClass) : context.textureCache->Null(dimension, numericClass); };
         for (std::uint32_t element = 0; element < binding.count; ++element) {
             const auto words = std::span<const std::uint32_t>(binding.guestDescriptor).subspan(static_cast<std::size_t>(element) * elementWords, elementWords);
             std::optional<GuestTextureResource> decoded;
