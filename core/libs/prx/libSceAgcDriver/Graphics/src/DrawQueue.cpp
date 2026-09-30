@@ -81,6 +81,11 @@ DrawQueue::~DrawQueue() {
 }
 
 VkCommandBuffer DrawQueue::Begin(const Context& context) {
+    workSinceBarrier = true;
+    return begin(context);
+}
+
+VkCommandBuffer DrawQueue::begin(const Context& context) {
     releases = context.releaseQueue;
     EndPass();
     Collect();
@@ -145,6 +150,7 @@ void DrawQueue::Enqueue(std::shared_ptr<ShaderResources> resources, std::shared_
     if (resources->UsesGds()) lastGdsSequence = nextSequence;
     recording.entries.push_back({std::move(storage), std::move(resources), nextSequence++});
     ++drawCount;
+    workSinceBarrier = true;
     if (recording.entries.size() >= BatchDraws) Flush();
 }
 
@@ -153,6 +159,7 @@ void DrawQueue::MarkGds() {
     lastGdsSequence = nextSequence;
     recording.entries.push_back({nullptr, nullptr, nextSequence++});
     ++drawCount;
+    workSinceBarrier = true;
 }
 
 void DrawQueue::EnqueueCompletion(std::function<void()> action) {
@@ -172,6 +179,7 @@ void DrawQueue::EnqueueUpload(std::function<void()> release, std::size_t bytes) 
     Require(recording.commands != nullptr, "upload recorded outside a batch");
     recording.completions.push_back(std::move(release));
     recording.uploadBytes += bytes;
+    workSinceBarrier = true;
     if (recording.uploadBytes >= BatchUploadBytes) Flush();
 }
 

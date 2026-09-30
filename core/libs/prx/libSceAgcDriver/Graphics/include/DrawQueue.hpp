@@ -82,6 +82,7 @@ private:
         std::size_t uploadBytes = 0;
         std::vector<std::function<void()>> completions;
     };
+    VkCommandBuffer begin(const Context& context);
     void retire(Batch batch);
     void throttle();
     void waitThrough(std::uint64_t sequence);
@@ -104,6 +105,7 @@ private:
     mutable std::uint64_t intervalsEpoch = 0;
     std::chrono::nanoseconds lastCompletion{};
     bool passOpen = false;
+    bool workSinceBarrier = false;
     RenderPassKey pass;
     VkPipeline boundPipeline = VK_NULL_HANDLE;
     std::shared_ptr<ReleaseQueue> releases;

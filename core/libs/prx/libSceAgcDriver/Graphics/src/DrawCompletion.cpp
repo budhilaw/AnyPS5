@@ -83,12 +83,14 @@ void DrawQueue::Wait() {
 }
 
 void DrawQueue::RecordMemoryBarrier(const Context& context) {
-    const auto commands = Begin(context);
+    if (!workSinceBarrier) return;
+    const auto commands = begin(context);
     VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
     barrier.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_HOST_WRITE_BIT;
     barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
     context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT | VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
     recording.hasBarrier = true;
+    workSinceBarrier = false;
 }
 
 }
