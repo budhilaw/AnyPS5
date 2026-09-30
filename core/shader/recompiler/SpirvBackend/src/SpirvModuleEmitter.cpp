@@ -97,6 +97,9 @@ std::uint32_t EmitBuiltinU32(SpirvEmitterState& state, StageInputKind kind, std:
 }
 
 std::uint32_t EmitAttributeValue(SpirvEmitterState& state, std::uint32_t attr, std::uint32_t chan) {
+    if (const auto fallback = PixelParameterDefault(state, attr, chan)) {
+        return ConstantU32(state, *fallback);
+    }
     const auto* input = SpirvInputBindingForParameter(state, attr);
     if (input == nullptr || input->variableId == 0) {
         return ConstantU32(state, 0u);
@@ -148,6 +151,9 @@ std::uint32_t EmitAttributeValue(SpirvEmitterState& state, std::uint32_t attr, s
 }
 
 std::uint32_t EmitInterpolationParameterValue(SpirvEmitterState& state, std::uint32_t attr, std::uint32_t chan, std::uint32_t mode) {
+    if (const auto fallback = PixelParameterDefault(state, attr, chan)) {
+        return ConstantU32(state, !PixelParameterIsCustom(state, attr) && mode < 2u ? 0u : *fallback);
+    }
     const auto* input = SpirvInputBindingForParameter(state, attr);
     if (input == nullptr) {
         return ConstantU32(state, 0u);

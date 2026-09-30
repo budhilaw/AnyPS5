@@ -398,6 +398,23 @@ bool IsVectorAluOpcode(RdnaOpcode opcode) {
         case RdnaOpcode::VCmpNeU64:
         case RdnaOpcode::VCmpxNeI64:
         case RdnaOpcode::VCmpxNeU64:
+        case RdnaOpcode::VCmpLtI64:
+        case RdnaOpcode::VCmpxLtI64:
+        case RdnaOpcode::VCmpxEqI64:
+        case RdnaOpcode::VCmpLeI64:
+        case RdnaOpcode::VCmpxLeI64:
+        case RdnaOpcode::VCmpGtI64:
+        case RdnaOpcode::VCmpxGtI64:
+        case RdnaOpcode::VCmpNeI64:
+        case RdnaOpcode::VCmpGeI64:
+        case RdnaOpcode::VCmpxGeI64:
+        case RdnaOpcode::VCmpxLtU64:
+        case RdnaOpcode::VCmpxEqU64:
+        case RdnaOpcode::VCmpLeU64:
+        case RdnaOpcode::VCmpxLeU64:
+        case RdnaOpcode::VCmpxGtU64:
+        case RdnaOpcode::VCmpGeU64:
+        case RdnaOpcode::VCmpxGeU64:
         case RdnaOpcode::VCmpxLtU32:
         case RdnaOpcode::VCmpxEqU32:
         case RdnaOpcode::VCmpxLeU32:

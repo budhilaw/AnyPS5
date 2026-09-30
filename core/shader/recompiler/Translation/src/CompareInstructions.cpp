@@ -35,6 +35,24 @@ void TranslationContext::emitIntegerCompare(const RdnaInstruction& inst, IrOpcod
     emitCompareResult(inst, IrU1(ir.Emit(opcode, IrType::U1, {lhs, rhs})), scalar, cmpx);
 }
 
+void TranslationContext::emitInteger64Compare(const RdnaInstruction& inst, Integer64Compare compare, bool signedValue, bool cmpx) {
+    IrValue* lhs = readOperand(sourceAt(inst, 0u), IrType::U64);
+    IrValue* rhs = readOperand(sourceAt(inst, 1u), IrType::U64);
+    const auto less = [&](IrValue* left, IrValue* right) -> IrValue& {
+        return ir.Emit(signedValue ? IrOpcode::SLessThan64 : IrOpcode::ULessThan64, IrType::U1, {left, right});
+    };
+    IrValue* result = nullptr;
+    switch (compare) {
+        case Integer64Compare::Lt: result = &less(lhs, rhs); break;
+        case Integer64Compare::Gt: result = &less(rhs, lhs); break;
+        case Integer64Compare::Le: result = &ir.LogicalNot(less(rhs, lhs)); break;
+        case Integer64Compare::Ge: result = &ir.LogicalNot(less(lhs, rhs)); break;
+        case Integer64Compare::Eq: result = &ir.Emit(IrOpcode::IEqual64, IrType::U1, {lhs, rhs}); break;
+        case Integer64Compare::Ne: result = &ir.Emit(IrOpcode::INotEqual64, IrType::U1, {lhs, rhs}); break;
+    }
+    emitCompareResult(inst, IrU1(*result), false, cmpx);
+}
+
 void TranslationContext::emitInteger16Compare(const RdnaInstruction& inst, IrOpcode opcode, bool signedValue, bool cmpx) {
     const IrU32 lhs = readU16AsU32(sourceAt(inst, 0u), signedValue);
     const IrU32 rhs = readU16AsU32(sourceAt(inst, 1u), signedValue);

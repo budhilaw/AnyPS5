@@ -7,6 +7,8 @@
 
 namespace ShaderRecompiler {
 
+enum class Integer64Compare { Lt, Eq, Le, Gt, Ne, Ge };
+
 class TranslationContext {
 public:
     TranslationContext(IrProgram& program, IrBlock& block, std::uint32_t vectorLimit);
@@ -110,6 +112,7 @@ private:
     void emitCompareResult(const RdnaInstruction& inst, IrU1 value, bool scalar, bool cmpx);
     void emitCompareConstant(const RdnaInstruction& inst, bool value, bool scalar, bool cmpx);
     void emitIntegerCompare(const RdnaInstruction& inst, IrOpcode opcode, IrType type, bool scalar, bool cmpx);
+    void emitInteger64Compare(const RdnaInstruction& inst, Integer64Compare compare, bool signedValue, bool cmpx);
     void emitInteger16Compare(const RdnaInstruction& inst, IrOpcode opcode, bool signedValue, bool cmpx);
     void emitFloatCompare(const RdnaInstruction& inst, IrOpcode opcode, bool half, bool cmpx);
     void emitFloatOrderedCompare(const RdnaInstruction& inst, bool ordered);

@@ -1,4 +1,5 @@
 #include "RdnaDecoder/RdnaVectorOpDecoder.hpp"
+#include <format>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -286,6 +287,23 @@ constexpr VopcOpcodeInfo vopcOpcodes[] = {
     {0xe4u, RdnaOpcode::VCmpGtU64, false},
     {0xe5u, RdnaOpcode::VCmpNeU64, false},
     {0xf5u, RdnaOpcode::VCmpxNeU64, false},
+    {0xa1u, RdnaOpcode::VCmpLtI64, false},
+    {0xb1u, RdnaOpcode::VCmpxLtI64, false},
+    {0xb2u, RdnaOpcode::VCmpxEqI64, false},
+    {0xa3u, RdnaOpcode::VCmpLeI64, false},
+    {0xb3u, RdnaOpcode::VCmpxLeI64, false},
+    {0xa4u, RdnaOpcode::VCmpGtI64, false},
+    {0xb4u, RdnaOpcode::VCmpxGtI64, false},
+    {0xa5u, RdnaOpcode::VCmpNeI64, false},
+    {0xa6u, RdnaOpcode::VCmpGeI64, false},
+    {0xb6u, RdnaOpcode::VCmpxGeI64, false},
+    {0xf1u, RdnaOpcode::VCmpxLtU64, false},
+    {0xf2u, RdnaOpcode::VCmpxEqU64, false},
+    {0xe3u, RdnaOpcode::VCmpLeU64, false},
+    {0xf3u, RdnaOpcode::VCmpxLeU64, false},
+    {0xf4u, RdnaOpcode::VCmpxGtU64, false},
+    {0xe6u, RdnaOpcode::VCmpGeU64, false},
+    {0xf6u, RdnaOpcode::VCmpxGeU64, false},
     {0xc9u, RdnaOpcode::VCmpLtF16},
     {0xcau, RdnaOpcode::VCmpEqF16},
     {0xcbu, RdnaOpcode::VCmpLeF16},
@@ -444,24 +462,23 @@ bool isVop3EncodedVop1(std::uint32_t opcode) {
 }
 
 RdnaOpcode lookupVop3Opcode(std::uint32_t opcode) {
-    const auto* direct = findVectorOpcodeEntry(vop3Opcodes, opcode);
-    if (direct != nullptr) {
+    if (const auto* direct = findVectorOpcodeEntry(vop3Opcodes, opcode); direct != nullptr) {
         return direct->opcode;
     }
     if (isVop3EncodedVopc(opcode)) {
-        return lookupVectorOpcode(vopcOpcodes, opcode, "VOP3 opcode is not implemented");
-    }
-    if (isVop3EncodedVop2(opcode)) {
-        const auto vop2Encoding = opcode - 0x100u;
-        if (isUnsupportedVop3EncodedVop2Alias(vop2Encoding)) {
-            throw std::invalid_argument("VOP3 opcode is not implemented");
+        if (const auto* entry = findVectorOpcodeEntry(vopcOpcodes, opcode); entry != nullptr) {
+            return entry->opcode;
         }
-        return lookupVectorOpcode(vop2Opcodes, vop2Encoding, "VOP3 opcode is not implemented");
+    } else if (isVop3EncodedVop2(opcode) && !isUnsupportedVop3EncodedVop2Alias(opcode - 0x100u)) {
+        if (const auto* entry = findVectorOpcodeEntry(vop2Opcodes, opcode - 0x100u); entry != nullptr) {
+            return entry->opcode;
+        }
+    } else if (isVop3EncodedVop1(opcode)) {
+        if (const auto* entry = findVectorOpcodeEntry(vop3EncodedVop1Opcodes, opcode - 0x180u); entry != nullptr) {
+            return entry->opcode;
+        }
     }
-    if (isVop3EncodedVop1(opcode)) {
-        return lookupVectorOpcode(vop3EncodedVop1Opcodes, opcode - 0x180u, "VOP3 opcode is not implemented");
-    }
-    throw std::invalid_argument("VOP3 opcode is not implemented");
+    throw std::invalid_argument(std::format("VOP3 opcode 0x{:x} is not implemented", opcode));
 }
 
 RdnaOpcode lookupVintrpOpcode(std::uint32_t opcode) {
@@ -1118,6 +1135,16 @@ bool isVopcCompareExec(RdnaOpcode opcode) {
         case RdnaOpcode::VCmpxGeU32:
         case RdnaOpcode::VCmpxNeI64:
         case RdnaOpcode::VCmpxNeU64:
+        case RdnaOpcode::VCmpxLtI64:
+        case RdnaOpcode::VCmpxEqI64:
+        case RdnaOpcode::VCmpxLeI64:
+        case RdnaOpcode::VCmpxGtI64:
+        case RdnaOpcode::VCmpxGeI64:
+        case RdnaOpcode::VCmpxLtU64:
+        case RdnaOpcode::VCmpxEqU64:
+        case RdnaOpcode::VCmpxLeU64:
+        case RdnaOpcode::VCmpxGtU64:
+        case RdnaOpcode::VCmpxGeU64:
         case RdnaOpcode::VCmpxLtU16:
         case RdnaOpcode::VCmpxGtU16:
         case RdnaOpcode::VCmpxLtF16:

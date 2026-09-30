@@ -17,6 +17,7 @@ namespace ShaderRecompiler
 
         constexpr std::uint32_t PsInputOffsetMask = 0x0000001fu;
         constexpr std::uint32_t PsInputFlatShade = 0x00000400u;
+        constexpr std::uint32_t PsInputDefaultValue = 0x00000020u;
         constexpr std::uint32_t PixelParameterLimit = 32u;
 
         [[noreturn]] void FailEmit(const std::string& reason) {
@@ -140,6 +141,19 @@ namespace ShaderRecompiler
 
     bool PixelParameterIsCustom(const SpirvEmitterState& state, std::uint32_t attr) {
         return StageOf(state) == IrShaderStage::Pixel && PixelInputIsCustom(PixelInfo(state), attr);
+    }
+
+    std::optional<std::uint32_t> PixelParameterDefault(const SpirvEmitterState& state, std::uint32_t attr, std::uint32_t chan) {
+        if (StageOf(state) != IrShaderStage::Pixel) return std::nullopt;
+        const auto& info = PixelInfo(state);
+        if (attr >= info.inputNum || attr >= PixelParameterLimit || (info.interpolatorSettings[attr] & PsInputDefaultValue) == 0u) return std::nullopt;
+        constexpr std::uint32_t one = 0x3f800000u;
+        switch ((info.interpolatorSettings[attr] >> 8u) & 3u) {
+            case 1u: return (chan & 3u) == 3u ? one : 0u;
+            case 2u: return (chan & 3u) == 3u ? 0u : one;
+            case 3u: return one;
+            default: return 0u;
+        }
     }
 
     VertexInputScalarKind VertexParameterScalarKind(const SpirvEmitterState& state, std::uint32_t location) {

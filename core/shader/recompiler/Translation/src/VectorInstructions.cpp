@@ -145,6 +145,57 @@ bool TranslationContext::emitVector(const RdnaInstruction& inst) {
     case RdnaOpcode::VCmpxNeU64:
         emitIntegerCompare(inst, IrOpcode::INotEqual64, IrType::U64, false, true);
         return true;
+    case RdnaOpcode::VCmpLtI64:
+        emitInteger64Compare(inst, Integer64Compare::Lt, true, false);
+        return true;
+    case RdnaOpcode::VCmpxLtI64:
+        emitInteger64Compare(inst, Integer64Compare::Lt, true, true);
+        return true;
+    case RdnaOpcode::VCmpxEqI64:
+        emitInteger64Compare(inst, Integer64Compare::Eq, true, true);
+        return true;
+    case RdnaOpcode::VCmpLeI64:
+        emitInteger64Compare(inst, Integer64Compare::Le, true, false);
+        return true;
+    case RdnaOpcode::VCmpxLeI64:
+        emitInteger64Compare(inst, Integer64Compare::Le, true, true);
+        return true;
+    case RdnaOpcode::VCmpGtI64:
+        emitInteger64Compare(inst, Integer64Compare::Gt, true, false);
+        return true;
+    case RdnaOpcode::VCmpxGtI64:
+        emitInteger64Compare(inst, Integer64Compare::Gt, true, true);
+        return true;
+    case RdnaOpcode::VCmpNeI64:
+        emitInteger64Compare(inst, Integer64Compare::Ne, true, false);
+        return true;
+    case RdnaOpcode::VCmpGeI64:
+        emitInteger64Compare(inst, Integer64Compare::Ge, true, false);
+        return true;
+    case RdnaOpcode::VCmpxGeI64:
+        emitInteger64Compare(inst, Integer64Compare::Ge, true, true);
+        return true;
+    case RdnaOpcode::VCmpxLtU64:
+        emitInteger64Compare(inst, Integer64Compare::Lt, false, true);
+        return true;
+    case RdnaOpcode::VCmpxEqU64:
+        emitInteger64Compare(inst, Integer64Compare::Eq, false, true);
+        return true;
+    case RdnaOpcode::VCmpLeU64:
+        emitInteger64Compare(inst, Integer64Compare::Le, false, false);
+        return true;
+    case RdnaOpcode::VCmpxLeU64:
+        emitInteger64Compare(inst, Integer64Compare::Le, false, true);
+        return true;
+    case RdnaOpcode::VCmpxGtU64:
+        emitInteger64Compare(inst, Integer64Compare::Gt, false, true);
+        return true;
+    case RdnaOpcode::VCmpGeU64:
+        emitInteger64Compare(inst, Integer64Compare::Ge, false, false);
+        return true;
+    case RdnaOpcode::VCmpxGeU64:
+        emitInteger64Compare(inst, Integer64Compare::Ge, false, true);
+        return true;
     case RdnaOpcode::VCmpEqU16:
         emitInteger16Compare(inst, IrOpcode::IEqual32, false, false);
         return true;

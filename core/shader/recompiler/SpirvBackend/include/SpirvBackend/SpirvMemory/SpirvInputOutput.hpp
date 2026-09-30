@@ -1,6 +1,7 @@
 #ifndef CORE_SHADER_RECOMPILIER_SPIRVBACKEND_INCLUDE_SPIRVBACKEND_SPIRVMEMORY_SPIRVINPUTOUTPUT_HPP
 #define CORE_SHADER_RECOMPILIER_SPIRVBACKEND_INCLUDE_SPIRVBACKEND_SPIRVMEMORY_SPIRVINPUTOUTPUT_HPP
 
+#include <optional>
 #include "SpirvBackend/SpirvEmitterState.hpp"
 #include "IntermediateRepresentation/IrProgram.hpp"
 #include <cstdint>
@@ -13,6 +14,7 @@ std::vector<FragmentParameter> DescribeFragmentParameters(const IrProgram& progr
 std::uint32_t PixelParameterLocation(const SpirvEmitterState& state, std::uint32_t attr);
 bool PixelParameterIsFlat(const SpirvEmitterState& state, std::uint32_t attr);
 bool PixelParameterIsCustom(const SpirvEmitterState& state, std::uint32_t attr);
+std::optional<std::uint32_t> PixelParameterDefault(const SpirvEmitterState& state, std::uint32_t attr, std::uint32_t chan);
 VertexInputScalarKind VertexParameterScalarKind(const SpirvEmitterState& state, std::uint32_t location);
 std::uint32_t VertexParameterComponentCount(const SpirvInputBinding& input);
 std::uint32_t VertexParameterScalarType(SpirvEmitterState& state, VertexInputScalarKind kind);

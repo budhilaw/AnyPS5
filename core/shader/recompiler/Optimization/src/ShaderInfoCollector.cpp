@@ -227,11 +227,12 @@ void CollectPixelInputs(const IrProgram& program, const ShaderPixelInputInfo* pi
             }
         }
     }
+    const auto defaulted = [&](std::uint32_t input) { return (pixel->interpolatorSettings[input] & 0x20u) != 0u; };
     for (std::uint32_t input = 0; input < pixel->inputNum; input++) {
-        AddInput(info, StageInputKind::Parameter, input, 4, "in_param_" + std::to_string(input), perVertex[input]);
+        if (!defaulted(input)) AddInput(info, StageInputKind::Parameter, input, 4, "in_param_" + std::to_string(input), perVertex[input]);
     }
     for (std::uint32_t input = 0; input < pixel->inputNum; input++) {
-        if (interpolated[input] && perVertex[input]) {
+        if (interpolated[input] && perVertex[input] && !defaulted(input)) {
             const auto kind = pixel->psNoPerspective ? StageInputKind::BaryCoordNoPerspective : StageInputKind::BaryCoordSmooth;
             AddInput(info, kind, 0, 3, pixel->psNoPerspective ? "gl_BaryCoordNoPerspKHR" : "gl_BaryCoordKHR");
             break;
