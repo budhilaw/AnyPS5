@@ -24,7 +24,7 @@ namespace AgcDriver::Graphics {
         void Retire(DrawQueue& queue);
 
     private:
-        VkPipeline pipeline(TextureTileMode tileMode, std::uint32_t elementBytes);
+        VkPipeline pipeline(TextureTileMode tileMode, std::uint32_t elementBytes, std::uint32_t family);
         void release() noexcept;
         VkDescriptorSet allocateSet();
 

@@ -23,6 +23,11 @@ struct Push {
     std::uint32_t tailY;
     std::uint32_t elementBytes;
     std::uint32_t arrayLayer;
+    std::uint32_t depth;
+    std::uint32_t sliceStride;
+    std::uint32_t swizzleX;
+    std::uint32_t swizzleY;
+    std::uint32_t swizzleZ;
 };
 
 std::uint32_t BlockBytesFor(TextureTileMode tileMode) {
@@ -37,8 +42,14 @@ std::uint32_t BlockBytesFor(TextureTileMode tileMode) {
     throw std::runtime_error("AGC graphics: TextureDetiler encountered an unknown tile mode");
 }
 
-std::uint32_t PipelineKey(TextureTileMode tileMode, std::uint32_t elementBytes) {
-    return (static_cast<std::uint32_t>(tileMode) << 8) | elementBytes;
+std::uint32_t TileFamily(TextureTileMode tileMode, bool thick) {
+    if (tileMode == TextureTileMode::kLinear) return 0u;
+    if (thick) return 3u;
+    return tileMode == TextureTileMode::RenderTarget64KB ? 2u : 1u;
+}
+
+std::uint32_t PipelineKey(TextureTileMode tileMode, std::uint32_t elementBytes, std::uint32_t family) {
+    return (family << 16) | (static_cast<std::uint32_t>(tileMode) << 8) | elementBytes;
 }
 
 }
@@ -88,13 +99,13 @@ void TextureDetiler::release() noexcept {
     if (descriptorLayout) context.Function<PFN_vkDestroyDescriptorSetLayout>("vkDestroyDescriptorSetLayout")(context.device, descriptorLayout, nullptr);
 }
 
-VkPipeline TextureDetiler::pipeline(TextureTileMode tileMode, std::uint32_t elementBytes) {
+VkPipeline TextureDetiler::pipeline(TextureTileMode tileMode, std::uint32_t elementBytes, std::uint32_t family) {
     Require(std::has_single_bit(elementBytes) && elementBytes <= 16u, "unsupported element size for texture detiling");
-    const auto key = PipelineKey(tileMode, elementBytes);
+    const auto key = PipelineKey(tileMode, elementBytes, family);
     for (const auto& entry : pipelines) {
         if (entry.first == key) return entry.second;
     }
-    const std::uint32_t values[3] = {elementBytes, BlockBytesFor(tileMode), tileMode == TextureTileMode::kLinear ? 0u : (tileMode == TextureTileMode::RenderTarget64KB ? 2u : 1u)};
+    const std::uint32_t values[3] = {elementBytes, BlockBytesFor(tileMode), family};
     const VkSpecializationMapEntry entries[3] = {{0, 0, 4}, {1, 4, 4}, {2, 8, 4}};
     VkSpecializationInfo specialization{};
     specialization.mapEntryCount = 3;
@@ -118,16 +129,21 @@ VkPipeline TextureDetiler::pipeline(TextureTileMode tileMode, std::uint32_t elem
 void TextureDetiler::Dispatch(VkCommandBuffer commands, TextureTileMode tileMode, std::uint32_t elementBytes, VkBuffer source, std::uint64_t sourceOffset, VkBuffer destination, std::uint64_t destinationOffset, const TileMipLayout& layout, std::uint32_t arrayLayer) {
     Require(commands != VK_NULL_HANDLE, "texture detiling requires an active command buffer");
     Require(source != VK_NULL_HANDLE && destination != VK_NULL_HANDLE, "texture detiling requires source and destination buffers");
-    Require(layout.width != 0 && layout.height != 0, "texture detiling requires a non-empty mip layout");
+    Require(layout.width != 0 && layout.height != 0 && layout.depth != 0, "texture detiling requires a non-empty mip layout");
     Require(layout.tiledSize != 0 && layout.linearSize != 0, "texture detiling requires a non-empty mip layout");
-    const auto target = pipeline(tileMode, elementBytes);
+    const auto thick = layout.blockDepth > 1u;
+    Require(thick || layout.depth == 1u, "texture detiling covers several slices only for thick volume layouts");
+    const auto swizzle = thick ? ThickSwizzleMasks(tileMode, elementBytes) : TileSwizzleMasks{0, 0, 0};
+    const auto target = pipeline(tileMode, elementBytes, TileFamily(tileMode, thick));
+    const auto tiledSpan = thick ? (layout.depth - 1u) / layout.blockDepth * layout.sliceStride + layout.tiledSize : layout.tiledSize;
+    Require(!thick || layout.sliceStride <= UINT32_MAX, "texture detiling slice stride exceeds addressable range");
     const auto alignment = std::max<VkDeviceSize>(context.limits.minStorageBufferOffsetAlignment, 4);
     const auto sourceDescriptorOffset = sourceOffset - sourceOffset % alignment;
     const auto destinationDescriptorOffset = destinationOffset - destinationOffset % alignment;
     const auto sourceBase = sourceOffset - sourceDescriptorOffset;
     const auto destinationBase = destinationOffset - destinationDescriptorOffset;
     Require(sourceBase <= UINT32_MAX && destinationBase <= UINT32_MAX, "texture detiling buffer offset exceeds addressable range");
-    const auto sourceRange = (sourceBase + layout.tiledSize + 3) / 4 * 4;
+    const auto sourceRange = (sourceBase + tiledSpan + 3) / 4 * 4;
     const auto destinationRange = (destinationBase + layout.linearSize + 3) / 4 * 4;
     Require(sourceRange <= context.limits.maxStorageBufferRange && destinationRange <= context.limits.maxStorageBufferRange, "texture detiling buffer range exceeds device limits");
     const auto set = allocateSet();
@@ -161,10 +177,15 @@ void TextureDetiler::Dispatch(VkCommandBuffer commands, TextureTileMode tileMode
     push.tailY = layout.tailY;
     push.elementBytes = elementBytes;
     push.arrayLayer = arrayLayer;
+    push.depth = layout.depth;
+    push.sliceStride = thick ? static_cast<std::uint32_t>(layout.sliceStride) : 0u;
+    push.swizzleX = swizzle.x;
+    push.swizzleY = swizzle.y;
+    push.swizzleZ = swizzle.z;
     context.Function<PFN_vkCmdPushConstants>("vkCmdPushConstants")(commands, pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(Push), &push);
     const auto groupsX = (layout.width + 7u) / 8u;
     const auto groupsY = (layout.height + 7u) / 8u;
-    context.Function<PFN_vkCmdDispatch>("vkCmdDispatch")(commands, groupsX, groupsY, 1);
+    context.Function<PFN_vkCmdDispatch>("vkCmdDispatch")(commands, groupsX, groupsY, layout.depth);
 }
 
 }

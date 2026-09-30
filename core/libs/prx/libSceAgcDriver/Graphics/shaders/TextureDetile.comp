@@ -21,6 +21,11 @@ layout(push_constant) uniform Push {
     uint tailY;
     uint elementBytes;
     uint arrayLayer;
+    uint depth;
+    uint sliceStride;
+    uint swizzleX;
+    uint swizzleY;
+    uint swizzleZ;
 } params;
 
 uint standardOffset(uint x, uint y) {
@@ -145,6 +150,32 @@ uint blockOffset(uvec2 p) {
     return offset & (BLOCK_BYTES - 1u);
 }
 
+uint depositBits(uint value, uint mask) {
+    uint result = 0u;
+    while (mask != 0u) {
+        uint lowest = mask & (0u - mask);
+        if ((value & 1u) != 0u) {
+            result |= lowest;
+        }
+        value >>= 1u;
+        mask ^= lowest;
+    }
+    return result;
+}
+
+uint thickTiledOffset(uvec3 p) {
+    uvec3 extent = uvec3(1u << uint(bitCount(params.swizzleX)), 1u << uint(bitCount(params.swizzleY)), 1u << uint(bitCount(params.swizzleZ)));
+    uvec3 swizzle = p;
+    uint blockIndex = 0u;
+    if (params.tail != 0u) {
+        swizzle.xy += uvec2(params.tailX, params.tailY);
+    } else {
+        blockIndex = (p.y / extent.y) * params.blocksPerRow + p.x / extent.x;
+    }
+    uint offset = depositBits(swizzle.x, params.swizzleX) | depositBits(swizzle.y, params.swizzleY) | depositBits(swizzle.z, params.swizzleZ);
+    return (p.z / extent.z) * params.sliceStride + blockIndex * BLOCK_BYTES + offset;
+}
+
 uvec2 blockExtent() {
     uint width;
     if (BLOCK_BYTES <= 256u) {
@@ -172,12 +203,12 @@ void copyElement(uint src, uint dst) {
 }
 
 void main() {
-    uvec2 p = gl_GlobalInvocationID.xy;
-    if (p.x >= params.width || p.y >= params.height) {
+    uvec3 p = gl_GlobalInvocationID;
+    if (p.x >= params.width || p.y >= params.height || p.z >= params.depth) {
         return;
     }
 
-    uint linearOffset = p.y * params.pitchBytes + p.x * ELEMENT_BYTES;
+    uint linearOffset = (p.z * params.height + p.y) * params.pitchBytes + p.x * ELEMENT_BYTES;
 
     if (TILE_FAMILY == 0u) {
         // kLinear: guest and host layouts match; a straight copy at the
@@ -186,12 +217,17 @@ void main() {
         return;
     }
 
-    uvec2 swizzle = p;
+    if (TILE_FAMILY == 3u) {
+        copyElement(params.srcBase + thickTiledOffset(p), params.dstBase + linearOffset);
+        return;
+    }
+
+    uvec2 swizzle = p.xy;
     uvec2 block = uvec2(0u);
     if (params.tail != 0u) {
         swizzle += uvec2(params.tailX, params.tailY);
     } else {
-        block = p / blockExtent();
+        block = p.xy / blockExtent();
     }
 
     uint blockIndex = block.y * params.blocksPerRow + block.x;
