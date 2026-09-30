@@ -39,6 +39,7 @@ void APS5_VABI sceVideoOutSetBufferAttribute2(VideoOutBufferAttribute2* attribut
 }
 
 int APS5_VABI sceVideoOutRegisterBuffers2(int handle, int setIndex, int bufferIndexStart, const VideoOutBuffers* buffers, int bufferNum, const VideoOutBufferAttribute2* attribute, int category, void* option) {
+    APS5_LOG_OUT("register buffers handle=%d set=%d start=%d count=%d category=%d", handle, setIndex, bufferIndexStart, bufferNum, category);
     auto cfg = VideoOutDriver::Get().GetConfig(handle);
     if (cfg == nullptr) {
         throw std::runtime_error(std::string(__func__) + ": VIDEO_OUT_ERROR_INVALID_HANDLE");
@@ -79,7 +80,6 @@ int APS5_VABI sceVideoOutRegisterBuffers2(int handle, int setIndex, int bufferIn
     group.occupied = true;
     std::array<VideoOutBuffer, VIDEO_OUT_BUFFER_NUM_MAX> registered{};
     for (int i = 0; i < bufferNum; ++i) {
-        if (buffers[i].reserved[0] != nullptr || buffers[i].reserved[1] != nullptr) throw std::runtime_error("VideoOut: reserved buffer pointers are set");
         registered[i] = {setIndex, reinterpret_cast<uint64_t>(buffers[i].data), reinterpret_cast<uint64_t>(buffers[i].metadata)};
         const auto display = DescribeVideoOutBuffer(registered[i], group);
         AgcDriverCheckGuestMemory_nid_postfix(buffers[i].data, AgcDriverDisplayBufferSize_nid_postfix(display), 65536);
@@ -126,6 +126,7 @@ int APS5_VABI sceVideoOutSubmitChangeBufferAttribute2(int handle, int setIndex, 
 }
 
 int APS5_VABI sceVideoOutUnregisterBuffers(int handle, int setIndex) {
+    APS5_LOG_OUT("unregister buffers handle=%d set=%d", handle, setIndex);
     auto cfg = VideoOutDriver::Get().GetConfig(handle);
     if (cfg == nullptr) {
         throw std::runtime_error(std::string(__func__) + ": VIDEO_OUT_ERROR_INVALID_HANDLE");

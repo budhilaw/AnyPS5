@@ -13,6 +13,7 @@ static std::vector<EventRegistration>* getEventList(VideoOutConfig& cfg, int16_t
     if (eventKind == VIDEO_OUT_EVENT_VBLANK) return &cfg.vblankEvents;
     if (eventKind == VIDEO_OUT_EVENT_PRE_VBLANK_START) return &cfg.preVblankEvents;
     if (eventKind == VIDEO_OUT_EVENT_SET_MODE) return &cfg.outputModeEvents;
+    if (eventKind == VIDEO_OUT_EVENT_VRR_ACTIVE_STATUS) return &cfg.vrrActiveStatusEvents;
     throw std::runtime_error("getEventList: unknown event kind");
 }
 
@@ -126,6 +127,14 @@ int APS5_VABI sceVideoOutAddOutputModeEvent(KernelEqueue eq, int handle, void* u
     return registerVideoOutEvent(handle, eq, VIDEO_OUT_EVENT_SET_MODE, udata);
 }
 
+int APS5_VABI sceVideoOutAddVrrActiveStatusEvent(KernelEqueue eq, int handle, void* udata) {
+    return registerVideoOutEvent(handle, eq, VIDEO_OUT_EVENT_VRR_ACTIVE_STATUS, udata);
+}
+
+int APS5_VABI sceVideoOutAddVrrStatusFlagsPrivilege() {
+    return 0;
+}
+
 int APS5_VABI sceVideoOutDeleteFlipEvent(KernelEqueue eq, int handle) {
     return deleteVideoOutEvent(handle, eq, VIDEO_OUT_EVENT_FLIP);
 }
@@ -146,7 +155,7 @@ int APS5_VABI sceVideoOutGetEventId(const KernelEvent* ev) {
         throw std::runtime_error(std::string(__func__) + ": VIDEO_OUT_ERROR_INVALID_EVENT");
     }
     const int ident = static_cast<int>(ev->ident);
-    if (ident != VIDEO_OUT_EVENT_FLIP && ident != VIDEO_OUT_EVENT_VBLANK && ident != VIDEO_OUT_EVENT_PRE_VBLANK_START && ident != VIDEO_OUT_EVENT_SET_MODE) {
+    if (ident != VIDEO_OUT_EVENT_FLIP && ident != VIDEO_OUT_EVENT_VBLANK && ident != VIDEO_OUT_EVENT_PRE_VBLANK_START && ident != VIDEO_OUT_EVENT_SET_MODE && ident != VIDEO_OUT_EVENT_VRR_ACTIVE_STATUS) {
         throw std::runtime_error(std::string(__func__) + ": VIDEO_OUT_ERROR_INVALID_EVENT");
     }
     return ident;

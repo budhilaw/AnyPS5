@@ -52,6 +52,7 @@ static constexpr int VIDEO_OUT_EVENT_FLIP = 0;
 static constexpr int VIDEO_OUT_EVENT_VBLANK = 1;
 static constexpr int VIDEO_OUT_EVENT_PRE_VBLANK_START = 2;
 static constexpr int VIDEO_OUT_EVENT_SET_MODE = 8;
+static constexpr int VIDEO_OUT_EVENT_VRR_ACTIVE_STATUS = 16;
 
 static constexpr int VIDEO_OUT_FLIP_MODE_VSYNC = 1;
 static constexpr int VIDEO_OUT_FLIP_MODE_VSYNC_MULTI = 4;
@@ -94,6 +95,7 @@ struct VideoOutConfig {
     std::vector<EventRegistration> vblankEvents;
     std::vector<EventRegistration> preVblankEvents;
     std::vector<EventRegistration> outputModeEvents;
+    std::vector<EventRegistration> vrrActiveStatusEvents;
 
     uint32_t width = 1920;
     uint32_t height = 1080;

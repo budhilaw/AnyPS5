@@ -222,7 +222,40 @@ int APS5_VABI sceVideoOutAdjustColor(int handle, const VideoOutColorSettings* se
     if (cfg == nullptr) {
         throw std::runtime_error(std::string(__func__) + ": VIDEO_OUT_ERROR_INVALID_HANDLE");
     }
-    throw std::runtime_error(std::string(__func__) + " not implemented");
+    std::lock_guard lock(cfg->mutex);
+    cfg->Check();
+    if (settings->gamma != 1.0f && settings->gamma != cfg->gamma) APS5_LOG_OUT("display gamma %.3f is recorded but not applied to presentation", settings->gamma);
+    cfg->gamma = settings->gamma;
+    return 0;
+}
+
+int APS5_VABI sceVideoOutColorSettingsSetGamma_(VideoOutColorSettings* settings, float gamma, uint32_t size) {
+    if (size != sizeof(VideoOutColorSettings)) {
+        throw std::runtime_error(std::string(__func__) + ": VIDEO_OUT_ERROR_INVALID_VALUE");
+    }
+    return sceVideoOutColorSettingsSetGamma(settings, gamma);
+}
+
+int APS5_VABI sceVideoOutAdjustColor_(int handle, const VideoOutColorSettings* settings, uint32_t size) {
+    if (size != sizeof(VideoOutColorSettings)) {
+        throw std::runtime_error(std::string(__func__) + ": VIDEO_OUT_ERROR_INVALID_VALUE");
+    }
+    return sceVideoOutAdjustColor(handle, settings);
+}
+
+int APS5_VABI sceVideoOutVrrPegToFixedRate(int handle, uint64_t first, uint64_t second) {
+    (void)first; (void)second;
+    if (!VideoOutDriver::Get().IsOpen(handle)) {
+        throw std::runtime_error(std::string(__func__) + ": VIDEO_OUT_ERROR_INVALID_HANDLE");
+    }
+    return 0;
+}
+
+int APS5_VABI sceVideoOutVrrUnpegFromFixedRate(int handle) {
+    if (!VideoOutDriver::Get().IsOpen(handle)) {
+        throw std::runtime_error(std::string(__func__) + ": VIDEO_OUT_ERROR_INVALID_HANDLE");
+    }
+    return 0;
 }
 
 }

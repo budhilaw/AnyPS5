@@ -21,6 +21,7 @@
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
 #include "prx/libSceAgcDriver/Submit/include/Dcb.hpp"
 #include "prx/libc/include/Shutdown.hpp"
+#include "prx/libc/include/General.hpp"
 
 namespace {
 
@@ -30,6 +31,18 @@ void require(bool condition, const char* reason) {
 
 void checkConfig(const VideoOutConfig& cfg) {
     cfg.Check();
+}
+
+void resolveFlipBuffer(FlipRequest& request, const VideoOutConfig& cfg) {
+    request.buffer = cfg.buffers[request.index];
+    require(request.buffer.Occupied(), "flip buffer is not registered");
+    require(request.buffer.groupIndex < VIDEO_OUT_BUFFER_ATTRIBUTE_NUM_MAX, "invalid buffer group");
+    request.group = cfg.groups[request.buffer.groupIndex];
+    require(request.group.occupied, "buffer group is not registered");
+    require(request.buffer.dataAddress != 0, "null registered buffer address");
+    static_cast<void>(DescribeVideoOutBuffer(request.buffer, request.group));
+    request.width = request.group.attribute.width;
+    request.height = request.group.attribute.height;
 }
 
 class RenderingWait final : public AgcDriver::IRenderingWait {
@@ -76,16 +89,8 @@ public:
         std::lock_guard lock(cfg->mutex);
         checkConfig(*cfg);
         require(queue->reservations.load() < VIDEO_OUT_FLIP_QUEUE_CAPACITY, "flip queue full");
-        if (info.index >= 0) {
-            request->buffer = cfg->buffers[info.index];
-            require(request->buffer.Occupied(), "flip buffer is not registered");
-            require(request->buffer.groupIndex < VIDEO_OUT_BUFFER_ATTRIBUTE_NUM_MAX, "invalid buffer group");
-            request->group = cfg->groups[request->buffer.groupIndex];
-            require(request->group.occupied, "buffer group is not registered");
-            require(request->buffer.dataAddress != 0, "null registered buffer address");
-            static_cast<void>(DescribeVideoOutBuffer(request->buffer, request->group));
-            request->width = request->group.attribute.width;
-            request->height = request->group.attribute.height;
+        if (info.index >= 0 && cfg->buffers[info.index].Occupied()) {
+            resolveFlipBuffer(*request, *cfg);
         } else {
             request->width = cfg->width;
             request->height = cfg->height;
@@ -147,6 +152,16 @@ void FlipRequest::GpuReady(const std::shared_ptr<AgcDriver::FrameTiming>& frameT
         std::lock_guard lock(cfg->mutex);
         checkConfig(*cfg);
         require(reserved && !ready && !terminal && cfg->generation == generation, "invalid flip readiness transition");
+        if (index >= 0 && !buffer.Occupied()) {
+            if (cfg->buffers[index].Occupied()) {
+                resolveFlipBuffer(*this, *cfg);
+            } else {
+                static std::atomic<bool> reported{false};
+                if (!reported.exchange(true)) {
+                    APS5_LOG_OUT("flip of unregistered buffer %d is presented blank", index);
+                }
+            }
+        }
         readiness.Mark("locks_validate");
         queuedAt = AgcDriver::FrameTiming::Clock::now();
         queue->requests.push_back(shared_from_this());
@@ -294,10 +309,12 @@ bool VideoOutDriver::close(int handle) {
     removeEvents(cfg->vblankEvents, VIDEO_OUT_EVENT_VBLANK);
     removeEvents(cfg->preVblankEvents, VIDEO_OUT_EVENT_PRE_VBLANK_START);
     removeEvents(cfg->outputModeEvents, VIDEO_OUT_EVENT_SET_MODE);
+    removeEvents(cfg->vrrActiveStatusEvents, VIDEO_OUT_EVENT_VRR_ACTIVE_STATUS);
     cfg->flipEvents.clear();
     cfg->vblankEvents.clear();
     cfg->preVblankEvents.clear();
     cfg->outputModeEvents.clear();
+    cfg->vrrActiveStatusEvents.clear();
     cfg->vblankCond.notify_all();
     flipQueue->changed.notify_all();
     return true;
@@ -411,7 +428,7 @@ void VideoOutDriver::processFlip(FlipRequest& req) {
         request.gpuComplete = true;
         request.cfg->vblankCond.notify_all();
     };
-    if (req.index >= 0) {
+    if (req.index >= 0 && req.buffer.Occupied()) {
         const auto display = DescribeVideoOutBuffer(req.buffer, req.group);
         AgcDriverPresentBuffer_nid_postfix(target, display, gpuReady, &req);
     } else {
