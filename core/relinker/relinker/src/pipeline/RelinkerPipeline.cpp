@@ -1,8 +1,10 @@
 #include <relinker/pipeline/RelinkerPipeline.hpp>
 #include <relinker/analysis/ValidationPolicy.hpp>
 #include <relinker/analysis/UnusedNidFilter/PltCompactor.hpp>
+#include <relinker/analysis/PltThunkRestorer.hpp>
 #include <sstream>
 #include <iostream>
+#include <algorithm>
 #include <cstring>
 
 namespace Relinker {
@@ -247,11 +249,23 @@ RelinkResult RelinkerPipeline::Relink(const std::vector<std::uint8_t>& sourceElf
 
     auto dynamicRefs = nidRefs;
     std::vector<RelinkPatch> patches;
+    const auto textOffset = textSection.empty() ? FileByteOffset{0} : _elfReader->TranslateVirtualAddress(textVAddr);
+    if (!textSection.empty() && hasPltRelocations) {
+        auto restored = RestorePatchedPltThunks(originalNidRefs, textSection, textVAddr, textOffset, dynJmpRelOffset);
+        if (!restored.Nids.empty()) {
+            std::cout << "Restored " << restored.Nids.size() << " patched PLT thunks:";
+            for (const auto& nid : restored.Nids) std::cout << ' ' << nid;
+            std::cout << "\n";
+        }
+        for (const auto& patch : restored.Patches)
+            std::copy(patch.Bytes.begin(), patch.Bytes.end(), textSection.begin() + static_cast<std::ptrdiff_t>(patch.Offset - textOffset));
+        patches = std::move(restored.Patches);
+    }
     auto pltCount = static_cast<std::uint32_t>(dynJmpRelSize / relaEntSize);
     if (unusedFilterLevel == 2) {
         auto compacted = UnusedNidFilter::CompactPlt(originalNidRefs, nidRefs, textSection, textVAddr, _elfReader->TranslateVirtualAddress(textVAddr), dynJmpRelOffset);
         dynamicRefs = std::move(compacted.References);
-        patches = std::move(compacted.Patches);
+        patches.insert(patches.end(), compacted.Patches.begin(), compacted.Patches.end());
         std::cout << "PLT compaction: " << pltCount << " -> " << compacted.SlotCount << "\n";
         pltCount = compacted.SlotCount;
     }

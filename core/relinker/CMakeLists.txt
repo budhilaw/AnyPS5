@@ -39,6 +39,7 @@ add_executable(relinker
         ${CMAKE_CURRENT_SOURCE_DIR}/relinker/src/analysis/UnusedNidFilter/StrictReachability.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/relinker/src/analysis/UnusedNidFilter/EhFrameReader.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/relinker/src/analysis/UnusedNidFilter/PltCompactor.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/relinker/src/analysis/PltThunkRestorer.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/relinker/src/analysis/UnusedNidFilter/EntryPointCollector.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/relinker/src/analysis/UnusedNidFilter/ControlFlowGraph.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/relinker/src/analysis/UnusedNidFilter/GotAccessIndex.cpp
@@ -112,4 +113,13 @@ if(BUILD_TESTING)
         ${CMAKE_CURRENT_SOURCE_DIR}/relinker/include
     )
     add_test(NAME strict_nid_filter COMMAND strict_nid_filter_tests)
+    add_executable(plt_thunk_restorer_tests
+        ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/PltThunkRestorerTests.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/relinker/src/analysis/PltThunkRestorer.cpp
+    )
+    target_include_directories(plt_thunk_restorer_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/domain/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/relinker/include
+    )
+    add_test(NAME plt_thunk_restorer COMMAND plt_thunk_restorer_tests)
 endif()
