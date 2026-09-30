@@ -1,7 +1,11 @@
 #include "Recompiler.hpp"
+#include <algorithm>
 #include <array>
+#include <cstdio>
+#include <cstdlib>
 #include <future>
 #include "CacheKey.hpp"
+#include <limits>
 #include <mutex>
 #include <string_view>
 #include <shared_mutex>
@@ -148,6 +152,7 @@ struct CompiledVariant {
     CompiledShaderInfo info;
     BindingAllocationResult bindings;
     RecompileResult result;
+    std::uint64_t ordinal = 0;
 };
 
 struct ResourceProgram {
@@ -167,6 +172,7 @@ struct SourceEntry {
     std::shared_ptr<const IrResourcePlan> plan;
     std::unique_ptr<IrProgram> spare;
     std::vector<std::shared_ptr<const CompiledVariant>> variants;
+    std::uint64_t compiled = 0;
 };
 
 struct SourceKeyHash {
@@ -310,6 +316,153 @@ bool sameLayout(const BindingLayout& left, const BindingLayout& right) {
     return left.descriptorSet == right.descriptorSet && left.firstBinding == right.firstBinding && left.pushConstantOffsetBytes == right.pushConstantOffsetBytes && left.pushConstantSizeBytes == right.pushConstantSizeBytes;
 }
 
+bool traceVariants() {
+    static const bool enabled = std::getenv("ANYPS5_TRACE_VARIANTS") != nullptr;
+    return enabled;
+}
+
+const char* stageName(ShaderStage stage) {
+    switch (stage) {
+    case ShaderStage::Compute:
+        return "compute";
+    case ShaderStage::Vertex:
+        return "vertex";
+    case ShaderStage::TessellationControl:
+        return "hull";
+    case ShaderStage::TessellationEvaluation:
+        return "domain";
+    case ShaderStage::Geometry:
+        return "geometry";
+    case ShaderStage::Fragment:
+        return "pixel";
+    case ShaderStage::Local:
+        return "local";
+    case ShaderStage::Mesh:
+        return "mesh";
+    }
+    return "unknown";
+}
+
+const char* numericClassName(IrTextureNumericClass numericClass) {
+    switch (numericClass) {
+    case IrTextureNumericClass::Float:
+        return "float";
+    case IrTextureNumericClass::Uint:
+        return "uint";
+    case IrTextureNumericClass::Sint:
+        return "sint";
+    case IrTextureNumericClass::Unsupported:
+        break;
+    }
+    return "unsupported";
+}
+
+std::size_t differenceCount(const CompiledVariant& left, const CompiledVariant& right) {
+    const auto& before = left.specialization;
+    const auto& after = right.specialization;
+    std::size_t count = sameLayout(left.layout, right.layout) ? 0u : 1u;
+    count += std::max(before.buffers.size(), after.buffers.size()) - std::min(before.buffers.size(), after.buffers.size());
+    count += std::max(before.images.size(), after.images.size()) - std::min(before.images.size(), after.images.size());
+    for (std::size_t index = 0; index < std::min(before.buffers.size(), after.buffers.size()); ++index) {
+        count += before.buffers[index] == after.buffers[index] ? 0u : 1u;
+    }
+    for (std::size_t index = 0; index < std::min(before.images.size(), after.images.size()); ++index) {
+        count += before.images[index] == after.images[index] ? 0u : 1u;
+    }
+    return count;
+}
+
+template<typename... TValues>
+void appendFormatted(std::string& text, const char* format, TValues... values) {
+    char item[192];
+    const int length = std::snprintf(item, sizeof(item), format, values...);
+    if (length > 0) {
+        text.append(item, std::min(static_cast<std::size_t>(length), sizeof(item) - 1u));
+    }
+}
+
+std::string describeChange(const CompiledVariant& from, const CompiledVariant& to) {
+    std::string text;
+    if (!sameLayout(from.layout, to.layout)) {
+        appendFormatted(text, "; layout set %u binding %u push constants %u+%u -> set %u binding %u push constants %u+%u", from.layout.descriptorSet, from.layout.firstBinding, from.layout.pushConstantOffsetBytes, from.layout.pushConstantSizeBytes, to.layout.descriptorSet, to.layout.firstBinding, to.layout.pushConstantOffsetBytes, to.layout.pushConstantSizeBytes);
+    }
+    const auto& before = from.specialization;
+    const auto& after = to.specialization;
+    if (before.buffers.size() != after.buffers.size()) {
+        appendFormatted(text, "; buffer count %zu -> %zu", before.buffers.size(), after.buffers.size());
+    }
+    for (std::size_t index = 0; index < std::min(before.buffers.size(), after.buffers.size()); ++index) {
+        const auto& left = before.buffers[index];
+        const auto& right = after.buffers[index];
+        if (left == right) {
+            continue;
+        }
+        appendFormatted(text, "; buffer %zu", index);
+        if (left.packedStride != right.packedStride) {
+            appendFormatted(text, " packedStride 0x%x -> 0x%x", left.packedStride, right.packedStride);
+        }
+        if (left.descriptorFormat != right.descriptorFormat) {
+            appendFormatted(text, " format %u -> %u", static_cast<unsigned>(left.descriptorFormat), static_cast<unsigned>(right.descriptorFormat));
+        }
+        if (left.descriptorSwizzle != right.descriptorSwizzle) {
+            appendFormatted(text, " swizzle 0x%03x -> 0x%03x", left.descriptorSwizzle, right.descriptorSwizzle);
+        }
+    }
+    if (before.images.size() != after.images.size()) {
+        appendFormatted(text, "; image count %zu -> %zu", before.images.size(), after.images.size());
+    }
+    for (std::size_t index = 0; index < std::min(before.images.size(), after.images.size()); ++index) {
+        const auto& left = before.images[index];
+        const auto& right = after.images[index];
+        if (left == right) {
+            continue;
+        }
+        appendFormatted(text, "; image %zu", index);
+        if (left.numericClass != right.numericClass) {
+            appendFormatted(text, " numericClass %s -> %s", numericClassName(left.numericClass), numericClassName(right.numericClass));
+        }
+        if (left.dimension != right.dimension) {
+            appendFormatted(text, " dimension %s -> %s", RdnaImageDimensionToString(left.dimension), RdnaImageDimensionToString(right.dimension));
+        }
+        if (left.mipCount != right.mipCount) {
+            appendFormatted(text, " mipCount %u -> %u", left.mipCount, right.mipCount);
+        }
+        if (left.conversionFormat != right.conversionFormat) {
+            appendFormatted(text, " conversionFormat %u -> %u", static_cast<unsigned>(left.conversionFormat), static_cast<unsigned>(right.conversionFormat));
+        }
+        if (left.shaderSwizzle != right.shaderSwizzle) {
+            appendFormatted(text, " shaderSwizzle 0x%03x -> 0x%03x", left.shaderSwizzle, right.shaderSwizzle);
+        }
+        if (left.indirectRoot != right.indirectRoot || left.indirectMappingOffset != right.indirectMappingOffset || left.indirectSearchIterations != right.indirectSearchIterations) {
+            appendFormatted(text, " indirect root/offset/iterations %d/%u/%u -> %d/%u/%u", static_cast<int>(left.indirectRoot), left.indirectMappingOffset, left.indirectSearchIterations, static_cast<int>(right.indirectRoot), right.indirectMappingOffset, right.indirectSearchIterations);
+        }
+        if (left.cube != right.cube) {
+            appendFormatted(text, " cube %u -> %u", left.cube ? 1u : 0u, right.cube ? 1u : 0u);
+        }
+        if (left.fmask != right.fmask) {
+            appendFormatted(text, " fmask %u -> %u", left.fmask ? 1u : 0u, right.fmask ? 1u : 0u);
+        }
+    }
+    return text;
+}
+
+void traceVariant(const RecompileRequest& request, const SourceEntry& source, const CompiledVariant& created) {
+    if (source.variants.empty()) {
+        return;
+    }
+    const CompiledVariant* nearest = nullptr;
+    std::size_t nearestDifferences = std::numeric_limits<std::size_t>::max();
+    for (const auto& variant : source.variants) {
+        const auto differences = differenceCount(*variant, created);
+        if (differences < nearestDifferences) {
+            nearest = variant.get();
+            nearestDifferences = differences;
+        }
+    }
+    const auto change = describeChange(*nearest, created);
+    std::fprintf(stderr, "shader recompiler: %s program 0x%llx code hash 0x%016llx compiles variant %llu (%zu resident); variant %llu differs in%s\n", stageName(request.shader.stage), static_cast<unsigned long long>(request.shader.codeAddress), static_cast<unsigned long long>(request.shader.codeHash), static_cast<unsigned long long>(created.ordinal), source.variants.size(), static_cast<unsigned long long>(nearest->ordinal), change.empty() ? " nothing" : change.c_str() + 1);
+}
+
 RecompileResult RecompileImpl(const RecompileRequest& request) {
     ResourceSnapshot snapshot;
     ResourceSpecialization specialization;
@@ -348,8 +501,13 @@ RecompileResult RecompileImpl(const RecompileRequest& request) {
         if (variant == nullptr) {
             auto program = source->spare != nullptr ? std::move(*source->spare) : PrepareResourceProgram(request);
             source->spare.reset();
-            variant = std::make_shared<CompiledVariant>(compileVariant(request, std::move(program), *snapshotUsed, *specializationUsed));
-            source->variants.push_back(variant);
+            auto created = std::make_shared<CompiledVariant>(compileVariant(request, std::move(program), *snapshotUsed, *specializationUsed));
+            created->ordinal = ++source->compiled;
+            if (traceVariants()) {
+                traceVariant(request, *source, *created);
+            }
+            source->variants.push_back(created);
+            variant = std::move(created);
         }
     }
     auto result = materializeResult(*variant, request, *snapshotUsed);
