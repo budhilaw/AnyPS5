@@ -3,6 +3,7 @@
 #include "prx/libc/include/specifics/windows/NativeProtection.hpp"
 #include "prx/libc/include/specifics/windows/FaultReport.hpp"
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <limits>
 #include <map>
@@ -43,7 +44,9 @@ struct SavedProtection {
 
 std::recursive_mutex viewMutex;
 std::map<std::uint64_t, View> physicalViews;
+std::atomic<std::uint64_t> remapGeneration{0};
 thread_local std::uintptr_t retriedAddress = 0;
+thread_local std::uint64_t retriedGeneration = 0;
 thread_local unsigned retries = 0;
 
 DWORD nativeProtection(int protection) {
@@ -138,8 +141,10 @@ bool retryRemappedAccess(const EXCEPTION_RECORD* record) {
     const auto address = static_cast<std::uintptr_t>(record->ExceptionInformation[1]);
     { std::lock_guard lock(viewMutex); }
     if (address == 0 || !accessibleNow(address, record->ExceptionInformation[0])) return false;
-    if (retriedAddress != address) {
+    const auto generation = remapGeneration.load(std::memory_order_acquire);
+    if (retriedAddress != address || retriedGeneration != generation) {
         retriedAddress = address;
+        retriedGeneration = generation;
         retries = 0;
     }
     return ++retries <= 16;
@@ -185,6 +190,7 @@ void splitView(std::uint64_t base, const View& view, std::uint64_t first, std::u
     check(VirtualFree(reinterpret_cast<void*>(first), 0, MEM_RELEASE) != FALSE, "VirtualFree released guest physical placeholder");
     remapPiece(base, first, view.offset, left);
     remapPiece(last, view.end, view.offset + (last - base), right);
+    remapGeneration.fetch_add(1, std::memory_order_release);
 }
 
 }
