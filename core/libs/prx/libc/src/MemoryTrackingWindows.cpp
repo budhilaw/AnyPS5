@@ -1,4 +1,5 @@
 #include "prx/libc/include/MemoryTrackingPlatform.hpp"
+#include "prx/libc/include/GuestMemoryTracking.hpp"
 #include "prx/libc/include/SlowOperation.hpp"
 #include "prx/libc/include/specifics/windows/NativeProtection.hpp"
 #include <algorithm>
@@ -9,6 +10,7 @@
 #include <stdexcept>
 #include <system_error>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 #ifndef NOMINMAX
@@ -44,7 +46,20 @@ void describeCode(std::uint64_t address, char* text, std::size_t size) {
 void recordFault(std::uint64_t instruction, std::uint64_t address, bool write) {
     static std::mutex mutex;
     static auto* sites = new std::unordered_map<std::uint64_t, FaultSite>;
+    static auto* seen = new std::unordered_set<std::uint64_t>;
     static auto reported = std::chrono::steady_clock::now();
+    bool first = false;
+    {
+        std::lock_guard lock(mutex);
+        first = seen->insert(instruction).second;
+    }
+    if (first) {
+        char where[160];
+        describeCode(instruction, where, sizeof(where));
+        std::fprintf(stderr, "[faults] first %s at %s touching 0x%llx\n", write ? "write" : "read", where, static_cast<unsigned long long>(address));
+        std::lock_guard trackingLock(GuestMemoryTrackingMutex_nid_postfix());
+        GuestMemoryTrackingDescribe_nid_postfix(address, 1);
+    }
     std::lock_guard lock(mutex);
     auto& site = (*sites)[instruction];
     ++site.count;
