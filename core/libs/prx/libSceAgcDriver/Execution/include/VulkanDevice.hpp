@@ -2,6 +2,7 @@
 #define CORE_LIBS_PRX_LIBSCEAGCDRIVER_EXECUTION_INCLUDE_VULKANDEVICE_HPP
 
 #define VK_NO_PROTOTYPES
+#include <array>
 #include <span>
 #include <functional>
 #include <vulkan/vulkan.h>
@@ -31,6 +32,7 @@ public:
     void RecordBarrier();
     void ResolveGpuWrites(std::uint64_t address, std::size_t bytes);
     void GdsTransfer(std::span<const std::uint32_t> packet);
+    std::array<std::uint32_t, 3> IndirectDispatchGroups(std::uint64_t address);
     void AcquireGpuMemory();
     void ResolveMemory(std::uint64_t address, std::size_t bytes, bool writable);
     bool NeedsResolve(std::uint64_t address, std::size_t bytes) const;

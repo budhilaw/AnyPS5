@@ -680,7 +680,7 @@ private:
         }
     }
 
-    void dispatch(QueueState& queue, std::span<const std::uint32_t> packet, const Submission& submission) {
+    void dispatch(QueueState& queue, std::span<const std::uint32_t> packet, const Submission& submission, std::uint64_t indirectArguments = 0) {
         PerformanceTimer timing("Driver.Dispatch");
         const auto address = (static_cast<std::uint64_t>(readRegister(queue.shader, 0x20c)) << 8u) | (static_cast<std::uint64_t>(readRegister(queue.shader, 0x20d) & 0xffu) << 40u);
         auto it = submission.shaders.upper_bound(address);
@@ -828,12 +828,14 @@ private:
             std::array<std::uint32_t, 3> groups;
             std::vector<Graphics::GuestMemorySnapshot> snapshots;
             std::uint64_t program;
+            std::uint64_t arguments;
         };
-        auto work = std::make_shared<DispatchWork>(DispatchWork{current, frameTiming, std::move(shaderMemoryOwner), std::move(compiled), {packet[1], packet[2], packet[3]}, std::move(snapshots), address});
+        auto work = std::make_shared<DispatchWork>(DispatchWork{current, frameTiming, std::move(shaderMemoryOwner), std::move(compiled), {packet[1], packet[2], packet[3]}, std::move(snapshots), address, indirectArguments});
         job.run = [work] {
             PerformanceContext timingContext(work->timing.get());
             GpuJournal::CurrentProgram = work->program;
-            work->device->Dispatch(work->compiled, work->groups[0], work->groups[1], work->groups[2], work->snapshots);
+            const auto groups = work->arguments != 0 ? work->device->IndirectDispatchGroups(work->arguments) : work->groups;
+            work->device->Dispatch(work->compiled, groups[0], groups[1], groups[2], work->snapshots);
         };
         postGraphics(std::move(job));
         timing.Mark("post");
@@ -1294,17 +1296,10 @@ private:
                 } else if (opcode == 0x15) {
                     SkippingFailedPrograms([&] { dispatch(queue, packet, submission); });
                 } else if (opcode == 0x16) {
-                    std::array<std::uint32_t, 5> direct;
-                    {
-                        drainGraphics("drain indirect dispatch");
-                        std::lock_guard gpuLock(gpuMutex);
-                        const GuestMemory::MemoryAccessScope memoryScope(device.get(), [](void* context, std::uint64_t address, std::size_t bytes, bool writable) {
-                            if (context) static_cast<VulkanDevice*>(context)->ResolveMemory(address, bytes, writable);
-                        });
-                        direct = Pm4::ResolveDispatch(packet, queue);
-                    }
+                    const auto arguments = Pm4::DispatchIndirectAddress(packet, queue);
+                    const std::array<std::uint32_t, 5> direct{0xc0031500u, 0, 0, 0, packet.back()};
                     journalIndirect = true;
-                    SkippingFailedPrograms([&] { dispatch(queue, direct, submission); });
+                    SkippingFailedPrograms([&] { dispatch(queue, direct, submission, arguments); });
                     journalIndirect = false;
                 } else if (opcode == 0x35 || opcode == 0x2d || opcode == 0x27 || opcode == 0x24 || opcode == 0x25) {
                     SkippingFailedPrograms([&] { draw(queue, packet, submission); });

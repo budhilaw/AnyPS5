@@ -451,14 +451,15 @@ bool AccessesMemory(std::uint32_t header) {
     }
 }
 
+std::uint64_t DispatchIndirectAddress(std::span<const std::uint32_t> packet, const QueueState& queue) {
+    if (packet.size() == 4) return address(packet[1], packet[2]);
+    require(queue.dispatchIndirectBase != 0, "indirect dispatch base has not been set");
+    require(packet[1] <= std::numeric_limits<std::uint64_t>::max() - queue.dispatchIndirectBase, "indirect dispatch address overflow");
+    return queue.dispatchIndirectBase + packet[1];
+}
+
 std::array<std::uint32_t, 5> ResolveDispatch(std::span<const std::uint32_t> packet, const QueueState& queue) {
-    std::uint64_t source = 0;
-    if (packet.size() == 4) source = address(packet[1], packet[2]);
-    else {
-        require(queue.dispatchIndirectBase != 0, "indirect dispatch base has not been set");
-        require(packet[1] <= std::numeric_limits<std::uint64_t>::max() - queue.dispatchIndirectBase, "indirect dispatch address overflow");
-        source = queue.dispatchIndirectBase + packet[1];
-    }
+    const auto source = DispatchIndirectAddress(packet, queue);
     std::array<std::uint32_t, 5> result{0xc0031500u, 0, 0, 0, packet.back()};
     GuestMemory::Read(source, std::as_writable_bytes(std::span(result).subspan(1, 3)), 4);
     static const bool traceIndirect = std::getenv("ANYPS5_TRACE_INDIRECT") != nullptr;

@@ -797,6 +797,16 @@ void VulkanDevice::GdsTransfer(std::span<const std::uint32_t> packet) {
     timing.Mark("copy");
 }
 
+std::array<std::uint32_t, 3> VulkanDevice::IndirectDispatchGroups(std::uint64_t address) {
+    SlowOperationTimer slowTimer("device indirect arguments");
+    ResolveMemory(address, 3 * sizeof(std::uint32_t), false);
+    std::array<std::uint32_t, 3> groups{};
+    GuestMemory::Read(address, std::as_writable_bytes(std::span(groups)), 4);
+    static const bool traceIndirect = std::getenv("ANYPS5_TRACE_INDIRECT") != nullptr;
+    if (traceIndirect) std::fprintf(stderr, "[indirect] dispatch args at 0x%llx: %u %u %u\n", static_cast<unsigned long long>(address), groups[0], groups[1], groups[2]);
+    return groups;
+}
+
 void VulkanDevice::WaitDraws() {
     std::lock_guard memoryLock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
     PerformanceTimer timing("Vulkan.WaitDraws");
