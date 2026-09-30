@@ -161,6 +161,7 @@ struct VulkanDevice::State {
     static constexpr std::size_t ComputePipelineLimit = 1024;
     std::mutex computePipelineMutex;
     std::unordered_map<std::string, ComputePipeline> computePipelines;
+    std::unordered_map<std::uint64_t, ComputePipeline> computePipelinesByHash;
     void destroyComputePipeline(const ComputePipeline& entry) const {
         if (entry.pipeline) reinterpret_cast<PFN_vkDestroyPipeline>(deviceProc(device, "vkDestroyPipeline"))(device, entry.pipeline, nullptr);
         if (entry.layout) reinterpret_cast<PFN_vkDestroyPipelineLayout>(deviceProc(device, "vkDestroyPipelineLayout"))(device, entry.layout, nullptr);
@@ -170,6 +171,10 @@ struct VulkanDevice::State {
     void destroyComputePipelines() {
         for (auto& [key, entry] : computePipelines) destroyComputePipeline(entry);
         computePipelines.clear();
+        computePipelinesByHash.clear();
+    }
+    void rememberComputePipeline(const ShaderRecompiler::RecompileResult& shader, const ComputePipeline& entry) {
+        if (shader.spirvHash != 0) computePipelinesByHash.emplace(shader.spirvHash, entry);
     }
     ComputePipeline createComputePipeline(std::span<const Graphics::CompiledShader> shaders, VkPipelineCache cache, VkDescriptorSetLayout setLayout, bool push) {
         const auto& shader = *shaders.front().program;
@@ -204,6 +209,10 @@ struct VulkanDevice::State {
         return entry;
     }
     void precompileComputePipeline(std::span<const Graphics::CompiledShader> shaders, VkPipelineCache cache, bool push) {
+        if (const auto hash = shaders.front().program->spirvHash; hash != 0) {
+            std::lock_guard lock(computePipelineMutex);
+            if (computePipelinesByHash.contains(hash)) return;
+        }
         const auto bindings = Graphics::ShaderResources::LayoutBindings(shaders);
         if (!bindings) return;
         std::uint64_t storageBuffers = 0, sampledImages = 0, storageImages = 0, samplers = 0;
@@ -235,6 +244,7 @@ struct VulkanDevice::State {
         entry.setLayout = setLayout;
         std::lock_guard lock(computePipelineMutex);
         if (!computePipelines.emplace(key, entry).second) destroyComputePipeline(entry);
+        else rememberComputePipeline(*shaders.front().program, entry);
     }
     static std::string computePipelineKey(const ShaderRecompiler::RecompileResult& shader, bool push, std::span<const std::uint32_t> layoutKey) {
         std::uint64_t hash = shader.spirvHash;
@@ -1342,12 +1352,16 @@ void VulkanDevice::Dispatch(const ShaderRecompiler::RecompileResult& shader, std
                 }
             }
         }
-        const auto key = State::computePipelineKey(shader, pushStages != 0, resources->LayoutKey());
         State::ComputePipeline selected;
         {
             std::unique_lock pipelineLock(state->computePipelineMutex);
-            if (const auto found = state->computePipelines.find(key); found != state->computePipelines.end()) {
-                selected = found->second;
+            const auto byHash = shader.spirvHash != 0 ? state->computePipelinesByHash.find(shader.spirvHash) : state->computePipelinesByHash.end();
+            if (byHash != state->computePipelinesByHash.end()) {
+                selected = byHash->second;
+                timing.Mark("pipeline_hit");
+            } else if (const auto key = State::computePipelineKey(shader, pushStages != 0, resources->LayoutKey()); state->computePipelines.contains(key)) {
+                selected = state->computePipelines.at(key);
+                state->rememberComputePipeline(shader, selected);
                 timing.Mark("pipeline_hit");
             } else {
                 if (state->computePipelines.size() >= State::ComputePipelineLimit) {
@@ -1363,6 +1377,7 @@ void VulkanDevice::Dispatch(const ShaderRecompiler::RecompileResult& shader, std
                 pipelineLock.lock();
                 const auto [position, inserted] = state->computePipelines.emplace(key, entry);
                 if (!inserted) state->destroyComputePipeline(entry);
+                else state->rememberComputePipeline(shader, entry);
                 selected = position->second;
             }
         }
