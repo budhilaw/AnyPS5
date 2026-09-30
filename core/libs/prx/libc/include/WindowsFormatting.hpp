@@ -177,8 +177,7 @@ inline int FormatWindows(char* buffer, size_t size, const char* format, const vo
             output.Value(spec + conversion, args.Next<int>());
         } else if (conversion == 's' && length.empty()) {
             const char* value = args.Next<const char*>();
-            if (!value) throw std::invalid_argument("Null formatted string");
-            output.Value(spec + conversion, value);
+            output.Value(spec + conversion, value != nullptr ? value : "(null)");
         } else if (conversion == 'p' && length.empty()) {
             output.Value(spec + conversion, args.Next<void*>());
         } else if (conversion == 'n' && integerLength && spec == "%") {
