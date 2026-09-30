@@ -55,6 +55,7 @@ static constexpr int VIDEO_OUT_EVENT_SET_MODE = 8;
 static constexpr int VIDEO_OUT_EVENT_VRR_ACTIVE_STATUS = 16;
 
 static constexpr int VIDEO_OUT_FLIP_MODE_VSYNC = 1;
+static constexpr int VIDEO_OUT_FLIP_MODE_HSYNC = 2;
 static constexpr int VIDEO_OUT_FLIP_MODE_VSYNC_MULTI = 4;
 
 static constexpr int VIDEO_OUT_BUFFER_INDEX_BLACK = -2;

@@ -75,8 +75,12 @@ public:
     }
 
     std::shared_ptr<AgcDriver::IFlipRequest> Reserve(const AgcDriver::FlipInfo& info) override {
-        require(info.mode == VIDEO_OUT_FLIP_MODE_VSYNC, "unsupported flip mode");
+        require(info.mode == VIDEO_OUT_FLIP_MODE_VSYNC || info.mode == VIDEO_OUT_FLIP_MODE_HSYNC, "unsupported flip mode");
         require(info.index >= VIDEO_OUT_BUFFER_INDEX_BLACK && info.index < VIDEO_OUT_BUFFER_NUM_MAX, "invalid flip index");
+        if (info.mode == VIDEO_OUT_FLIP_MODE_HSYNC) {
+            static std::atomic<bool> reported{false};
+            if (!reported.exchange(true)) APS5_LOG_OUT("first immediate (HSYNC) flip, handle %u buffer %d: immediate flips are shown without waiting for a vblank or the flip rate. One known cause is a 120 Hz display mode (Performance+, Fidelity+ or Variable Framerate) on an output without 119.88 Hz, most likely one saved under another ANYPS5_DISPLAY profile; if so, re-select the display mode in Options > Display", info.handle, info.index);
+        }
         auto request = std::make_shared<FlipRequest>();
         request->cfg = cfg;
         request->queue = queue;
@@ -352,6 +356,7 @@ void VideoOutDriver::triggerEvents(VideoOutConfig& cfg, int eventKind, void* tri
     else if (eventKind == VIDEO_OUT_EVENT_VBLANK) events = &cfg.vblankEvents;
     else if (eventKind == VIDEO_OUT_EVENT_PRE_VBLANK_START) events = &cfg.preVblankEvents;
     else if (eventKind == VIDEO_OUT_EVENT_SET_MODE) events = &cfg.outputModeEvents;
+    else if (eventKind == VIDEO_OUT_EVENT_VRR_ACTIVE_STATUS) events = &cfg.vrrActiveStatusEvents;
     else throw std::runtime_error("VideoOut: unknown event kind");
     for (auto it = events->begin(); it != events->end();) {
         require(it->generation == cfg.generation, "stale event registration");
@@ -391,7 +396,7 @@ void VideoOutDriver::processFlip(FlipRequest& req) {
         require(req.cfg->lastFlipVblank <= std::numeric_limits<uint64_t>::max() - interval, "flip interval overflow");
         const auto target = req.cfg->lastFlipVblank + interval;
         timing.Mark("validate");
-        req.cfg->vblankCond.wait(lock, [&] { return req.cfg->vblankStatus.count >= target || req.cfg->failure || req.cfg->closing; });
+        if (req.flipMode != VIDEO_OUT_FLIP_MODE_HSYNC) req.cfg->vblankCond.wait(lock, [&] { return req.cfg->vblankStatus.count >= target || req.cfg->failure || req.cfg->closing; });
         timing.Mark("vblank_wait");
         checkConfig(*req.cfg);
     }

@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <string>
 #include <limits>
+#include <utility>
 #include <vector>
 
 #undef main
@@ -71,7 +72,7 @@ void testLifetime(bool reopen) {
     attribute.height = 64;
     attribute.pixel_format = 0x8000000000000000ull;
     sceVideoOutRegisterBuffers2(handle, 0, 0, &buffer, 1, &attribute, 0, nullptr);
-    sceVideoOutSubmitFlip(handle, 0, 1, -9);
+    sceVideoOutSubmitFlip(handle, 0, VIDEO_OUT_FLIP_MODE_HSYNC, -9);
     {
         std::lock_guard lock(cfg->mutex);
         check(cfg->flipStatus.flipPendingNum == 1 && cfg->flipStatus.count == 0, "reservation status is wrong");
@@ -176,6 +177,15 @@ void testControls() {
     check(owner->GetTriggeredEvents(&event, 1) == 1, "initial output mode event missing");
     int64_t mode = 0;
     check(sceVideoOutGetEventData(&event, &mode) == 0 && mode == VIDEO_OUT_OUTPUT_MODE_DEFAULT && sceVideoOutGetEventCount(&event) == 1, "initial output mode event encoding is wrong");
+    check(sceVideoOutIsOutputSupported(handle, VIDEO_OUT_OUTPUT_MODE_DEFAULT, nullptr, nullptr, 0) == 1 && sceVideoOutIsOutputSupported(handle, VIDEO_OUT_OUTPUT_MODE_119_88HZ, nullptr, nullptr, 0) == 0, "output mode support is wrong");
+    check(sceVideoOutConfigureOutput(handle, VIDEO_OUT_OUTPUT_MODE_119_88HZ, nullptr, nullptr, 0) == VIDEO_OUT_ERROR_UNAVAILABLE_OUTPUT_MODE, "unavailable 119.88 Hz output was not refused");
+    VideoOutOutputStatus output{};
+    check(sceVideoOutGetOutputStatus(handle, &output) == 0 && output.refreshRate == VIDEO_OUT_REFRESH_RATE_59_94HZ, "refused output mode changed the refresh rate");
+    check(owner->GetTriggeredEvents(&event, 1) == 0, "refused output mode triggered an event");
+    check(sceVideoOutConfigureOutput(handle, VIDEO_OUT_OUTPUT_MODE_DEFAULT, nullptr, nullptr, 0) == 0, "default output mode was refused");
+    for (const int flipMode : {3, VIDEO_OUT_FLIP_MODE_VSYNC_MULTI}) {
+        check(expectFailure([&] { sceVideoOutSubmitFlip(handle, VIDEO_OUT_BUFFER_INDEX_BLANK, flipMode, 0); }).find("flip mode not implemented") != std::string::npos, "unimplemented flip mode was accepted");
+    }
     check(sceVideoOutAddVblankEvent(queue, handle, nullptr) == 0 && sceVideoOutAddVblankEvent(queue, handle, &settings) == 0, "vblank subscription failed");
     {
         std::lock_guard lock(cfg->mutex);
@@ -192,6 +202,10 @@ void testControls() {
 void testPresentation(bool expectUnavailable) {
     const int handle = sceVideoOutOpen(255, 0, 0, nullptr);
     auto cfg = VideoOutDriver::Get().GetConfig(handle);
+    KernelEqueue queue = 0;
+    check(sceKernelCreateEqueue(&queue, "VideoOut flips") == 0, "event queue creation failed");
+    auto owner = EqueuePin_nid_postfix(queue);
+    check(sceVideoOutAddFlipEvent(queue, handle, nullptr) == 0, "flip subscription failed");
     std::vector<std::byte> allocation(6 * 65536 + 65535);
     const auto storage = alignedBuffer(allocation);
     fillBuffer(storage, 259, 137);
@@ -206,15 +220,17 @@ void testPresentation(bool expectUnavailable) {
     check(!cfg->groups[0].occupied, "unregistered DCC buffer kept its group");
     sceVideoOutRegisterBuffers2(handle, 0, 0, &buffer, 1, &attribute, 0, nullptr);
     sceVideoOutSetFlipRate(handle, 2);
-    for (int index : {0, -2, -1, 0}) {
+    constexpr std::array<std::pair<int, int>, 6> flips{{{0, VIDEO_OUT_FLIP_MODE_VSYNC}, {-2, VIDEO_OUT_FLIP_MODE_VSYNC}, {-1, VIDEO_OUT_FLIP_MODE_VSYNC}, {0, VIDEO_OUT_FLIP_MODE_VSYNC}, {-1, VIDEO_OUT_FLIP_MODE_HSYNC}, {0, VIDEO_OUT_FLIP_MODE_HSYNC}}};
+    for (const auto& [index, flipMode] : flips) {
         uint64_t target;
         uint64_t previousVblank;
         {
             std::lock_guard lock(cfg->mutex);
+            if (flipMode == VIDEO_OUT_FLIP_MODE_HSYNC) cfg->lastFlipVblank = cfg->vblankStatus.count + 1000000;
             target = cfg->flipStatus.count + 1;
             previousVblank = cfg->lastFlipVblank;
         }
-        sceVideoOutSubmitFlip(handle, index, 1, -123456789);
+        sceVideoOutSubmitFlip(handle, index, flipMode, -123456789);
         std::unique_lock lock(cfg->mutex);
         check(cfg->vblankCond.wait_for(lock, std::chrono::seconds(15), [&] { return (cfg->failure && cfg->flipStatus.flipPendingNum == 0) || cfg->flipStatus.count == target; }), "presentation did not complete");
         if (expectUnavailable) {
@@ -228,15 +244,20 @@ void testPresentation(bool expectUnavailable) {
             return;
         }
         if (cfg->failure) std::rethrow_exception(cfg->failure);
-        check(cfg->flipStatus.flipArg == -123456789 && cfg->flipStatus.currentBuffer == index && cfg->flipStatus.flipPendingNum == 0, "presentation status is wrong");
-        check(cfg->lastFlipVblank >= previousVblank + 3, "flip rate did not wait for its interval");
+        check(cfg->flipStatus.flipArg == -123456789 && cfg->flipStatus.currentBuffer == index && cfg->flipStatus.flipPendingNum == 0 && (index < 0 || cfg->bufferPending[index] == 0), "presentation status is wrong");
+        if (flipMode == VIDEO_OUT_FLIP_MODE_HSYNC) check(cfg->lastFlipVblank < previousVblank, "immediate flip waited for the flip rate");
+        else check(cfg->lastFlipVblank >= previousVblank + 3, "flip rate did not wait for its interval");
         lock.unlock();
+        KernelEvent event{};
+        int64_t argument = 0;
+        check(owner->GetTriggeredEvents(&event, 1) == 1 && sceVideoOutGetEventId(&event) == VIDEO_OUT_EVENT_FLIP && sceVideoOutGetEventData(&event, &argument) == 0 && argument == -123456789, "flip event is missing or wrong");
         attribute.width = 65;
         attribute.height = 33;
         sceVideoOutSubmitChangeBufferAttribute2(handle, 0, &attribute, nullptr);
     }
     sceVideoOutUnregisterBuffers(handle, 0);
     sceVideoOutClose(handle);
+    check(sceKernelDeleteEqueue(queue) == 0, "event queue deletion failed");
     LibcRunShutdown_nid_postfix();
 }
 

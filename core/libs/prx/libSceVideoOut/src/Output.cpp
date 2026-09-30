@@ -1,3 +1,4 @@
+#include <atomic>
 #include <cstdio>
 #include <cstring>
 #include <mutex>
@@ -7,6 +8,12 @@
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 #include "prx/libSceVideoOut/include/VideoOutDriver.hpp"
+
+static constexpr int TracedCalls = 20;
+
+static bool traceCall(std::atomic<int>& calls) {
+    return calls.fetch_add(1, std::memory_order_relaxed) < TracedCalls;
+}
 
 static int validateOutputConfig(int handle, uint64_t mode, const VideoOutOutputOptions* options, void* reservedPtr, uint64_t reserved) {
     if (!VideoOutDriver::Get().IsOpen(handle)) {
@@ -26,6 +33,14 @@ static int validateOutputConfig(int handle, uint64_t mode, const VideoOutOutputO
         throw std::runtime_error(std::string(__func__) + ": VIDEO_OUT_ERROR_UNSUPPORTED_OUTPUT_MODE");
     }
     return 0;
+}
+
+static int outputModeSupported(int handle, uint64_t mode, const VideoOutOutputOptions* options, void* reservedPtr, uint64_t reserved) {
+    const int result = validateOutputConfig(handle, mode, options, reservedPtr, reserved);
+    if (result != 0) {
+        return result;
+    }
+    return (mode == VIDEO_OUT_OUTPUT_MODE_119_88HZ) ? 0 : 1;
 }
 
 extern "C" {
@@ -58,6 +73,8 @@ int APS5_VABI sceVideoOutClose(int handle) {
 }
 
 int APS5_VABI sceVideoOutSetFlipRate(int handle, int rate) {
+    static std::atomic<int> calls{0};
+    if (traceCall(calls)) APS5_LOG_OUT("sceVideoOutSetFlipRate handle=%d rate=%d", handle, rate);
     auto cfg = VideoOutDriver::Get().GetConfig(handle);
     if (cfg == nullptr) {
         throw std::runtime_error(std::string(__func__) + ": VIDEO_OUT_ERROR_INVALID_HANDLE");
@@ -154,29 +171,34 @@ int APS5_VABI sceVideoOutInitializeOutputOptions(VideoOutOutputOptions* options)
 }
 
 int APS5_VABI sceVideoOutIsOutputSupported(int handle, uint64_t mode, const VideoOutOutputOptions* options, void* reservedPtr, uint64_t reserved) {
-    const int result = validateOutputConfig(handle, mode, options, reservedPtr, reserved);
-    if (result != 0) {
-        return result;
-    }
-    return (mode == VIDEO_OUT_OUTPUT_MODE_119_88HZ) ? 0 : 1;
+    const int result = outputModeSupported(handle, mode, options, reservedPtr, reserved);
+    static std::atomic<int> calls{0};
+    if (traceCall(calls)) APS5_LOG_OUT("sceVideoOutIsOutputSupported handle=%d mode=0x%llx result=%d", handle, static_cast<unsigned long long>(mode), result);
+    return result;
 }
 
 int APS5_VABI sceVideoOutConfigureOutput(int handle, uint64_t mode, const VideoOutOutputOptions* options, void* reservedPtr, uint64_t reserved) {
-    const int supported = sceVideoOutIsOutputSupported(handle, mode, options, reservedPtr, reserved);
+    const int supported = outputModeSupported(handle, mode, options, reservedPtr, reserved);
     if (supported < 0) {
         return supported;
     }
+    int result = 0;
     if (supported == 0 && mode == VIDEO_OUT_OUTPUT_MODE_119_88HZ) {
-        throw std::runtime_error(std::string(__func__) + ": VIDEO_OUT_ERROR_UNAVAILABLE_OUTPUT_MODE");
+        result = VIDEO_OUT_ERROR_UNAVAILABLE_OUTPUT_MODE;
+    } else {
+        auto cfg = VideoOutDriver::Get().GetConfig(handle);
+        if (cfg == nullptr) {
+            throw std::runtime_error(std::string(__func__) + ": VIDEO_OUT_ERROR_INVALID_HANDLE");
+        }
+        std::unique_lock lock(cfg->mutex);
+        cfg->Check();
+        cfg->outputMode = mode;
     }
-    auto cfg = VideoOutDriver::Get().GetConfig(handle);
-    if (cfg == nullptr) {
-        throw std::runtime_error(std::string(__func__) + ": VIDEO_OUT_ERROR_INVALID_HANDLE");
-    }
-    std::unique_lock lock(cfg->mutex);
-    cfg->Check();
-    cfg->outputMode = mode;
-    return 0;
+    static std::atomic<int> calls{0};
+    if (traceCall(calls)) APS5_LOG_OUT("sceVideoOutConfigureOutput handle=%d mode=0x%llx result=0x%08x", handle, static_cast<unsigned long long>(mode), static_cast<unsigned>(result));
+    static std::atomic<bool> explained{false};
+    if (result == VIDEO_OUT_ERROR_UNAVAILABLE_OUTPUT_MODE && !explained.exchange(true)) APS5_LOG_OUT("119.88 Hz output refused on handle %d: the emulated display runs at 59.94 Hz, so the output stays at 59.94 Hz and the call returns VIDEO_OUT_ERROR_UNAVAILABLE_OUTPUT_MODE. The title asks for 119.88 Hz when it restores a 120 Hz display mode (Performance+, Fidelity+ or Variable Framerate), most likely one saved under another ANYPS5_DISPLAY profile; re-select the display mode in Options > Display", handle);
+    return result;
 }
 
 int APS5_VABI sceVideoOutSetWindowModeMargins(int handle, int top, int bottom) {
@@ -244,7 +266,8 @@ int APS5_VABI sceVideoOutAdjustColor_(int handle, const VideoOutColorSettings* s
 }
 
 int APS5_VABI sceVideoOutVrrPegToFixedRate(int handle, uint64_t first, uint64_t second) {
-    (void)first; (void)second;
+    static std::atomic<int> calls{0};
+    if (traceCall(calls)) APS5_LOG_OUT("sceVideoOutVrrPegToFixedRate handle=%d first=0x%llx second=0x%llx", handle, static_cast<unsigned long long>(first), static_cast<unsigned long long>(second));
     if (!VideoOutDriver::Get().IsOpen(handle)) {
         throw std::runtime_error(std::string(__func__) + ": VIDEO_OUT_ERROR_INVALID_HANDLE");
     }
@@ -252,6 +275,8 @@ int APS5_VABI sceVideoOutVrrPegToFixedRate(int handle, uint64_t first, uint64_t 
 }
 
 int APS5_VABI sceVideoOutVrrUnpegFromFixedRate(int handle) {
+    static std::atomic<int> calls{0};
+    if (traceCall(calls)) APS5_LOG_OUT("sceVideoOutVrrUnpegFromFixedRate handle=%d", handle);
     if (!VideoOutDriver::Get().IsOpen(handle)) {
         throw std::runtime_error(std::string(__func__) + ": VIDEO_OUT_ERROR_INVALID_HANDLE");
     }
