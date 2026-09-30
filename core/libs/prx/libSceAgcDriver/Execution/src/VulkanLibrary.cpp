@@ -70,7 +70,7 @@ std::string resolve() {
 
 }
 
-const char* ResolveVulkanLibrary() {
+const char* ResolveVulkanLibrary_nid_no_patch() {
     static const std::string resolved = resolve();
     return resolved.c_str();
 }

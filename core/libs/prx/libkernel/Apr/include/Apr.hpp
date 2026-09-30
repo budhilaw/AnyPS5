@@ -6,10 +6,10 @@
 
 extern "C" {
 
-int APS5_VABI AprCommandBufferConstruct(void* commandBuffer);
-int APS5_VABI AprCommandBufferSetBuffer(void* commandBuffer, void* buffer, std::uint32_t size);
-int APS5_VABI AprCommandBufferReset(void* commandBuffer);
-int APS5_VABI AprCommandBufferAppendRead(void* commandBuffer, std::uint32_t fileId, void* destination, std::uint64_t size, std::uint64_t fileOffset);
+int APS5_VABI AprCommandBufferConstruct_nid_no_patch(void* commandBuffer);
+int APS5_VABI AprCommandBufferSetBuffer_nid_no_patch(void* commandBuffer, void* buffer, std::uint32_t size);
+int APS5_VABI AprCommandBufferReset_nid_no_patch(void* commandBuffer);
+int APS5_VABI AprCommandBufferAppendRead_nid_no_patch(void* commandBuffer, std::uint32_t fileId, void* destination, std::uint64_t size, std::uint64_t fileOffset);
 
 }
 

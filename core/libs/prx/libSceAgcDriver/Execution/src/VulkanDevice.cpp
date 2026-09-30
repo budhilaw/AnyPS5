@@ -288,7 +288,7 @@ struct VulkanDevice::State {
 };
 
 VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_unique<State>()) {
-    state->library = SDL_LoadObject(ResolveVulkanLibrary());
+    state->library = SDL_LoadObject(ResolveVulkanLibrary_nid_no_patch());
     if (state->library == nullptr) {
         throw std::runtime_error(std::string("Vulkan loader: ") + SDL_GetError());
     }

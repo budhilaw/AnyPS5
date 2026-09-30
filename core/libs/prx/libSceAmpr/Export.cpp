@@ -5,7 +5,7 @@
 extern "C" {
 
 int APS5_VABI sceAmprCommandBufferConstructor(void* command_buffer) {
-    return AprCommandBufferConstruct(command_buffer);
+    return AprCommandBufferConstruct_nid_no_patch(command_buffer);
 }
 
 int APS5_VABI sceAmprAprCommandBufferConstructor(void* command_buffer, void* reserved_state0, void* reserved_state1) {
@@ -16,17 +16,17 @@ int APS5_VABI sceAmprAprCommandBufferConstructor(void* command_buffer, void* res
 }
 
 int APS5_VABI sceAmprCommandBufferSetBuffer(void* command_buffer, void* buffer, uint32_t size) {
-    return AprCommandBufferSetBuffer(command_buffer, buffer, size);
+    return AprCommandBufferSetBuffer_nid_no_patch(command_buffer, buffer, size);
 }
 
 int APS5_VABI sceAmprCommandBufferReset(void* command_buffer) {
-    return AprCommandBufferReset(command_buffer);
+    return AprCommandBufferReset_nid_no_patch(command_buffer);
 }
 
 int APS5_VABI sceAmprAprCommandBufferReadFile(void* command_buffer, uint64_t reserved_state0, uint64_t reserved_state1, uint32_t file_id, void* destination, uint64_t size, uint64_t file_offset) {
     (void)reserved_state0;
     (void)reserved_state1;
-    return AprCommandBufferAppendRead(command_buffer, file_id, destination, size, file_offset);
+    return AprCommandBufferAppendRead_nid_no_patch(command_buffer, file_id, destination, size, file_offset);
 }
 
 }

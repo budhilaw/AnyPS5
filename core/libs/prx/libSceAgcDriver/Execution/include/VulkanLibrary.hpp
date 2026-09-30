@@ -3,7 +3,7 @@
 
 namespace AgcDriver {
 
-const char* ResolveVulkanLibrary();
+extern "C" const char* ResolveVulkanLibrary_nid_no_patch();
 void RetainMetalCommandReferences();
 
 }

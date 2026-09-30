@@ -134,7 +134,7 @@ int main(int argc, char** argv) {
         Require(argc == 1 || (verifyOnly && (argc == 2 || dump)), "usage: agc_driver_visual_test [--verify [--dump <readback.ppm>]]");
         SDL_SetMainReady();
         Require(SDL_Init(SDL_INIT_VIDEO) == 0, SDL_GetError());
-        AgcDriver::ResolveVulkanLibrary();
+        AgcDriver::ResolveVulkanLibrary_nid_no_patch();
         {
             const auto window = std::unique_ptr<SDL_Window, decltype(&SDL_DestroyWindow)>(SDL_CreateWindow("AnyPS5 AGC - SPIR-V triangle test", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, Width, Height, SDL_WINDOW_VULKAN | SDL_WINDOW_SHOWN), SDL_DestroyWindow);
             Require(window != nullptr, SDL_GetError());

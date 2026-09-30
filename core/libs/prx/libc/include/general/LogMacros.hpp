@@ -5,7 +5,7 @@
 #include <cstdio>
 #include <cstring>
 
-double Aps5LogSeconds();
+extern "C" double Aps5LogSeconds_nid_no_patch();
 
 inline const char* TrimNidPostfix(const char* func) {
     return func;
@@ -34,11 +34,11 @@ constexpr const char* BaseName(const char* path) {
 #define _APS5_FILE_ BaseName(__FILE__)
 
 #define _APS5_LOG_IMPL(stream, fmt, ...) \
-(std::fprintf(stream, "[%9.3f][%s:%d %s] " fmt "\n", Aps5LogSeconds(), _APS5_FILE_, __LINE__, TrimNidPostfix(__func__), __VA_ARGS__), \
+(std::fprintf(stream, "[%9.3f][%s:%d %s] " fmt "\n", Aps5LogSeconds_nid_no_patch(), _APS5_FILE_, __LINE__, TrimNidPostfix(__func__), __VA_ARGS__), \
 std::fflush(stream))
 
 #define _APS5_LOG_IMPL_NF(stream, fmt) \
-(std::fprintf(stream, "[%9.3f][%s:%d %s] " fmt "\n", Aps5LogSeconds(), _APS5_FILE_, __LINE__, TrimNidPostfix(__func__)), \
+(std::fprintf(stream, "[%9.3f][%s:%d %s] " fmt "\n", Aps5LogSeconds_nid_no_patch(), _APS5_FILE_, __LINE__, TrimNidPostfix(__func__)), \
 std::fflush(stream))
 
 #define APS5_LOG_OUT(fmt, ...) _APS5_LOG_IMPL(stdout, fmt, __VA_ARGS__)

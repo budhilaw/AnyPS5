@@ -18,7 +18,7 @@ using namespace AgcDriver::Graphics;
 class Device {
 public:
     Device() {
-        library = SDL_LoadObject(AgcDriver::ResolveVulkanLibrary());
+        library = SDL_LoadObject(AgcDriver::ResolveVulkanLibrary_nid_no_patch());
         Require(library != nullptr, "cannot load Vulkan");
         try {
             instanceProc = reinterpret_cast<PFN_vkGetInstanceProcAddr>(SDL_LoadFunction(library, "vkGetInstanceProcAddr"));

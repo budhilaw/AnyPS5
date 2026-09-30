@@ -5,7 +5,7 @@ namespace {
 const auto logClockStart = std::chrono::steady_clock::now();
 }
 
-double Aps5LogSeconds() {
+extern "C" double Aps5LogSeconds_nid_no_patch() {
     return std::chrono::duration<double>(std::chrono::steady_clock::now() - logClockStart).count();
 }
 
@@ -101,5 +101,5 @@ extern "C" void NotImplemented_nid_no_patch(const char* funcName) {
 #include <cstdlib>
 extern "C" void Aps5TraceCall_nid_no_patch(const char* funcName) {
     static const bool enabled = std::getenv("ANYPS5_TRACE_SYSTEM") != nullptr;
-    if (enabled) std::fprintf(stderr, "[%9.3f][system] %s\n", Aps5LogSeconds(), funcName);
+    if (enabled) std::fprintf(stderr, "[%9.3f][system] %s\n", Aps5LogSeconds_nid_no_patch(), funcName);
 }
