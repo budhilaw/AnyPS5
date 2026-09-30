@@ -6,6 +6,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/VertexInput.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Draw.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/GuestBufferMemory.hpp"
+#include "IntermediateRepresentation/IrProgram.hpp"
 #include <spirv/unified1/spirv.hpp>
 #include <algorithm>
 #include <array>
@@ -285,6 +286,72 @@ void InitialContextTests() {
     Require(!queue.context.contains(0xdead), "unknown context register acquired a default");
 }
 
+AgcDriver::QueueState stencilQueue(std::uint32_t control, std::uint32_t ops, std::uint32_t front, std::uint32_t back) {
+    auto queue = makeState();
+    queue.context[0x200] = control;
+    queue.context[0x7] = 63u | (3u << 16u);
+    queue.context[0x10] = 3;
+    queue.context[0x11] = 1;
+    queue.context[0x12] = 0x100;
+    queue.context[0x13] = 0x200;
+    queue.context[0x14] = 0x100;
+    queue.context[0x15] = 0x200;
+    queue.context[0x10b] = ops;
+    queue.context[0x10c] = front;
+    queue.context[0x10d] = back;
+    return queue;
+}
+
+std::uint32_t stencilMask(std::uint32_t reference, std::uint32_t compareMask, std::uint32_t writeMask, std::uint32_t operand) {
+    return reference | (compareMask << 8u) | (writeMask << 16u) | (operand << 24u);
+}
+
+void StencilTests() {
+    constexpr std::uint32_t enabled = 1u;
+    constexpr std::uint32_t always = 7u << 8u;
+    constexpr std::uint32_t equal = 2u << 8u;
+    constexpr std::uint32_t backFace = 0x80u | (7u << 20u);
+    const auto decode = [](std::uint32_t control, std::uint32_t ops, std::uint32_t front, std::uint32_t back) { return AgcDriver::Graphics::DecodeState(stencilQueue(control, ops, front, back)).depthState; };
+    auto state = decode(enabled | always, 4u << 4u, stencilMask(0, 0xff, 0xff, 0x18), 0);
+    Require(state.stencilTest && state.front.passOp == VK_STENCIL_OP_REPLACE && state.front.reference == 0x18 && state.front.compareMask == 0xff && state.front.writeMask == 0xff, "REPLACE_OP under ALWAYS did not write STENCILOPVAL through the reference");
+    Require(state.back.passOp == VK_STENCIL_OP_REPLACE && state.back.reference == 0x18, "a back face without BACKFACE_ENABLE did not follow the front face");
+    state = decode(enabled | always, 2u << 4u, stencilMask(0x30, 0xff, 0x0f, 0), 0);
+    Require(state.front.passOp == VK_STENCIL_OP_REPLACE && state.front.reference == 0x3f, "ONES did not write 0xff under the write mask");
+    state = decode(enabled | always, 3u << 4u, stencilMask(0x35, 0xff, 0x0f, 0x18), 0);
+    Require(state.front.passOp == VK_STENCIL_OP_REPLACE && state.front.reference == 0x35, "REPLACE_TEST changed its reference");
+    state = decode(enabled | equal, 4u << 4u, stencilMask(0x05, 0x0f, 0xf0, 0x30), 0);
+    Require(state.front.compareOp == VK_COMPARE_OP_EQUAL && state.front.reference == 0x35, "REPLACE_OP did not take STENCILOPVAL on written bits outside the compare mask");
+    state = decode(enabled | equal, 4u << 4u, stencilMask(0x01, 0xff, 0xff, 0x18), 0);
+    Require(state.front.reference == 0x01, "a REPLACE_OP that conflicts with the compared reference changed the stencil test");
+    state = decode(enabled | always | backFace, (4u << 4u) | (4u << 16u), stencilMask(0, 0xff, 0xff, 0x18), stencilMask(0, 0xff, 0xff, 0x42));
+    Require(state.front.reference == 0x18 && state.back.reference == 0x42, "a face did not use its own STENCILOPVAL");
+    state = decode(enabled | always, 10u << 4u, stencilMask(0, 0xff, 0xff, 0x0f), 0);
+    Require(state.front.passOp == VK_STENCIL_OP_ZERO && state.front.writeMask == 0xf0 && state.front.failOp == VK_STENCIL_OP_KEEP && state.front.depthFailOp == VK_STENCIL_OP_KEEP, "AND was not mapped to ZERO on the bits it clears");
+    state = decode(enabled | always, (12u << 4u) | 12u, stencilMask(0, 0xff, 0x7f, 0x3c), 0);
+    Require(state.front.passOp == VK_STENCIL_OP_INVERT && state.front.failOp == VK_STENCIL_OP_INVERT && state.front.writeMask == 0x3c, "XOR was not mapped to INVERT on its operand bits");
+    state = decode(enabled | always, 15u << 4u, stencilMask(0, 0xff, 0xff, 0x3c), 0);
+    Require(state.front.passOp == VK_STENCIL_OP_INVERT && state.front.writeMask == 0xc3, "XNOR was not mapped to INVERT outside its operand bits");
+    state = decode(enabled | always, 11u << 4u, stencilMask(0x01, 0xff, 0xff, 0x30), 0);
+    Require(state.front.passOp == VK_STENCIL_OP_REPLACE && state.front.writeMask == 0x30 && (state.front.reference & 0x30u) == 0x30u, "OR was not mapped to REPLACE of its operand bits");
+    expectFailure([&] { decode(enabled | always, (10u << 4u) | 1u, stencilMask(0, 0xff, 0xff, 0x0f), 0); }, "unsupported stencil logic operation 10");
+    state = decode(enabled | always, (13u << 4u) | (14u << 8u), stencilMask(0, 0xff, 0xff, 0x0f), 0);
+    Require(state.front.passOp == VK_STENCIL_OP_INVERT && state.front.depthFailOp == VK_STENCIL_OP_INVERT, "NAND and NOR must be approximated instead of rejected");
+    state = decode(enabled | always, 5u | (8u << 4u), stencilMask(0, 0xff, 0xff, 0), 0);
+    Require(state.front.failOp == VK_STENCIL_OP_KEEP && state.front.passOp == VK_STENCIL_OP_KEEP, "adding a zero STENCILOPVAL changed the stencil");
+    state = decode(enabled | always, 5u | (9u << 4u), stencilMask(0, 0xff, 0xff, 1), 0);
+    Require(state.front.failOp == VK_STENCIL_OP_INCREMENT_AND_CLAMP && state.front.passOp == VK_STENCIL_OP_DECREMENT_AND_WRAP, "unit stencil steps changed");
+    auto queue = stencilQueue(enabled | always, 0, stencilMask(0, 0xff, 0xff, 0), 0);
+    queue.context[0x0] = 0x4;
+    expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "DB_RENDER_CONTROL");
+    queue.context[0x0] = 0;
+    queue.context[0x14] = 0x300;
+    queue.context[0x15] = 0x400;
+    for (int repeat = 0; repeat < 2; ++repeat) {
+        const auto split = AgcDriver::Graphics::DecodeState(queue);
+        Require(split.depth.address == 0x10000 && split.depth.writeAddress == 0x30000 && split.depth.stencilAddress == 0x20000 && split.depth.stencilWriteAddress == 0x40000, "depth or stencil bases changed when the write bases differ from the read bases");
+    }
+}
+
 struct MockDescriptorWrite {
     std::uint32_t binding;
     std::uint32_t count;
@@ -316,6 +383,9 @@ struct MockVulkan {
     struct { std::uint32_t x = 0, y = 0, z = 0; } lastDispatchGroups;
     std::map<VkSampler, VkSamplerCreateInfo> samplers;
     std::map<VkImageView, float> viewMinLods;
+    std::map<VkImageView, VkFormat> viewFormats;
+    std::map<VkImageView, VkComponentMapping> viewComponents;
+    std::map<VkImageView, VkImageUsageFlags> viewUsages;
 };
 
 MockVulkan mock;
@@ -434,10 +504,15 @@ VKAPI_ATTR VkResult VKAPI_CALL mockBindImageMemory(VkDevice, VkImage, VkDeviceMe
 VKAPI_ATTR VkResult VKAPI_CALL mockCreateImageView(VkDevice, const VkImageViewCreateInfo* info, const VkAllocationCallbacks*, VkImageView* view) {
     *view = makeHandle<VkImageView>();
     auto minLod = -1.0f;
+    VkImageUsageFlags usage = 0;
     for (auto* next = static_cast<const VkBaseInStructure*>(info->pNext); next != nullptr; next = next->pNext) {
         if (next->sType == VK_STRUCTURE_TYPE_IMAGE_VIEW_MIN_LOD_CREATE_INFO_EXT) minLod = reinterpret_cast<const VkImageViewMinLodCreateInfoEXT*>(next)->minLod;
+        if (next->sType == VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO) usage = reinterpret_cast<const VkImageViewUsageCreateInfo*>(next)->usage;
     }
     mock.viewMinLods[*view] = minLod;
+    mock.viewFormats[*view] = info->format;
+    mock.viewComponents[*view] = info->components;
+    mock.viewUsages[*view] = usage;
     ++mock.live;
     return VK_SUCCESS;
 }
@@ -1050,6 +1125,73 @@ void storageFallbackTests() {
     Require(mock.live == 0, "storage fallbacks leaked Vulkan objects");
 }
 
+void nullTextureClassTests() {
+    using namespace ShaderRecompiler;
+    using AgcDriver::Graphics::TextureDimension;
+    using AgcDriver::Graphics::TextureNumericClass;
+    struct Case {
+        ImageResourceClass resourceClass;
+        IrTextureNumericClass numericClass;
+        bool atomic;
+        TextureNumericClass nullClass;
+        VkFormat format;
+    };
+    const std::array<Case, 6> cases{{
+        {ImageResourceClass::Sampled, IrTextureNumericClass::Float, false, TextureNumericClass::Float, VK_FORMAT_R8G8B8A8_UNORM},
+        {ImageResourceClass::Sampled, IrTextureNumericClass::Uint, false, TextureNumericClass::Uint, VK_FORMAT_R32_UINT},
+        {ImageResourceClass::Sampled, IrTextureNumericClass::Sint, false, TextureNumericClass::Sint, VK_FORMAT_R32_SINT},
+        {ImageResourceClass::Storage, IrTextureNumericClass::Float, false, TextureNumericClass::Float, VK_FORMAT_R8G8B8A8_UNORM},
+        {ImageResourceClass::Storage, IrTextureNumericClass::Uint, false, TextureNumericClass::Uint, VK_FORMAT_R32_UINT},
+        {ImageResourceClass::Storage, IrTextureNumericClass::Uint, true, TextureNumericClass::Uint, VK_FORMAT_R32_UINT}
+    }};
+    const auto color = AgcDriver::Graphics::DecodeState(makeState()).color;
+    for (const auto stage : {IrShaderStage::Compute, IrShaderStage::Pixel}) {
+        mock = MockVulkan{};
+        auto context = mockContext();
+        context.memory.memoryTypes[0].propertyFlags |= VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+        context.limits.maxPerStageDescriptorSampledImages = 16;
+        context.limits.maxPerStageDescriptorStorageImages = 16;
+        context.limits.maxDescriptorSetSampledImages = 16;
+        context.storageImages = true;
+        {
+            AgcDriver::Graphics::TextureDetiler detiler(context);
+            context.detiler = &detiler;
+            AgcDriver::Graphics::TextureCache cache(context);
+            context.textureCache = &cache;
+            RecompileResult program;
+            for (const auto& item : cases) {
+                ImageResource image;
+                image.resourceClass = item.resourceClass;
+                image.numericClass = item.numericClass;
+                image.dimension = RdnaImageDimension::Dim2D;
+                image.atomic = item.atomic;
+                auto binding = imageBinding(NativeBinding(stage, DescriptorBindingForImage(image)), DescriptorImageShape::Image2D, {std::vector<std::uint32_t>(8, 0u)});
+                if (item.resourceClass == ImageResourceClass::Storage) binding.kind = Kind::StorageImage;
+                program.bindings.push_back(binding);
+            }
+            RecompileResult vertex;
+            const AgcDriver::Graphics::CompiledShader compute{ShaderStage::Compute, &program, 0};
+            auto resources = stage == IrShaderStage::Compute ? std::make_unique<AgcDriver::Graphics::ShaderResources>(context, compute) : std::make_unique<AgcDriver::Graphics::ShaderResources>(context, vertex, program, color, 0, 0);
+            const auto& textures = resources->Textures();
+            Require(textures.size() == cases.size(), "every null image binding must bind one texture");
+            for (std::size_t index = 0; index < cases.size(); ++index) {
+                const bool storage = cases[index].resourceClass == ImageResourceClass::Storage;
+                const auto expected = storage ? cache.NullStorage(TextureDimension::k2D, cases[index].nullClass) : cache.Null(TextureDimension::k2D, cases[index].nullClass);
+                Require(textures[index] == expected, "a null texture was not selected by the binding's numeric class");
+                const auto view = storage ? textures[index]->StorageView() : textures[index]->View();
+                Require(mock.viewFormats.at(view) == cases[index].format, "a null texture view does not match the binding's numeric class");
+                const bool replicated = !storage && cases[index].nullClass != TextureNumericClass::Float;
+                const auto rest = replicated ? VK_COMPONENT_SWIZZLE_R : VK_COMPONENT_SWIZZLE_IDENTITY;
+                const auto components = mock.viewComponents.at(view);
+                Require(components.r == VK_COMPONENT_SWIZZLE_IDENTITY && components.g == rest && components.b == rest && components.a == rest, "a sampled integer null texture must read its cleared value in every channel and a storage view must keep the identity swizzle");
+                Require(!replicated || mock.viewUsages.at(view) == VK_IMAGE_USAGE_SAMPLED_BIT, "a swizzled null texture view must be limited to sampling");
+            }
+            Require(cache.Null(TextureDimension::k2D, TextureNumericClass::Uint) != cache.Null(TextureDimension::k2D, TextureNumericClass::Float) && cache.Null(TextureDimension::k2D, TextureNumericClass::Sint) != cache.Null(TextureDimension::k2D, TextureNumericClass::Uint), "numeric classes must not share a null texture");
+        }
+        Require(mock.live == 0, "null textures of each numeric class leaked Vulkan objects");
+    }
+}
+
 struct ModuleShape {
     bool fragment = false;
     bool push = false;
@@ -1467,11 +1609,13 @@ int main() {
         DisabledColorTests();
         ShaderStageTests();
         InitialContextTests();
+        StencilTests();
         pushConstantTests();
         resourceTests();
         descriptorFallbackTests();
         minimumLodViewTests();
         storageFallbackTests();
+        nullTextureClassTests();
         validationTests();
         rectListTests();
         mock = MockVulkan{};
