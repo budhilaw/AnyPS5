@@ -37,6 +37,11 @@ void require(bool condition, const char* reason) {
 }
 }
 
+MemoryAccessScope::State& MemoryAccessScope::current() {
+    thread_local State state;
+    return state;
+}
+
 void CheckRange(const void* pointer, std::size_t bytes, std::size_t alignment, bool writable) {
     require(alignment != 0, "zero guest memory alignment");
     const auto address = reinterpret_cast<std::uintptr_t>(pointer);
