@@ -1493,6 +1493,7 @@ int main() {
         RunTextureTilingTests();
         RunGuestTextureResourceTests();
         RunGuestSamplerResourceTests();
+        RunLruCacheTests();
         mock = MockVulkan{};
         auto textureDetilerContext = mockContext();
         textureDetilerContext.limits.minStorageBufferOffsetAlignment = 16;

@@ -204,6 +204,7 @@ add_executable(agc_driver_graphics_tests EXCLUDE_FROM_ALL
         tests/TextureTiling.cpp
         tests/GuestTextureResource.cpp
         tests/GuestSamplerResource.cpp
+        tests/LruCache.cpp
         tests/TextureDetiler.cpp
         Graphics/src/State.cpp
         Graphics/src/Draw.cpp
