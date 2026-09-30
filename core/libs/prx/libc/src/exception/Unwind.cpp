@@ -491,6 +491,7 @@ void TraceFrame(const char* phase, const _Unwind_Context& context) {
     }
 #endif
     std::fprintf(stderr, "[unwind] %s pc 0x%llx sp 0x%llx cfa 0x%llx\n", phase, static_cast<unsigned long long>(pc), static_cast<unsigned long long>(context.registers[7]), static_cast<unsigned long long>(context.cfa));
+    std::fflush(stderr);
 }
 
 void ReportPhaseTwoFailure(const char* reason, const _Unwind_Context& context) {
@@ -504,6 +505,7 @@ void ReportPhaseTwoFailure(const char* reason, const _Unwind_Context& context) {
     }
 #endif
     std::fprintf(stderr, "guest exception: %s in phase 2 at 0x%llx (cfa 0x%llx)\n", reason, static_cast<unsigned long long>(pc), static_cast<unsigned long long>(context.cfa));
+    std::fflush(stderr);
 }
 
 _Unwind_Reason_Code PhaseTwo(_Unwind_Context context, _Unwind_Exception* exception) {
@@ -564,6 +566,7 @@ void ReportSearchFailure(const char* reason, const std::uint64_t* frames, unsign
 #endif
         std::fprintf(stderr, "  #%u 0x%llx\n", index, static_cast<unsigned long long>(frames[index]));
     }
+    std::fflush(stderr);
 }
 }
 

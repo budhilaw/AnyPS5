@@ -42,6 +42,8 @@ namespace LibcException {
     } else {
         std::fprintf(stderr, "terminate called without an active exception\n");
     }
+    std::fflush(stdout);
+    std::fflush(stderr);
 #if !defined(_WIN32)
     void* frames[32];
     const auto count = ::backtrace(frames, 32);
@@ -53,6 +55,8 @@ namespace LibcException {
 inline std::atomic<void(*)()> terminateHandler {DefaultTerminate};
 [[noreturn]] void InvokeTerminate(void (*handler)()) {
     try { if (handler) handler(); } catch (...) {}
+    std::fflush(stdout);
+    std::fflush(stderr);
     std::abort();
 }
 [[noreturn]] void Terminate() { InvokeTerminate(terminateHandler.load(std::memory_order_acquire)); }

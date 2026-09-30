@@ -1,9 +1,31 @@
 #include "prx/libc/include/FileStream.hpp"
 #include "prx/libc/include/general/VabiMacros.hpp"
 #ifdef _WIN32
+#include <csignal>
 #include <io.h>
 #else
 #include <unistd.h>
+#endif
+
+#ifdef _WIN32
+namespace {
+
+constexpr std::size_t StandardStreamBufferBytes = 64 * 1024;
+
+void flushStandardStreams(int) {
+    std::fflush(stdout);
+    std::fflush(stderr);
+}
+
+bool bufferStandardStreams() {
+    const bool output = std::setvbuf(stdout, nullptr, _IOFBF, StandardStreamBufferBytes) == 0;
+    const bool error = std::setvbuf(stderr, nullptr, _IOFBF, StandardStreamBufferBytes) == 0;
+    return std::signal(SIGABRT, flushStandardStreams) != SIG_ERR && output && error;
+}
+
+const bool standardStreamsBuffered = bufferStandardStreams();
+
+}
 #endif
 
 extern "C" {
@@ -21,7 +43,9 @@ int APS5_VABI getc_nid_postfix(FileStream* stream) { return fgetc_nid_postfix(st
 int APS5_VABI __srget_nid_postfix(FileStream* stream) { return fgetc_nid_postfix(stream); }
 int APS5_VABI getchar_nid_postfix() { return fgetc_nid_postfix(__stdinp_nid_postfix); }
 int APS5_VABI fputc_nid_postfix(int value, FileStream* stream) {
-    const int result = std::fputc(value, GetNativeStream(stream));
+    auto* native = GetNativeStream(stream);
+    const int result = std::fputc(value, native);
+    if (native == stderr) std::fflush(native);
     stream->SyncStatus();
     return result;
 }

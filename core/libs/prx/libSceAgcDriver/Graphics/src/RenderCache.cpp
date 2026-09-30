@@ -522,6 +522,7 @@ void RenderCache::DumpDepthTargets(const std::string& prefix) {
             }
             std::fprintf(stderr, "depth target 0x%llx (stencil plane 0x%llx) stencil values:%s\n", static_cast<unsigned long long>(address), static_cast<unsigned long long>(target.stencilAddress), summary.c_str());
         }
+        std::fflush(stderr);
         char name[64];
         std::snprintf(name, sizeof(name), "depth_%llx_%ux%u.bmp", static_cast<unsigned long long>(address), target.extent.width, target.extent.height);
         auto* file = std::fopen((prefix + name).c_str(), "wb");
@@ -564,6 +565,7 @@ std::shared_ptr<ResidentColor> RenderCache::Find(std::uint64_t address) const {
             static const bool trace = std::getenv("ANYPS5_TRACE_WAITS") != nullptr;
             static int reported = 0;
             if (trace && reported++ < 20) std::fprintf(stderr, "[find-wait] 0x%llx valid %d dirty %d gpuOnly %d tile %u adopted %llu next %llu\n", static_cast<unsigned long long>(address), entry->Valid() ? 1 : 0, entry->Dirty() ? 1 : 0, entry->Description().gpuOnly ? 1 : 0, static_cast<unsigned>(entry->Description().tileMode), static_cast<unsigned long long>(entry->AdoptedThrough()), static_cast<unsigned long long>(context.drawQueue->NextSequence()));
+            if (trace) std::fflush(stderr);
             context.drawQueue->Resolve(address, bytes);
         }
     }

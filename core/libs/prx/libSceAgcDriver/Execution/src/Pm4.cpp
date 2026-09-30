@@ -37,7 +37,7 @@ std::uint32_t registerOffset(std::uint32_t value) {
     }
     if ((value & 0x80000000u) != 0) {
         static std::once_flag once;
-        std::call_once(once, [&] { std::fprintf(stderr, "AGC driver: register word 0x%08x uses bit 31 (ignored)\n", value); });
+        std::call_once(once, [&] { std::fprintf(stderr, "AGC driver: register word 0x%08x uses bit 31 (ignored)\n", value); std::fflush(stderr); });
     }
     return offset;
 }
@@ -51,7 +51,7 @@ Registers& registersFor(QueueState& queue, std::uint32_t opcode) {
 void writeRegister(QueueState& queue, std::uint32_t opcode, std::uint32_t offset, std::uint32_t value) {
     if (offset == 0x80 && value != 0 && &registersFor(queue, opcode) == &queue.context) {
         static std::once_flag once;
-        std::call_once(once, [&] { std::fprintf(stderr, "AGC driver: PA_SC_WINDOW_OFFSET written with 0x%08x by packet opcode 0x%02x\n", value, opcode); });
+        std::call_once(once, [&] { std::fprintf(stderr, "AGC driver: PA_SC_WINDOW_OFFSET written with 0x%08x by packet opcode 0x%02x\n", value, opcode); std::fflush(stderr); });
     }
     registersFor(queue, opcode).insert_or_assign(offset, value);
     if ((opcode == 0x64 || opcode == 0x79 || opcode == 0x7a) && offset == 0x243) queue.indexType = value & 3u;
@@ -431,6 +431,7 @@ bool DeferrableWrite(std::span<const std::uint32_t> packet, std::uint64_t& addre
 void Wait(std::span<const std::uint32_t> packet) {
     static const bool traceLabels = std::getenv("ANYPS5_TRACE_LABELS") != nullptr;
     if (traceLabels) std::fprintf(stderr, "[label] wait 0x%llx function %u reference 0x%llx\n", static_cast<unsigned long long>(address(packet[2], packet[3])), packet[1] & 7u, static_cast<unsigned long long>(((packet[0] >> 8u) & 0xffu) == 0x93 ? address(packet[4], packet[5]) : packet[4]));
+    if (traceLabels) std::fflush(stderr);
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
     while (!TryWait(packet)) {
         require(std::chrono::steady_clock::now() < deadline, "WAIT_REG_MEM did not complete within 30 seconds");
@@ -464,6 +465,7 @@ std::array<std::uint32_t, 5> ResolveDispatch(std::span<const std::uint32_t> pack
     GuestMemory::Read(source, std::as_writable_bytes(std::span(result).subspan(1, 3)), 4);
     static const bool traceIndirect = std::getenv("ANYPS5_TRACE_INDIRECT") != nullptr;
     if (traceIndirect) std::fprintf(stderr, "[indirect] dispatch args at 0x%llx: %u %u %u\n", static_cast<unsigned long long>(source), result[1], result[2], result[3]);
+    if (traceIndirect) std::fflush(stderr);
     return result;
 }
 
@@ -557,7 +559,7 @@ void Execute(std::span<const std::uint32_t> packet, QueueState& queue) {
             for (std::size_t i = 0; i < pairs.size(); i += 2) {
                 if (malformed(pairs[i])) {
                     static std::once_flag once;
-                    std::call_once(once, [&] { std::fprintf(stderr, "AGC driver: indirect register list at 0x%llx skips pair %zu {0x%08x, 0x%08x} (not a register offset)\n", static_cast<unsigned long long>(address(packet[1], packet[2])), i / 2, pairs[i], pairs[i + 1]); });
+                    std::call_once(once, [&] { std::fprintf(stderr, "AGC driver: indirect register list at 0x%llx skips pair %zu {0x%08x, 0x%08x} (not a register offset)\n", static_cast<unsigned long long>(address(packet[1], packet[2])), i / 2, pairs[i], pairs[i + 1]); std::fflush(stderr); });
                     continue;
                 }
                 try {
@@ -602,6 +604,7 @@ void Execute(std::span<const std::uint32_t> packet, QueueState& queue) {
             const auto destination = address(packet[2], packet[3]);
             static const bool traceWrites = std::getenv("ANYPS5_TRACE_LABELS") != nullptr;
             if (traceWrites) std::fprintf(stderr, "[write] data 0x%llx %zu dwords {%08x %08x} control 0x%08x%s (queue 0x%x)\n", static_cast<unsigned long long>(destination), packet.size() - 4, packet[4], packet.size() > 5 ? packet[5] : 0u, packet[1], (packet[1] & 0x10000u) != 0 ? " (single address)" : "", queue.id);
+            if (traceWrites) std::fflush(stderr);
             if ((packet[1] & 0x10000u) != 0) {
                 for (const auto& value : packet.subspan(4)) GuestMemory::Write(destination, std::as_bytes(std::span(&value, 1)), 4);
             } else GuestMemory::Write(destination, std::as_bytes(packet.subspan(4)), 4);
@@ -611,6 +614,7 @@ void Execute(std::span<const std::uint32_t> packet, QueueState& queue) {
             const auto source = ((packet[1] & 0xfu) << 1u) | ((packet[1] >> 30u) & 1u);
             static const bool traceCopies = std::getenv("ANYPS5_TRACE_LABELS") != nullptr;
             if (traceCopies) std::fprintf(stderr, "[write] copy 0x%llx from 0x%llx (%s) %u bytes\n", static_cast<unsigned long long>(address(packet[4], packet[5])), static_cast<unsigned long long>(address(packet[2], packet[3])), source >= 10 ? "immediate" : "memory", (packet[1] & 0x10000u) != 0 ? 8u : 4u);
+            if (traceCopies) std::fflush(stderr);
             copyMemory(address(packet[2], packet[3]), address(packet[4], packet[5]), (packet[1] & 0x10000u) != 0 ? 8 : 4, source >= 10);
             return;
         }
@@ -619,6 +623,7 @@ void Execute(std::span<const std::uint32_t> packet, QueueState& queue) {
             if (dmaDestination(packet) == DmaNowhere) return;
             static const bool traceDma = std::getenv("ANYPS5_TRACE_LABELS") != nullptr;
             if (traceDma && (packet[6] & 0x3ffffffu) <= 64) std::fprintf(stderr, "[write] dma 0x%llx from 0x%llx (%s) %u bytes\n", static_cast<unsigned long long>(address(packet[4], packet[5])), static_cast<unsigned long long>(address(packet[2], packet[3])), dmaSource(packet) == 2 ? "immediate" : "memory", packet[6] & 0x3ffffffu);
+            if (traceDma) std::fflush(stderr);
             if ((packet[6] & 0x3ffffffu) >= 4096u) {
                 char text[96];
                 std::snprintf(text, sizeof(text), "dma 0x%llx <- 0x%llx %u bytes%s", static_cast<unsigned long long>(address(packet[4], packet[5])), static_cast<unsigned long long>(address(packet[2], packet[3])), packet[6] & 0x3ffffffu, dmaSource(packet) == 2 ? " (fill)" : "");
@@ -634,6 +639,7 @@ void Execute(std::span<const std::uint32_t> packet, QueueState& queue) {
             const auto destination = address(packet[3], packet[4]);
             static const bool traceLabels = std::getenv("ANYPS5_TRACE_LABELS") != nullptr;
             if (traceLabels) std::fprintf(stderr, "[label] release 0x%llx select %u value 0x%08x%08x interrupt %u packet {%08x %08x %08x %08x %08x %08x %08x %08x} (queue 0x%x)\n", static_cast<unsigned long long>(destination), dataSelect, packet[6], packet[5], interrupt, packet[0], packet[1], packet[2], packet[3], packet[4], packet[5], packet[6], packet.size() > 7 ? packet[7] : 0u, queue.id);
+            if (traceLabels) std::fflush(stderr);
             if (dataSelect == 1) {
                 const std::uint32_t value = packet[5];
                 GuestMemory::Write(destination, std::as_bytes(std::span(&value, 1)), 4);

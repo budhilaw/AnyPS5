@@ -64,6 +64,8 @@ extern "C" void LibcRunShutdown_nid_postfix() {
 extern "C" {
 
 [[noreturn]] void APS5_VABI _Exit_nid_postfix(int code) {
+    std::fflush(stdout);
+    std::fflush(stderr);
     std::_Exit(code);
 }
 
@@ -87,6 +89,8 @@ void APS5_VABI exit_nid_postfix(int code) {
     const int count = ::backtrace(frames, 32);
     ::backtrace_symbols_fd(frames, count, 2);
 #endif
+    std::fflush(stdout);
+    std::fflush(stderr);
     std::abort();
 }
 
@@ -100,6 +104,8 @@ int* APS5_VABI __error_nid_postfix() {
 
 [[noreturn]] void __stack_chk_fail_nid_postfix() {
     std::fprintf(stderr, "guest stack protector failure in the caller of %p\n", __builtin_return_address(0));
+    std::fflush(stdout);
+    std::fflush(stderr);
     std::abort();
 }
 

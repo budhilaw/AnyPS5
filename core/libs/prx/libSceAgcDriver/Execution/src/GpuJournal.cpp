@@ -24,6 +24,7 @@ void Dump(const char* heading) {
     std::lock_guard lock(mutex);
     std::fprintf(stderr, "%s\n", heading);
     for (const auto& entry : entries) std::fprintf(stderr, "  %s\n", entry.c_str());
+    std::fflush(stderr);
 }
 
 void Watched(const char* what, std::chrono::seconds limit, void (*wait)(void*), void* context) {

@@ -103,5 +103,9 @@ void ReportFatalException(const EXCEPTION_POINTERS* exception) {
         describe(label, value);
         ++found;
     }
+    if (record->ExceptionCode != EXCEPTION_STACK_OVERFLOW) {
+        std::fflush(stdout);
+        std::fflush(stderr);
+    }
     reporting = false;
 }

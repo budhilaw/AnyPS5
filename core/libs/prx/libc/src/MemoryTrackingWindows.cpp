@@ -77,6 +77,7 @@ void recordFault(std::uint64_t instruction, std::uint64_t address, bool write) {
         describeCode(sorted[index].second, where, sizeof(where));
         std::fprintf(stderr, "[faults] %llu %s %s last 0x%llx\n", static_cast<unsigned long long>(entry.count), entry.write ? "write" : "read", where, static_cast<unsigned long long>(entry.lastAddress));
     }
+    std::fflush(stderr);
     sites->clear();
 }
 

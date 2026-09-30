@@ -143,6 +143,7 @@ void report(Target& target, const std::vector<Module>& modules) {
         }
         std::fprintf(stderr, "[sample] %s chain %llu %s\n", target.name.c_str(), static_cast<unsigned long long>(chains[i].first), text.c_str());
     }
+    std::fflush(stderr);
     target.samples = 0;
     target.self.clear();
     target.inclusive.clear();

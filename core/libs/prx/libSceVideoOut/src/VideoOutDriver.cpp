@@ -522,6 +522,7 @@ void VideoOutDriver::presentLoop(std::stop_token token) {
         auto error = std::current_exception();
         if (!error) std::terminate();
         try { std::rethrow_exception(error); } catch (const std::exception& e) { std::fprintf(stderr, "VideoOut presentation failed: %s\n", e.what()); } catch (...) { const auto* type = abi::__cxa_current_exception_type(); std::fprintf(stderr, "VideoOut presentation failed: exception of type %s\n", type ? type->name() : "?"); }
+        std::fflush(stderr);
         PadReportInputFailure_nid_postfix(error);
         if (current) current->Fail(error);
         std::list<std::shared_ptr<FlipRequest>> failed;

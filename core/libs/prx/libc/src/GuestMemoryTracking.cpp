@@ -248,6 +248,7 @@ void GuestMemoryTrackingDescribe_nid_postfix(std::uint64_t address, std::size_t 
         if (entry.address + entry.bytes <= address) continue;
         std::fprintf(stderr, "  watch 0x%llx+0x%zx protection %d active %d resolving %d\n", static_cast<unsigned long long>(entry.address), entry.bytes, static_cast<int>(entry.protection), entry.active ? 1 : 0, entry.resolving ? 1 : 0);
     }
+    std::fflush(stderr);
 }
 
 void GuestMemoryTrackingValidate_nid_postfix(std::uint64_t address, std::size_t bytes, const std::function<void(std::uint64_t, std::size_t)>& validate) {

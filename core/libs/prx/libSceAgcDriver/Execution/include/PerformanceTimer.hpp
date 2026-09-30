@@ -179,6 +179,7 @@ public:
         output << '\n';
         const auto text = output.str();
         std::fwrite(text.data(), 1, text.size(), stderr);
+        std::fflush(stderr);
     }
 
 private:

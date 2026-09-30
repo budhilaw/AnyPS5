@@ -208,11 +208,13 @@ int APS5_VABI sceKernelRaiseException(Pthread thread, int signum) {
 
 void APS5_VABI sceKernelDebugRaiseException(int c1, int c2) {
     std::fprintf(stderr, "sceKernelDebugRaiseException: title requested an abort (0x%x, 0x%x)\n", c1, c2);
+    std::fflush(stderr);
     std::abort();
 }
 
 void APS5_VABI sceKernelDebugRaiseExceptionOnReleaseMode(int c1, int c2) {
     std::fprintf(stderr, "sceKernelDebugRaiseExceptionOnReleaseMode: title requested an abort (0x%x, 0x%x)\n", c1, c2);
+    std::fflush(stderr);
     std::abort();
 }
 

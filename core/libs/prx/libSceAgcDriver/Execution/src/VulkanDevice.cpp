@@ -909,6 +909,7 @@ void VulkanDevice::GdsTransfer(std::span<const std::uint32_t> packet) {
         if (toGds) std::memcpy(&first, gds.data() + packet[4], std::min<std::size_t>(4, bytes));
         else std::memcpy(&first, gds.data() + packet[2], std::min<std::size_t>(4, bytes));
         std::fprintf(stderr, "[gds] %s offset 0x%x %zu bytes %s 0x%llx first dword 0x%08x previous 0x%08x\n", toGds ? "write" : "read", toGds ? packet[4] : packet[2], bytes, toGds ? "from" : "to", static_cast<unsigned long long>(toGds ? (static_cast<std::uint64_t>(packet[2]) | (static_cast<std::uint64_t>(packet[3]) << 32u)) : (static_cast<std::uint64_t>(packet[4]) | (static_cast<std::uint64_t>(packet[5]) << 32u))), first, previous);
+        std::fflush(stderr);
     }
     timing.Mark("copy");
 }
@@ -920,6 +921,7 @@ std::array<std::uint32_t, 3> VulkanDevice::IndirectDispatchGroups(std::uint64_t 
     GuestMemory::Read(address, std::as_writable_bytes(std::span(groups)), 4);
     static const bool traceIndirect = std::getenv("ANYPS5_TRACE_INDIRECT") != nullptr;
     if (traceIndirect) std::fprintf(stderr, "[indirect] dispatch args at 0x%llx: %u %u %u\n", static_cast<unsigned long long>(address), groups[0], groups[1], groups[2]);
+    if (traceIndirect) std::fflush(stderr);
     return groups;
 }
 
@@ -1501,6 +1503,7 @@ void VulkanDevice::Dispatch(const ShaderRecompiler::RecompileResult& shader, std
                 std::uint64_t hash = 1469598103934665603ull;
                 for (const auto word : shader.spirv) hash = (hash ^ word) * 1099511628211ull;
                 std::fprintf(stderr, "[dispatch-writes] %ux%ux%u shader %016llx, writes%s textures%s\n", x, y, z, static_cast<unsigned long long>(hash), ranges.c_str(), textures.c_str());
+                std::fflush(stderr);
             }
         }
         const auto commands = state->drawQueue->Begin(context);

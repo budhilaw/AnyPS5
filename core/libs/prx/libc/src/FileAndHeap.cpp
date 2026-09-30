@@ -90,6 +90,7 @@ size_t APS5_VABI fwrite_nid_postfix(const void* buffer, size_t size, size_t coun
     if (size == 0 || count == 0) return 0;
     if (!buffer) throw std::runtime_error("fwrite: null buffer");
     const auto result = std::fwrite(buffer, size, count, handle);
+    if (handle == stderr) std::fflush(handle);
     stream->SyncStatus();
     if (result != count || std::ferror(handle)) throw std::runtime_error("fwrite: write failed");
     return result;
@@ -128,8 +129,10 @@ std::int64_t APS5_VABI ftell_nid_postfix(FileStream* stream) { return ftello_nid
 
 int APS5_VABI fputs_nid_postfix(const char* str, FileStream* stream) {
     if (!str) throw std::runtime_error("fputs: null string");
-    const int result = std::fputs(str, GetNativeStream(stream));
+    auto* handle = GetNativeStream(stream);
+    const int result = std::fputs(str, handle);
     if (result == EOF) throw std::runtime_error("fputs: write failed");
+    if (handle == stderr) std::fflush(handle);
     return result;
 }
 

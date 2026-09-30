@@ -416,6 +416,7 @@ void resolveTableImage(const IrResourcePlan& plan, std::uint32_t imageIndex, con
         static std::atomic<int> reported{0};
         if (reported.fetch_add(1) < 8) {
             std::fprintf(stderr, "image table at 0x%llx (stride %u) holds %zu different images; every entry reads the most common one\n", static_cast<unsigned long long>(base + table.offset), table.stride, seen.size());
+            std::fflush(stderr);
         }
     }
 }

@@ -114,6 +114,7 @@ int APS5_VABI sceSystemServiceReportAbnormalTermination(const void* info) {
     Aps5TraceCall_nid_no_patch(__func__);
     (void)info;
     std::fprintf(stderr, "sceSystemServiceReportAbnormalTermination: title reported an abnormal termination\n");
+    std::fflush(stderr);
     return 0;
 }
 

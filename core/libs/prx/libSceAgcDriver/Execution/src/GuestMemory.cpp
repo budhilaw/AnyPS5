@@ -165,6 +165,7 @@ void Read(std::uint64_t address, std::span<std::byte> destination, std::size_t a
             for (std::size_t i = 0; i < std::min<std::size_t>(sorted.size(), 6); ++i) {
                 std::fprintf(stderr, "[read-callers] %.1f MiB in %llu reads from %p (%s)\n", sorted[i].first / 1048576.0, static_cast<unsigned long long>(callers[sorted[i].second].second), sorted[i].second, DescribeCaller(sorted[i].second).c_str());
             }
+            std::fflush(stderr);
             callers.clear();
         }
     }

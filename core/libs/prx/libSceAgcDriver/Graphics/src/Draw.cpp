@@ -523,6 +523,7 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
             std::uint64_t hash = 1469598103934665603ull;
             for (const auto& shader : shaders) for (const auto word : shader.program->spirv) hash = (hash ^ word) * 1099511628211ull;
             std::fprintf(stderr, "[draw-writes] %u %s indices, target 0x%llx %ux%u vk%u, shaders %016llx, writes%s\n", draw.indexCount, draw.indexed ? "indexed" : "auto", state.hasColorTarget ? static_cast<unsigned long long>(state.color.address) : 0ull, state.renderExtent.width, state.renderExtent.height, state.hasColorTarget ? static_cast<unsigned>(state.color.format) : 0u, static_cast<unsigned long long>(hash), ranges.c_str());
+            std::fflush(stderr);
         }
     }
     static const bool mergePasses = std::getenv("ANYPS5_NO_PASS_MERGE") == nullptr;

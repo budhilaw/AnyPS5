@@ -174,7 +174,7 @@ void ReportUnresolvedImages(const char* kind, std::uint64_t address, const Shade
     static std::mutex reportedMutex;
     static std::set<std::uint64_t> reported;
     std::lock_guard lock(reportedMutex);
-    if (reported.insert(address).second) std::fprintf(stderr, "AGC driver: %s program 0x%llx samples %u image(s) whose descriptors are selected at run time; they read as null textures\n", kind, static_cast<unsigned long long>(address), result.unresolvedImages);
+    if (reported.insert(address).second) { std::fprintf(stderr, "AGC driver: %s program 0x%llx samples %u image(s) whose descriptors are selected at run time; they read as null textures\n", kind, static_cast<unsigned long long>(address), result.unresolvedImages); std::fflush(stderr); }
 }
 
 bool StorageImageWrites(const ShaderRecompiler::DescriptorBinding& binding, std::vector<std::pair<std::uint64_t, std::uint64_t>>& writes) {
@@ -206,7 +206,7 @@ void SkippingFailedPrograms(Work&& work) {
         work();
     } catch (const ProgramError& error) {
         std::lock_guard lock(failedProgramsMutex);
-        if (failedPrograms.insert({error.address, error.codeHash}).second) std::fprintf(stderr, "AGC driver: skipping work of a program that cannot be prepared: %s\n", error.what());
+        if (failedPrograms.insert({error.address, error.codeHash}).second) { std::fprintf(stderr, "AGC driver: skipping work of a program that cannot be prepared: %s\n", error.what()); std::fflush(stderr); }
     }
 }
 
@@ -340,6 +340,7 @@ private:
                     }
                 }
                 std::fprintf(stderr, "[drain] 0x%llx+0x%zx %s queued %d recorded %d:%s\n", static_cast<unsigned long long>(address), bytes, writable ? "write" : "read", queuedWrite ? 1 : 0, recorded ? 1 : 0, ranges.c_str());
+                std::fflush(stderr);
             }
         }
         if (queuedWrite) self.waitGraphics(writer, "drain host resolve");
@@ -713,6 +714,7 @@ private:
             std::string text;
             for (std::size_t i = 0; i < userData.size() && i < 16; ++i) { char item[12]; std::snprintf(item, sizeof(item), " %08x", userData[i]); text += item; }
             std::fprintf(stderr, "[dispatch] program 0x%llx groups %ux%ux%u user data:%s\n", static_cast<unsigned long long>(address), packet[1], packet[2], packet[3], text.c_str());
+            std::fflush(stderr);
         }
         const auto compute = Graphics::DecodeComputeStageInfo(queue.shader);
         const std::array<ShaderRecompiler::MemoryRegion, 2> memory{{{snapshot.codeAddress, std::as_bytes(std::span(snapshot.code))}, {snapshot.headerAddress, snapshot.header}}};
@@ -793,6 +795,7 @@ private:
                     }
                 }
                 std::fprintf(stderr, "[dispatch] program 0x%llx groups %ux%ux%u %s; %zu user dwords; buffers:%s\n", static_cast<unsigned long long>(address), packet[1], packet[2], packet[3], gds ? "binds GDS" : "no GDS", userData.size(), buffers.c_str());
+                std::fflush(stderr);
                 if (static const char* dumpDirectory = std::getenv("ANYPS5_DUMP_GDS_SHADERS"); dumpDirectory != nullptr && (gds || traceAllBuffers)) {
                     static std::set<std::uint64_t> dumped;
                     if (dumped.insert(address).second) {
@@ -858,7 +861,7 @@ private:
         PerformanceTimer timing("Driver.Draw");
         if (const auto colorMode = (readRegister(queue.context, 0x202) >> 4u) & 7u; colorMode == 2 || colorMode >= 4) {
             static std::array<std::once_flag, 8> reported;
-            std::call_once(reported[colorMode], [colorMode] { std::fprintf(stderr, "AGC driver: skipping color metadata passes (CB_COLOR_CONTROL mode %u); compression metadata is not emulated\n", colorMode); });
+            std::call_once(reported[colorMode], [colorMode] { std::fprintf(stderr, "AGC driver: skipping color metadata passes (CB_COLOR_CONTROL mode %u); compression metadata is not emulated\n", colorMode); std::fflush(stderr); });
             return;
         }
         auto drawParameters = Pm4::ResolveDraw(packet, queue);
@@ -871,13 +874,13 @@ private:
             static std::mutex reportedMutex;
             static std::set<std::string, std::less<>> reported;
             std::lock_guard lock(reportedMutex);
-            if (reported.size() < 256 && reported.emplace(error.what()).second) std::fprintf(stderr, "AGC driver: skipping draws whose state cannot be translated: %s\n", error.what());
+            if (reported.size() < 256 && reported.emplace(error.what()).second) { std::fprintf(stderr, "AGC driver: skipping draws whose state cannot be translated: %s\n", error.what()); std::fflush(stderr); }
             return;
         }
         const auto& graphics = *decoded;
         if (graphics.emptyViewport) {
             static std::once_flag reported;
-            std::call_once(reported, [] { std::fprintf(stderr, "AGC driver: skipping draws with a zero-sized viewport\n"); });
+            std::call_once(reported, [] { std::fprintf(stderr, "AGC driver: skipping draws with a zero-sized viewport\n"); std::fflush(stderr); });
             return;
         }
         struct Program {
@@ -1199,7 +1202,7 @@ private:
         auto& queue = queues[submission.queue];
         queue.id = submission.queue;
         static const bool traceLabels = std::getenv("ANYPS5_TRACE_LABELS") != nullptr;
-        if (traceLabels && execution.cursor == 0) std::fprintf(stderr, "[submit] executing serial %llu queue 0x%x (%zu dwords)\n", static_cast<unsigned long long>(submission.serial), submission.queue, submission.commands.size());
+        if (traceLabels && execution.cursor == 0) { std::fprintf(stderr, "[submit] executing serial %llu queue 0x%x (%zu dwords)\n", static_cast<unsigned long long>(submission.serial), submission.queue, submission.commands.size()); std::fflush(stderr); }
         {
             const auto cursor = execution.cursor;
             if (frameTiming == nullptr) includeSubmission(submission, false);
@@ -1313,6 +1316,7 @@ private:
                     if (traceLabels && !execution.waitTraced) {
                         execution.waitTraced = true;
                         std::fprintf(stderr, "[label] wait 0x%llx function %u reference 0x%llx (queue 0x%x)\n", static_cast<unsigned long long>(static_cast<std::uint64_t>(packet[2]) | (static_cast<std::uint64_t>(packet[3]) << 32u)), packet[1] & 7u, static_cast<unsigned long long>(((packet[0] >> 8u) & 0xffu) == 0x93 ? (static_cast<std::uint64_t>(packet[4]) | (static_cast<std::uint64_t>(packet[5]) << 32u)) : packet[4]), submission.queue);
+                        std::fflush(stderr);
                     }
                     if (!Pm4::TryWait(packet, [this](std::uint64_t address, std::uint32_t bytes, std::uint64_t& value) { return lookupDeferred(address, bytes, value); })) return Step::Blocked;
                     execution.waitTraced = false;

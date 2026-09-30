@@ -226,6 +226,7 @@ void DrawQueue::traceResolve(std::uint64_t address, std::size_t bytes, bool orde
             ranges += item;
         }
         std::fprintf(stderr, "[resolve-wait] 0x%llx+0x%zx overlaps writes%s (ordered %d, copied %d)\n", static_cast<unsigned long long>(address), bytes, ranges.c_str(), ordered ? 1 : 0, resources.WritesOverlapCopied(address, bytes) ? 1 : 0);
+        std::fflush(stderr);
     }
 }
 

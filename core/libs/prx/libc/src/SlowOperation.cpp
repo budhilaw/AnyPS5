@@ -48,5 +48,6 @@ extern "C" void SlowOperationRecord_nid_no_patch(const char* name, std::uint64_t
     for (const auto& [key, value] : state.statistics) {
         std::fprintf(stderr, "[slow-ops] %s: n=%llu total=%.1f ms max=%.1f ms over5ms=%llu\n", key.c_str(), static_cast<unsigned long long>(value.count), static_cast<double>(value.total) / 1e6, static_cast<double>(value.maximum) / 1e6, static_cast<unsigned long long>(value.slow));
     }
+    std::fflush(stderr);
     state.statistics.clear();
 }

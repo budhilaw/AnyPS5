@@ -25,6 +25,7 @@ int APS5_VABI vfprintf_nid_postfix(FileStream* stream, const char* format, VaLis
 #endif
     const int result = std::vfprintf(native, format, *reinterpret_cast<std::va_list*>(args));
 #endif
+    if (native == stderr) std::fflush(native);
     stream->SyncStatus();
     return result;
 }

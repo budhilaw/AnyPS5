@@ -69,6 +69,7 @@ void DrawQueue::Wait() {
             std::string chain;
             for (int i = 1; i < count; ++i) chain += " <- " + DescribeCaller(frames[i]);
             std::fprintf(stderr, "[wait]%s\n", chain.c_str());
+            std::fflush(stderr);
         }
     }
     Flush();

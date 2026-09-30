@@ -70,6 +70,7 @@ void APS5_VABI perror_nid_postfix(const char* prefix) {
     strerror_r_nid_postfix(saved, message, sizeof(message));
     if (prefix && *prefix) std::fprintf(stderr, "%s: %s\n", prefix, message);
     else std::fprintf(stderr, "%s\n", message);
+    std::fflush(stderr);
     *__error_nid_postfix() = saved;
 }
 }
