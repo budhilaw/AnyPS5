@@ -312,6 +312,7 @@ struct RecompileResult {
 };
 
 [[nodiscard]] RecompileResult Recompile(const RecompileRequest& request);
+[[nodiscard]] RecompileResult RecompileSerialized(std::string_view request);
 
 struct RectListShaders {
     RecompileResult control;

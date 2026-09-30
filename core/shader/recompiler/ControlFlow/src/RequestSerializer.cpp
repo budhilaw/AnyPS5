@@ -696,4 +696,9 @@ DeserializedRequest RequestSerializer::Deserialize(std::string_view text) const 
     return result;
 }
 
+RecompileResult RecompileSerialized(std::string_view request) {
+    const auto deserialized = RequestSerializer{}.Deserialize(request);
+    return Recompile(deserialized.request);
+}
+
 }
