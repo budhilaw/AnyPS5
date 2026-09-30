@@ -34,7 +34,7 @@ struct Module {
 };
 
 struct Chain {
-    std::array<std::uintptr_t, 4> frames{};
+    std::array<std::uintptr_t, 8> frames{};
     bool operator==(const Chain& other) const { return frames == other.frames; }
 };
 
