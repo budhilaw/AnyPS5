@@ -69,6 +69,7 @@ Throughout the project, every function at every stage either **does exactly what
 - `INDIRECT_BUFFER` (`sceAgcDcbJump`) is flattened when the stream is copied at submission, so a jump target rewritten by the title after submission is not seen.
 - Indirect draws read their arguments at execution time; the CP's user-SGPR patching of vertex/instance offsets is emulated through the draw parameters.
 - The shader recompiler rejects compute shaders whose buffer descriptors are derived from `WorkgroupId` (seen in Unity's first compute dispatch); the origin of that pattern is not analysed yet.
+- With `ANYPS5_SKIP_FAILED_PROGRAMS=1` a draw or dispatch whose program cannot be prepared or compiled is skipped, and the failure is remembered under the recompiler's cache key ([ProgramFailures](../core/libs/prx/libSceAgcDriver/Execution/include/ProgramFailures.hpp)). A compilation failure caused by the captured descriptor values rather than by the specialization (binding validation inside the recompiler) therefore also skips later work whose values would pass, until the code, context, target, binding layout or specialization changes.
 - `sceAudioOut2` mixes the title's output ports to a stereo 48 kHz SDL device; `libSceAjm` decodes ATRAC9 with LibAtrac9 (batches run synchronously at start; other codecs output silence). `libSceAvPlayer` and the IME/message dialogs remain stubs; HTTP/SSL/NP networking is implemented as an offline network (every connection fails with a network-down error and the title continues without PSN).
 
 ### Functional
