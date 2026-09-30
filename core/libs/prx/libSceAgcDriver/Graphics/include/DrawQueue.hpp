@@ -74,6 +74,7 @@ private:
     bool passOpen = false;
     RenderPassKey pass;
     VkPipeline boundPipeline = VK_NULL_HANDLE;
+    std::shared_ptr<ReleaseQueue> releases;
     PFN_vkCmdEndRenderPass endRenderPass = nullptr;
     PFN_vkCmdPipelineBarrier pipelineBarrier = nullptr;
 };

@@ -235,6 +235,13 @@ std::vector<TileMipLayout> ComputeMipLayout(TextureTileMode tileMode, std::uint3
     return ComputeTiledMipLayout(tileMode, bytesPerElement, texelWidth, texelHeight, width, height, mipCount);
 }
 
+std::uint64_t DepthSliceBytes(std::uint32_t bytesPerElement, std::uint32_t width, std::uint32_t height) {
+    const auto block = GetBlockLayout(TextureTileMode::Depth64KB, bytesPerElement);
+    const auto columns = (static_cast<std::uint64_t>(width) + block.blockWidth - 1u) / block.blockWidth;
+    const auto rows = (static_cast<std::uint64_t>(height) + block.blockHeight - 1u) / block.blockHeight;
+    return columns * rows * block.blockSize;
+}
+
 std::uint64_t ComputeSurfaceSize(const std::vector<TileMipLayout>& mips, std::uint32_t arrayLayers) {
     Require(!mips.empty(), "cannot compute surface size for an empty mip chain");
     Require(arrayLayers != 0, "cannot compute surface size for zero array layers");

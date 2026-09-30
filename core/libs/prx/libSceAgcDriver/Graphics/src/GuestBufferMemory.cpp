@@ -1,4 +1,5 @@
 #include "prx/libSceAgcDriver/Graphics/include/GuestBufferMemory.hpp"
+#include <cstdio>
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/MemoryAccessScope.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/RenderCache.hpp"
@@ -54,6 +55,10 @@ void GuestBufferMemory::AddReadOnly(std::uint64_t address, std::size_t bytes, bo
     regions.push_back({address, address + bytes, false, true, {}, nullptr});
 }
 
+bool GuestBufferMemory::OverlapsImmutable(std::uint64_t address, std::uint64_t bytes) const {
+    return std::any_of(regions.begin(), regions.end(), [&](const Region& region) { return region.image && region.begin < address + bytes && address < region.end; });
+}
+
 void GuestBufferMemory::AddSnapshot(const GuestMemorySnapshot& snapshot) {
     validate(snapshot.address, snapshot.bytes.size());
     for (const auto& region : regions) {
@@ -75,7 +80,11 @@ void GuestBufferMemory::Upload(bool addressable) {
     for (auto& region : regions) {
         if (!merged.empty() && region.begin < merged.back().end) {
             auto& previous = merged.back();
-            Require(!previous.image && !region.image, "guest memory overlaps registered image data");
+            if (previous.image || region.image) {
+                char detail[200];
+                std::snprintf(detail, sizeof(detail), "guest memory overlaps registered image data: 0x%llx-0x%llx (%s%s%s) and 0x%llx-0x%llx (%s%s%s)", static_cast<unsigned long long>(previous.begin), static_cast<unsigned long long>(previous.end), previous.image ? "image " : "", previous.writable ? "writable" : "read", previous.fromGuest ? " guest" : "", static_cast<unsigned long long>(region.begin), static_cast<unsigned long long>(region.end), region.image ? "image " : "", region.writable ? "writable" : "read", region.fromGuest ? " guest" : "");
+                throw std::runtime_error(std::string("AGC graphics: ") + detail);
+            }
             const bool previousGuest = previous.writable || previous.fromGuest;
             const bool regionGuest = region.writable || region.fromGuest;
             Require(previousGuest == regionGuest, "guest memory overlaps an immutable snapshot");

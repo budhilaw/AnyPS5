@@ -29,7 +29,7 @@ void expectFailure(TAction action, const char* text) {
         check(std::string(error.what()).find(text) != std::string::npos, error.what());
         return;
     }
-    throw std::runtime_error("expected PM4 rejection");
+    throw std::runtime_error(std::string("expected PM4 rejection: ") + text);
 }
 
 std::vector<std::uint32_t> makePacket(std::uint32_t opcode, std::initializer_list<std::uint32_t> payload, std::uint32_t flags = 0) {
@@ -297,7 +297,12 @@ void testEventWrite() {
     }
     expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x46, {0x410}, 1), 0); }, "header flags");
     expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x46, {0x410, 0, 0}), 0); }, "packet size");
-    expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x46, {0x139, 0, 0}), 0); }, "event type 57");
+    AgcDriver::Pm4::Validate(makePacket(0x46, {0x139, 0x1000, 0}), 0);
+    expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x46, {0x039, 0x1000, 0}), 0); }, "pixel pipe statistics dump");
+    expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x46, {0x139, 0x1004, 0}), 0); }, "pixel pipe statistics dump");
+    expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x46, {0x139, 0, 0}), 0); }, "pixel pipe statistics dump");
+    expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x46, {0x139, 0x1000, 0}), 0x20); }, "compute queue");
+    expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x46, {0x13a}), 0); }, "event type 58");
     expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x46, {0x0d}), 0); }, "event type 13");
 }
 
@@ -366,7 +371,7 @@ void testDriverSubmission() {
     AgcDriverWaitIdle_nid_postfix();
     check(destination[0] == 83, "worker did not execute PM4 memory operations");
     auto rejectedCommands = commands;
-    const auto unsupportedEvent = makePacket(0x46, {0x139, 0, 0});
+    const auto unsupportedEvent = makePacket(0x46, {0x13a});
     rejectedCommands.insert(rejectedCommands.end(), unsupportedEvent.begin(), unsupportedEvent.end());
     Packet rejectedPacket{rejectedCommands.data(), static_cast<std::uint32_t>(rejectedCommands.size()), 0, {}};
     destination[0] = 0;

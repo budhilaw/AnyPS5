@@ -1,6 +1,7 @@
 #include "prx/libSceAgcDriver/Execution/include/DisplayBuffer.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
+#include <cstdio>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
@@ -18,9 +19,23 @@ std::uint32_t tileOffset(std::uint32_t x, std::uint32_t y) {
 
 }
 
+bool DisplayFormatSupported(std::uint64_t pixelFormat) {
+    const auto kind = pixelFormat >> 56u;
+    const auto order = pixelFormat & 0x00ffffffffffffffull;
+    return (kind == 0x80u || kind == 0x81u) && (order == 0 || order == 0x22000000ull);
+}
+
+bool DisplayFormatRgba(std::uint64_t pixelFormat) {
+    return (pixelFormat & 0x00ffffffffffffffull) == 0x22000000ull;
+}
+
 std::size_t DisplayBufferSize(const DisplayBuffer& buffer) {
     require(buffer.width != 0 && buffer.height != 0 && buffer.width <= 16384 && buffer.height <= 16384, "VideoOut: invalid display buffer dimensions");
-    require(buffer.pixelFormat == 0x8000000000000000ull || buffer.pixelFormat == 0x8000000022000000ull, "VideoOut: unsupported display pixel format");
+    if (!DisplayFormatSupported(buffer.pixelFormat)) {
+        char message[80];
+        std::snprintf(message, sizeof(message), "VideoOut: unsupported display pixel format 0x%llx", static_cast<unsigned long long>(buffer.pixelFormat));
+        throw std::runtime_error(message);
+    }
     require(buffer.address != 0 && (buffer.address & 65535u) == 0, "VideoOut: display buffer requires 64 KiB alignment");
     const auto size = static_cast<std::uint64_t>((buffer.width + 127u) / 128u) * ((buffer.height + 127u) / 128u) * 65536u;
     require(size <= std::numeric_limits<std::size_t>::max() && size <= std::numeric_limits<std::uintptr_t>::max() - buffer.address, "VideoOut: display buffer range overflow");
@@ -32,7 +47,7 @@ std::vector<std::byte> DecodeDisplayBuffer(const DisplayBuffer& buffer, std::spa
     require(source.size() == DisplayBufferSize(buffer), "VideoOut: invalid tiled display buffer size");
     std::vector<std::byte> pixels(static_cast<std::size_t>(buffer.width) * buffer.height * 4);
     const auto blocksPerRow = (buffer.width + 127u) / 128u;
-    const bool rgba = buffer.pixelFormat == 0x8000000022000000ull;
+    const bool rgba = DisplayFormatRgba(buffer.pixelFormat);
     timing.Mark("validate_allocate");
     for (std::uint32_t y = 0; y < buffer.height; ++y) {
         for (std::uint32_t x = 0; x < buffer.width; ++x) {

@@ -1,10 +1,11 @@
 #include "prx/libSceAgcDriver/Graphics/include/DescriptorCache.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/ReleaseQueue.hpp"
 #include <algorithm>
 #include <utility>
 
 namespace AgcDriver::Graphics {
 
-DescriptorAllocation::DescriptorAllocation(const Context& context, std::span<const std::uint32_t> key, std::span<const VkDescriptorSetLayoutBinding> bindings, std::span<const VkDescriptorPoolSize> sizes) : device(context.device), destroyPool(context.Function<PFN_vkDestroyDescriptorPool>("vkDestroyDescriptorPool")), destroyLayout(context.Function<PFN_vkDestroyDescriptorSetLayout>("vkDestroyDescriptorSetLayout")), key(key.begin(), key.end()) {
+DescriptorAllocation::DescriptorAllocation(const Context& context, std::span<const std::uint32_t> key, std::span<const VkDescriptorSetLayoutBinding> bindings, std::span<const VkDescriptorPoolSize> sizes) : device(context.device), destroyPool(context.Function<PFN_vkDestroyDescriptorPool>("vkDestroyDescriptorPool")), destroyLayout(context.Function<PFN_vkDestroyDescriptorSetLayout>("vkDestroyDescriptorSetLayout")), releases(context.releaseQueue), key(key.begin(), key.end()) {
     try {
         VkDescriptorSetLayoutCreateInfo info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
         info.bindingCount = static_cast<std::uint32_t>(bindings.size());
@@ -32,8 +33,10 @@ DescriptorAllocation::~DescriptorAllocation() {
 }
 
 void DescriptorAllocation::release() noexcept {
-    if (pool) destroyPool(device, pool, nullptr);
-    if (layout) destroyLayout(device, layout, nullptr);
+    Release(releases, [device = device, destroyPool = destroyPool, destroyLayout = destroyLayout, pool = pool, layout = layout] {
+        if (pool) destroyPool(device, pool, nullptr);
+        if (layout) destroyLayout(device, layout, nullptr);
+    });
 }
 
 bool DescriptorAllocation::Matches(std::span<const std::uint32_t> candidate) const {

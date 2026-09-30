@@ -11,7 +11,7 @@ public:
     BdaResources(const Context& context, const GuestBufferMemory& memory);
     VkDescriptorBufferInfo Table() const;
     VkDescriptorBufferInfo Fault() const;
-    void CheckFault() const;
+    void CheckFault(const GuestBufferMemory& memory) const;
 
 private:
     std::unique_ptr<Buffer> table;

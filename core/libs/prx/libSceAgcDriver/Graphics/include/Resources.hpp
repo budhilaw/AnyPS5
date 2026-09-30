@@ -38,6 +38,7 @@ private:
 };
 
 VkFormat StorageFormat(VkFormat format);
+void ReleaseImage(const Context& context, VkImageView view, VkImage image, VkDeviceMemory memory);
 
 class RenderTarget {
 public:

@@ -58,6 +58,7 @@ void ResidentColor::Begin(VkCommandBuffer commands) {
             transfer.Upload(color.address, color.extent.width, color.extent.height, color.tileMode);
         }
         transfer.Detile(commands);
+        retainUploadSource();
         Transition(commands, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
         VkBufferImageCopy copy{};
         copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
@@ -73,6 +74,10 @@ void ResidentColor::Begin(VkCommandBuffer commands) {
     memoryWatch->Protect(GuestMemoryTracking::Protection::None);
 }
 
+void ResidentColor::retainUploadSource() {
+    if (context.drawQueue != nullptr && transfer.UploadSource()) context.drawQueue->EnqueueCompletion([source = transfer.UploadSource()] {});
+}
+
 bool ResidentColor::Refresh(VkCommandBuffer commands) {
     if (color.gpuOnly || valid || memoryWatch == nullptr) return false;
     PerformanceTimer timing("Graphics.ResidentColor.Refresh");
@@ -84,6 +89,7 @@ bool ResidentColor::Refresh(VkCommandBuffer commands) {
     ++generation;
     adoptedThrough = context.drawQueue != nullptr ? context.drawQueue->NextSequence() : 0;
     transfer.Detile(commands);
+    retainUploadSource();
     Transition(commands, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
     VkBufferImageCopy copy{};
     copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
@@ -179,10 +185,14 @@ std::vector<std::pair<std::uint64_t, std::uint64_t>> RenderCache::excluding(std:
     return result;
 }
 
+void RenderCache::retire(std::shared_ptr<ResidentColor> entry) {
+    if (context.drawQueue) context.drawQueue->EnqueueCompletion([entry = std::move(entry)] {});
+}
+
 std::shared_ptr<ResidentColor> RenderCache::Get(const ColorTarget& color, bool blending) {
     Require(color.address != 0 && color.bytes != 0 && color.bytes <= std::numeric_limits<std::uint64_t>::max() - color.address, "invalid resident color range");
     if (context.drawQueue && context.drawQueue->WritesPending(color.address, color.bytes)) {
-        const bool ordered = !color.gpuOnly && context.guestBufferCache != nullptr && context.guestBufferCache->HostRange(color.address, color.bytes).buffer != nullptr;
+        const bool ordered = !color.gpuOnly && context.guestBufferCache != nullptr && context.guestBufferCache->HostImportable(color.address, color.bytes);
         context.drawQueue->Resolve(color.address, color.bytes, ordered);
     }
     if (blending) {
@@ -204,6 +214,7 @@ std::shared_ptr<ResidentColor> RenderCache::Get(const ColorTarget& color, bool b
         if (traceTargets) APS5_LOG_OUT("resident target 0x%llx (%ux%u, %zu bytes) released for 0x%llx (%ux%u, %zu bytes) sharing its pages", static_cast<unsigned long long>(previous.address), previous.extent.width, previous.extent.height, previous.bytes, static_cast<unsigned long long>(color.address), color.extent.width, color.extent.height, color.bytes);
         Resolve(previous.address, previous.bytes, true);
         it->second->ReleaseMemory();
+        retire(it->second);
         it = entries.erase(it);
     }
     if (entries.size() >= 160) {
@@ -218,6 +229,7 @@ std::shared_ptr<ResidentColor> RenderCache::Get(const ColorTarget& color, bool b
             if (entries.size() <= 120) break;
             if (traceEviction) APS5_LOG_OUT("resident target 0x%llx (%ux%u) evicted (least recently used, %zu entries)", static_cast<unsigned long long>(it->first), it->second->Description().extent.width, it->second->Description().extent.height, entries.size());
             it->second->ReleaseMemory();
+            retire(it->second);
             entries.erase(it);
         }
     }
@@ -232,11 +244,14 @@ std::shared_ptr<DepthImage> RenderCache::GetDepth(const DepthTarget& depth) {
     const auto it = depthEntries.find(depth.address);
     if (it != depthEntries.end()) {
         const auto& previous = it->second.target;
-        if (previous.extent.width == depth.extent.width && previous.extent.height == depth.extent.height && previous.format == depth.format) return it->second.image;
+        const bool sameExtent = previous.extent.width == depth.extent.width && previous.extent.height == depth.extent.height;
+        if (sameExtent && (previous.format == depth.format || (previous.stencil && !depth.stencil))) return it->second.image;
+        if (static int reported = 0; reported++ < 40) APS5_LOG_OUT("depth target 0x%llx recreated: %ux%u format %u stencil 0x%llx -> %ux%u format %u stencil 0x%llx", static_cast<unsigned long long>(depth.address), previous.extent.width, previous.extent.height, static_cast<unsigned>(previous.format), static_cast<unsigned long long>(previous.stencilAddress), depth.extent.width, depth.extent.height, static_cast<unsigned>(depth.format), static_cast<unsigned long long>(depth.stencilAddress));
         if (context.drawQueue) context.drawQueue->Wait();
         depthEntries.erase(it);
     }
     if (depthEntries.size() >= 32) {
+        if (static int reported = 0; reported++ < 10) APS5_LOG_CHARS_OUT("depth target cache is full: dropping every depth target");
         if (context.drawQueue) context.drawQueue->Wait();
         depthEntries.clear();
     }
@@ -289,13 +304,13 @@ unsigned char ToByte(float value) {
 
 }
 
-void RenderCache::DumpTargets(const std::string& prefix) {
+void RenderCache::DumpTargets(const std::string& prefix, std::uint64_t only) {
     if (context.drawQueue) context.drawQueue->Wait();
     for (const auto& [address, entry] : entries) {
-        if (!entry->Valid()) continue;
+        if (!entry->Valid() || (only != 0 && address != only)) continue;
         const auto& color = entry->Description();
         const auto texel = color.bytesPerPixel;
-        if (texel != 4 && texel != 8) continue;
+        if (texel != 1 && texel != 4 && texel != 8) continue;
         const std::size_t bytes = static_cast<std::size_t>(color.extent.width) * color.extent.height * texel;
         Buffer readback(context, bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
         {
@@ -324,11 +339,46 @@ void RenderCache::DumpTargets(const std::string& prefix) {
         std::fwrite(header, 1, 54, file);
         std::vector<unsigned char> row(rowBytes);
         const bool bgra = color.format == VK_FORMAT_B8G8R8A8_UNORM || color.format == VK_FORMAT_B8G8R8A8_SRGB;
+        const bool hdr = texel == 8 || color.format == VK_FORMAT_B10G11R11_UFLOAT_PACK32;
+        const auto hdrTexel = [&](const unsigned char* texelData, float rgb[3]) {
+            if (texel == 8) {
+                std::uint16_t h[4];
+                std::memcpy(h, texelData, 8);
+                for (int c = 0; c < 3; ++c) rgb[c] = HalfToFloat(h[c]);
+            } else {
+                std::uint32_t v;
+                std::memcpy(&v, texelData, 4);
+                rgb[0] = HalfToFloat(static_cast<std::uint16_t>((v & 0x7ff) << 4));
+                rgb[1] = HalfToFloat(static_cast<std::uint16_t>(((v >> 11) & 0x7ff) << 4));
+                rgb[2] = HalfToFloat(static_cast<std::uint16_t>(((v >> 22) & 0x3ff) << 5));
+            }
+        };
+        float hdrScale = 1.0f;
+        if (hdr) {
+            double sums[3] = {0, 0, 0}, peak = 0;
+            std::size_t count = 0;
+            for (std::size_t i = 0; i < static_cast<std::size_t>(width) * height; i += 7) {
+                float rgb[3];
+                hdrTexel(data + i * texel, rgb);
+                if (!std::isfinite(rgb[0]) || !std::isfinite(rgb[1]) || !std::isfinite(rgb[2])) continue;
+                for (int c = 0; c < 3; ++c) sums[c] += rgb[c];
+                peak += std::max({rgb[0], rgb[1], rgb[2]});
+                ++count;
+            }
+            if (count != 0 && peak > 0) hdrScale = static_cast<float>(0.3 * count / peak);
+            APS5_LOG_OUT("hdr target 0x%llx %ux%u format %u mean %g %g %g, dumped at x%g", static_cast<unsigned long long>(address), width, height, static_cast<unsigned>(color.format), count ? sums[0] / count : 0.0, count ? sums[1] / count : 0.0, count ? sums[2] / count : 0.0, hdrScale);
+        }
         for (std::uint32_t y = 0; y < height; ++y) {
             for (std::uint32_t x = 0; x < width; ++x) {
                 const auto* texelData = data + (static_cast<std::size_t>(y) * width + x) * texel;
                 unsigned char r, g, b;
-                if (texel == 8) {
+                if (hdr) {
+                    float rgb[3];
+                    hdrTexel(texelData, rgb);
+                    r = ToByte(rgb[0] * hdrScale); g = ToByte(rgb[1] * hdrScale); b = ToByte(rgb[2] * hdrScale);
+                } else if (texel == 1) {
+                    r = g = b = texelData[0];
+                } else if (texel == 8) {
                     std::uint16_t h[4];
                     std::memcpy(h, texelData, 8);
                     r = ToByte(HalfToFloat(h[0])); g = ToByte(HalfToFloat(h[1])); b = ToByte(HalfToFloat(h[2]));
@@ -349,7 +399,51 @@ void RenderCache::DumpTargets(const std::string& prefix) {
             std::fwrite(row.data(), 1, rowBytes, file);
         }
         std::fclose(file);
+        if (texel == 1) {
+            std::array<std::size_t, 256> histogram{};
+            for (std::size_t i = 0; i < static_cast<std::size_t>(width) * height; ++i) ++histogram[data[i]];
+            std::string summary;
+            for (std::uint32_t value = 0; value < 256; ++value) {
+                if (histogram[value] == 0) continue;
+                char item[32];
+                std::snprintf(item, sizeof(item), " %02x:%zu", value, histogram[value]);
+                summary += item;
+            }
+            APS5_LOG_OUT("8-bit target 0x%llx %ux%u values:%s", static_cast<unsigned long long>(address), width, height, summary.c_str());
+        }
     }
+}
+
+std::string RenderCache::DescribeStencil(DepthImage& image) {
+    const auto& target = image.Description();
+    if (target.format != VK_FORMAT_D32_SFLOAT_S8_UINT) return " (no stencil)";
+    if (context.drawQueue) context.drawQueue->Wait();
+    const std::size_t bytes = static_cast<std::size_t>(target.extent.width) * target.extent.height;
+    Buffer readback(context, bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
+    {
+        CommandBatch batch(context);
+        const auto commands = batch.Handle();
+        const bool attached = image.Attached();
+        image.Transition(commands, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        VkBufferImageCopy copy{};
+        copy.imageSubresource = {VK_IMAGE_ASPECT_STENCIL_BIT, 0, 0, 1};
+        copy.imageExtent = {target.extent.width, target.extent.height, 1};
+        context.Function<PFN_vkCmdCopyImageToBuffer>("vkCmdCopyImageToBuffer")(commands, image.Image(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, readback.Handle(), 1, &copy);
+        if (attached) image.Transition(commands, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+        batch.SubmitAndWait();
+    }
+    readback.Invalidate();
+    const auto* stencil = reinterpret_cast<const unsigned char*>(readback.Bytes().data());
+    std::array<std::size_t, 256> histogram{};
+    for (std::size_t i = 0; i < bytes; ++i) ++histogram[stencil[i]];
+    std::string summary;
+    for (std::uint32_t value = 0; value < 256; ++value) {
+        if (histogram[value] == 0) continue;
+        char item[32];
+        std::snprintf(item, sizeof(item), " %02x:%zu", value, histogram[value]);
+        summary += item;
+    }
+    return summary;
 }
 
 void RenderCache::DumpDepthTargets(const std::string& prefix) {
@@ -381,6 +475,33 @@ void RenderCache::DumpDepthTargets(const std::string& prefix) {
             minimum = std::min(minimum, values[i]); maximum = std::max(maximum, values[i]);
         }
         std::fprintf(stderr, "depth target 0x%llx %ux%u: values %g .. %g (%zu sampled, %zu NaN, %zu zero)\n", static_cast<unsigned long long>(address), target.extent.width, target.extent.height, minimum, maximum, sampled, nan, zero);
+        if (target.format == VK_FORMAT_D32_SFLOAT_S8_UINT) {
+            const std::size_t stencilBytes = static_cast<std::size_t>(target.extent.width) * target.extent.height;
+            Buffer stencilReadback(context, stencilBytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
+            {
+                CommandBatch batch(context);
+                const auto commands = batch.Handle();
+                entry.image->Transition(commands, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+                VkBufferImageCopy copy{};
+                copy.imageSubresource = {VK_IMAGE_ASPECT_STENCIL_BIT, 0, 0, 1};
+                copy.imageExtent = {target.extent.width, target.extent.height, 1};
+                context.Function<PFN_vkCmdCopyImageToBuffer>("vkCmdCopyImageToBuffer")(commands, entry.image->Image(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, stencilReadback.Handle(), 1, &copy);
+                entry.image->Transition(commands, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+                batch.SubmitAndWait();
+            }
+            stencilReadback.Invalidate();
+            const auto* stencil = reinterpret_cast<const unsigned char*>(stencilReadback.Bytes().data());
+            std::array<std::size_t, 256> histogram{};
+            for (std::size_t i = 0; i < stencilBytes; ++i) ++histogram[stencil[i]];
+            std::string summary;
+            for (std::uint32_t value = 0; value < 256; ++value) {
+                if (histogram[value] == 0) continue;
+                char item[32];
+                std::snprintf(item, sizeof(item), " %02x:%zu", value, histogram[value]);
+                summary += item;
+            }
+            std::fprintf(stderr, "depth target 0x%llx (stencil plane 0x%llx) stencil values:%s\n", static_cast<unsigned long long>(address), static_cast<unsigned long long>(target.stencilAddress), summary.c_str());
+        }
         char name[64];
         std::snprintf(name, sizeof(name), "depth_%llx_%ux%u.bmp", static_cast<unsigned long long>(address), target.extent.width, target.extent.height);
         auto* file = std::fopen((prefix + name).c_str(), "wb");

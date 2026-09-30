@@ -40,6 +40,8 @@ std::uint64_t GuestAllocationsProtectionGeneration_nid_postfix();
 std::uint64_t GuestAllocationsMapEpoch_nid_postfix();
 void GuestAllocationsUnmap_nid_postfix(void* mutation, const void* pointer, std::size_t bytes, const std::function<void(const void*, bool)>& apply);
 Lease GuestAllocationsAcquire_nid_postfix();
+void GuestAllocationsAddReleaseHook_nid_postfix(void* context, void (*release)(void* context));
+void GuestAllocationsRemoveReleaseHook_nid_postfix(void* context);
 }
 
 class Mutation {

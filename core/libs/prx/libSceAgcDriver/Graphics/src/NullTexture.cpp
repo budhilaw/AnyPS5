@@ -46,7 +46,8 @@ Texture::Texture(const Context& context, TextureDimension dimension) : context(c
         barrier.subresourceRange = viewInfo.subresourceRange;
         const auto pipelineBarrier = context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier");
         pipelineBarrier(commands, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
-        const VkClearColorValue clear{{0.0f, 0.0f, 0.0f, 0.0f}};
+        static const float fill = std::getenv("ANYPS5_DEBUG_WHITE_NULL") != nullptr ? 1.0f : 0.0f;
+        const VkClearColorValue clear{{fill, fill, fill, fill}};
         context.Function<PFN_vkCmdClearColorImage>("vkCmdClearColorImage")(commands, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear, 1, &viewInfo.subresourceRange);
         barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
         barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;

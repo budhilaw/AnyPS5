@@ -29,6 +29,7 @@ bool TryWait(std::span<const std::uint32_t> packet, const std::function<bool(std
 bool DmaGdsDestination(std::span<const std::uint32_t> packet);
 bool DmaGdsSource(std::span<const std::uint32_t> packet);
 bool DmaImmediateSource(std::span<const std::uint32_t> packet);
+bool EventWritesMemory(std::span<const std::uint32_t> packet);
 void TransferRanges(std::span<const std::uint32_t> packet, std::uint64_t& destination, std::size_t& destinationBytes, std::uint64_t& source, std::size_t& sourceBytes);
 bool DeferrableWrite(std::span<const std::uint32_t> packet, std::uint64_t& address, std::uint32_t& bytes, std::uint64_t& value, bool& known);
 void Validate(std::span<const std::uint32_t> packet, std::uint32_t queue);

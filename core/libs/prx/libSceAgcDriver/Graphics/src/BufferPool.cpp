@@ -1,8 +1,9 @@
 #include "prx/libSceAgcDriver/Graphics/include/BufferPool.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/ReleaseQueue.hpp"
 
 namespace AgcDriver::Graphics {
 
-BufferPool::BufferPool(const Context& context) : device(context.device), unmap(context.Function<PFN_vkUnmapMemory>("vkUnmapMemory")), destroyBuffer(context.Function<PFN_vkDestroyBuffer>("vkDestroyBuffer")), freeMemory(context.Function<PFN_vkFreeMemory>("vkFreeMemory")) {
+BufferPool::BufferPool(const Context& context) : device(context.device), unmap(context.Function<PFN_vkUnmapMemory>("vkUnmapMemory")), destroyBuffer(context.Function<PFN_vkDestroyBuffer>("vkDestroyBuffer")), freeMemory(context.Function<PFN_vkFreeMemory>("vkFreeMemory")), releases(context.releaseQueue) {
     buckets.fill(none);
     for (std::size_t index = 0; index < capacity; ++index) freeSlots[index] = index;
 }
@@ -37,9 +38,11 @@ BufferAllocation BufferPool::remove(std::size_t index) noexcept {
 }
 
 void BufferPool::destroy(const BufferAllocation& allocation) noexcept {
-    if (allocation.mapping != nullptr) unmap(device, allocation.memory);
-    destroyBuffer(device, allocation.buffer, nullptr);
-    freeMemory(device, allocation.memory, nullptr);
+    Release(releases, [device = device, unmap = unmap, destroyBuffer = destroyBuffer, freeMemory = freeMemory, allocation] {
+        if (allocation.mapping != nullptr) unmap(device, allocation.memory);
+        destroyBuffer(device, allocation.buffer, nullptr);
+        freeMemory(device, allocation.memory, nullptr);
+    });
 }
 
 std::optional<BufferAllocation> BufferPool::Take(std::size_t bytes, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties) {

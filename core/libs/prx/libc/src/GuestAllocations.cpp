@@ -25,6 +25,7 @@ namespace {
 struct Registry {
     std::recursive_mutex& mutex = GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix();
     std::map<std::uint64_t, std::shared_ptr<const Range>> ranges;
+    std::vector<std::pair<void*, void (*)(void*)>> releaseHooks;
     bool mainImageRegistered = false;
     std::uint32_t registeredImageCount = 0;
 };
@@ -148,10 +149,17 @@ void GuestAllocationsRequireUnpinned_nid_postfix(void*, const void* pointer, std
     require(bytes <= std::numeric_limits<std::uint64_t>::max() - address, "guest allocation range overflow");
     GuestMemoryTracking::GuestMemoryTrackingInvalidate_nid_postfix(address, bytes);
     const auto end = address + bytes;
-    for (const auto& [base, range] : registry().ranges) {
-        if (base >= end && base != address) break;
-        if ((address < base + range->bytes && base < end) || base == address) require(range.use_count() == 1, "guest allocation is owned by an active GPU command");
-    }
+    const auto pinned = [&] {
+        for (const auto& [base, range] : registry().ranges) {
+            if (base >= end && base != address) break;
+            if (((address < base + range->bytes && base < end) || base == address) && range.use_count() != 1) return true;
+        }
+        return false;
+    };
+    if (!pinned()) return;
+    const auto hooks = registry().releaseHooks;
+    for (const auto& [context, release] : hooks) release(context);
+    require(!pinned(), "guest allocation is owned by an active GPU command");
 }
 
 void GuestAllocationsRequireAvailable_nid_postfix(void*, const void* pointer, std::size_t bytes) {
@@ -287,6 +295,16 @@ void GuestAllocationsUnmap_nid_postfix(void* mutation, const void* pointer, std:
     }
     apply(reinterpret_cast<const void*>(range.allocationAddress), last);
     registry().ranges.swap(replacement);
+}
+
+void GuestAllocationsAddReleaseHook_nid_postfix(void* context, void (*release)(void*)) {
+    std::lock_guard lock(registry().mutex);
+    registry().releaseHooks.emplace_back(context, release);
+}
+
+void GuestAllocationsRemoveReleaseHook_nid_postfix(void* context) {
+    std::lock_guard lock(registry().mutex);
+    std::erase_if(registry().releaseHooks, [&](const auto& hook) { return hook.first == context; });
 }
 
 Lease GuestAllocationsAcquire_nid_postfix() {

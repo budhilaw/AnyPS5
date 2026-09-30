@@ -15,6 +15,8 @@ struct DisplayBuffer {
     std::uint32_t height;
 };
 
+bool DisplayFormatSupported(std::uint64_t pixelFormat);
+bool DisplayFormatRgba(std::uint64_t pixelFormat);
 std::size_t DisplayBufferSize(const DisplayBuffer& buffer);
 std::vector<std::byte> DecodeDisplayBuffer(const DisplayBuffer& buffer, std::span<const std::byte> source);
 std::vector<std::byte> ReadDisplayBuffer(const DisplayBuffer& buffer);

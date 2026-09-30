@@ -1,4 +1,5 @@
 #include "prx/libSceAgcDriver/Graphics/include/DrawQueue.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/ReleaseQueue.hpp"
 #include "prx/libSceAgcDriver/Execution/include/MemoryAccessScope.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
 #include <algorithm>
@@ -22,6 +23,7 @@ DrawQueue::~DrawQueue() {
 }
 
 VkCommandBuffer DrawQueue::Begin(const Context& context) {
+    releases = context.releaseQueue;
     EndPass();
     Collect();
     throttle();
@@ -110,6 +112,7 @@ void DrawQueue::Flush() {
     pending.push_back(std::move(recording));
     recording = Batch{};
     pending.back().commands->Submit();
+    if (releases) releases->Collect();
 }
 
 bool DrawQueue::WritesPending(std::uint64_t address, std::size_t bytes, std::uint64_t adoptedBefore) const {

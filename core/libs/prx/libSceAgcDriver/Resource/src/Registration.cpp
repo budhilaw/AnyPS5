@@ -3,6 +3,8 @@
 #include "prx/libSceAgcDriver/Resource/include/Registration.hpp"
 
 #include <atomic>
+#include <map>
+#include <mutex>
 #include <cstdint>
 #include <cstddef>
 #include "SceTypes.hpp"
@@ -11,6 +13,8 @@
 namespace {
 std::atomic<std::uint32_t> nextOwner{1};
 std::atomic<std::uint32_t> nextResource{1};
+std::mutex workloadStreamMutex;
+std::map<std::uint32_t, std::string> workloadStreams;
 }
 
 extern "C" {
@@ -34,11 +38,16 @@ int APS5_VABI sceAgcDriverRegisterResource(uint64_t a0, uint64_t a1, uint64_t a2
     return static_cast<int>(nextResource.fetch_add(1) & 0x7fffffffu);
 }
 
-int APS5_VABI sceAgcDriverRegisterWorkloadStream(uint32_t stream_id, const void* stream) {
- (void)stream_id;
- (void)stream;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+int APS5_VABI sceAgcDriverRegisterWorkloadStream(uint32_t stream_id, const char* name) {
+    std::lock_guard lock(workloadStreamMutex);
+    workloadStreams[stream_id] = name != nullptr ? name : "";
+    return 0;
+}
+
+int APS5_VABI sceAgcDriverUnregisterWorkloadStream(uint32_t stream_id) {
+    std::lock_guard lock(workloadStreamMutex);
+    workloadStreams.erase(stream_id);
+    return 0;
 }
 
 int APS5_VABI sceAgcDriverUnregisterOwnerAndResources(uint32_t owner_handle) {

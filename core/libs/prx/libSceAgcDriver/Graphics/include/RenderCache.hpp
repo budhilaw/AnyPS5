@@ -40,6 +40,7 @@ public:
 
 private:
     void resolveCpuAccess(GuestMemoryTracking::Access access);
+    void retainUploadSource();
     Context context;
     ColorTarget color;
     GpuColorTransfer transfer;
@@ -66,13 +67,15 @@ public:
     std::shared_ptr<DepthImage> FindDepth(std::uint64_t address, bool* stencil = nullptr) const;
     std::string DescribeDepthTargets() const;
     std::string DescribeColorTargets() const;
-    void DumpTargets(const std::string& prefix);
+    void DumpTargets(const std::string& prefix, std::uint64_t only = 0);
+    std::string DescribeStencil(DepthImage& image);
     void DumpDepthTargets(const std::string& prefix);
     void Resolve(std::uint64_t address, std::size_t bytes, bool writable);
     void DiscardCovered(std::uint64_t address, std::size_t bytes);
     void Flush();
 
 private:
+    void retire(std::shared_ptr<ResidentColor> entry);
     std::vector<std::pair<std::uint64_t, std::uint64_t>> excluding(std::uint64_t begin, std::uint64_t end, const std::function<bool(const ResidentColor&)>& excluded) const;
     Context context;
     std::map<std::uint64_t, std::shared_ptr<ResidentColor>> entries;

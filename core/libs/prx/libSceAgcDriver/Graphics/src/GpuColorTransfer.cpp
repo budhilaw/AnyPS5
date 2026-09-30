@@ -1,4 +1,5 @@
 #include "prx/libSceAgcDriver/Graphics/include/GpuColorTransfer.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/ReleaseQueue.hpp"
 #include "prx/libSceAgcDriver/Graphics/shaders/ColorTransfer_spv.h"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/GuestBufferCache.hpp"
@@ -63,10 +64,12 @@ GpuColorTransfer::~GpuColorTransfer() {
 }
 
 void GpuColorTransfer::release() noexcept {
-    if (descriptorPool) context.Function<PFN_vkDestroyDescriptorPool>("vkDestroyDescriptorPool")(context.device, descriptorPool, nullptr);
-    if (pipeline) context.Function<PFN_vkDestroyPipeline>("vkDestroyPipeline")(context.device, pipeline, nullptr);
-    if (pipelineLayout) context.Function<PFN_vkDestroyPipelineLayout>("vkDestroyPipelineLayout")(context.device, pipelineLayout, nullptr);
-    if (descriptorLayout) context.Function<PFN_vkDestroyDescriptorSetLayout>("vkDestroyDescriptorSetLayout")(context.device, descriptorLayout, nullptr);
+    Release(context.releaseQueue, [device = context.device, destroyPool = context.Function<PFN_vkDestroyDescriptorPool>("vkDestroyDescriptorPool"), destroyPipeline = context.Function<PFN_vkDestroyPipeline>("vkDestroyPipeline"), destroyPipelineLayout = context.Function<PFN_vkDestroyPipelineLayout>("vkDestroyPipelineLayout"), destroyDescriptorLayout = context.Function<PFN_vkDestroyDescriptorSetLayout>("vkDestroyDescriptorSetLayout"), descriptorPool = descriptorPool, pipeline = pipeline, pipelineLayout = pipelineLayout, descriptorLayout = descriptorLayout] {
+        if (descriptorPool) destroyPool(device, descriptorPool, nullptr);
+        if (pipeline) destroyPipeline(device, pipeline, nullptr);
+        if (pipelineLayout) destroyPipelineLayout(device, pipelineLayout, nullptr);
+        if (descriptorLayout) destroyDescriptorLayout(device, descriptorLayout, nullptr);
+    });
 }
 
 void GpuColorTransfer::prepare(std::uint32_t newWidth, std::uint32_t newHeight, ColorTileMode newMode) {

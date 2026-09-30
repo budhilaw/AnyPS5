@@ -22,7 +22,7 @@ void ShaderResources::prepareAddressBindings(std::span<const CompiledShader> sha
     }
     if (usesBda) {
         Require(context.bufferDeviceAddress, "buffer device address is not enabled");
-        guestMemory.AcquireRegistered();
+        guestMemory.AcquireRegistered(snapshots);
         for (const auto& snapshot : snapshots) guestMemory.AddSnapshot(snapshot);
     }
 }

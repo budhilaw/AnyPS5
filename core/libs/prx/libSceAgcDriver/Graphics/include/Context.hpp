@@ -32,6 +32,7 @@ class DrawQueue;
 class GraphicsPipelineCache;
 class DescriptorCache;
 class SamplerCache;
+class ReleaseQueue;
 
 inline void Require(bool condition, const std::string& reason) {
     if (!condition) throw std::runtime_error("AGC graphics: " + reason);
@@ -105,6 +106,7 @@ struct Context {
     bool depthClamp = false;
     bool hostPointerImport = false;
     VkDeviceSize hostPointerAlignment = 0;
+    std::shared_ptr<ReleaseQueue> releaseQueue;
 };
 
 }

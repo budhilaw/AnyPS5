@@ -11,6 +11,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/TextureCache.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/GraphicsPipelineCache.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/GuestBufferCache.hpp"
+#include <optional>
 #include <span>
 #include <algorithm>
 #include <array>
@@ -227,6 +228,10 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
             }
         }
     }
+    std::shared_ptr<ResidentColor> reportedTarget;
+    GuestTextureResource reportedView{};
+    std::vector<unsigned char> reportedBefore;
+    VkRect2D reportedScissor{};
     if (state.hasColorTarget) {
         const ColorTargetLayout colorLayout(state.color.extent.width, state.color.extent.height, state.color.tileMode, state.color.bytesPerPixel);
         Require(state.color.gpuOnly || state.color.bytes == colorLayout.Bytes(), "color target transfer size mismatch");
@@ -235,7 +240,14 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
             static const char* debugValue = std::getenv("ANYPS5_DEBUG_GDS_INPUTS");
             static const auto debugStart = std::chrono::steady_clock::now();
             const bool debugDraw = debugValue != nullptr && std::chrono::duration<double>(std::chrono::steady_clock::now() - debugStart).count() >= std::atof(debugValue);
-            if (debugDraw && (state.color.format == VK_FORMAT_B10G11R11_UFLOAT_PACK32 || state.color.format == VK_FORMAT_R16G16B16A16_SFLOAT) && state.color.extent.width == 3840 && !draw.indexed) {
+            static const char* scissoredValue = std::getenv("ANYPS5_DEBUG_SCISSORED_DRAWS");
+            static int scissoredReports = 0;
+            const bool tinyTarget = state.renderExtent.width == 2u && state.renderExtent.height == 1u;
+            static const bool stenciledOnly = std::getenv("ANYPS5_DEBUG_REPORT_STENCILED") != nullptr;
+            const bool stenciled = state.depthState.stencilTest && state.depthState.front.compareOp == VK_COMPARE_OP_EQUAL;
+            const bool scissoredDraw = scissoredValue != nullptr && (stenciledOnly ? stenciled && std::chrono::duration<double>(std::chrono::steady_clock::now() - debugStart).count() >= std::atof(scissoredValue) : (tinyTarget || (std::chrono::duration<double>(std::chrono::steady_clock::now() - debugStart).count() >= std::atof(scissoredValue) && state.scissor.extent.width < state.renderExtent.width && state.blend.blendEnable != 0))) && scissoredReports < 12;
+            if (scissoredDraw) ++scissoredReports;
+            if (scissoredDraw || (debugDraw && (state.color.format == VK_FORMAT_B10G11R11_UFLOAT_PACK32 || state.color.format == VK_FORMAT_R16G16B16A16_SFLOAT) && state.color.extent.width == 3840 && !draw.indexed)) {
                 if (context.drawQueue) { context.drawQueue->Flush(); context.drawQueue->Wait(); }
                 GuestTextureResource synthetic{};
                 synthetic.baseAddress = state.color.address;
@@ -248,13 +260,28 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
                 synthetic.dstSelX = 4; synthetic.dstSelY = 5; synthetic.dstSelZ = 6; synthetic.dstSelW = 7;
                 try {
                     Texture view(context, storage->color, synthetic, VkComponentMapping{VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY}, Texture::DirectView{});
-                    APS5_LOG_OUT("[draw-target] draw of %u indices (%s) into 0x%llx blend %u:%s", draw.indexCount, draw.indexed ? "indexed" : "auto", static_cast<unsigned long long>(state.color.address), state.blend.blendEnable, context.textureCache->DescribeContents(view).c_str());
+                    if (scissoredDraw) {
+                        reportedTarget = storage->color;
+                        reportedView = synthetic;
+                        reportedBefore = context.textureCache->Contents(view);
+                        reportedScissor = state.scissor;
+                    }
+                    APS5_LOG_OUT("[draw-target] draw of %u indices (%s) into 0x%llx %ux%u vk%u blend %u vp %g,%g %gx%g sc %d,%d %ux%u:%s", draw.indexCount, draw.indexed ? "indexed" : "auto", static_cast<unsigned long long>(state.color.address), state.renderExtent.width, state.renderExtent.height, static_cast<unsigned>(state.color.format), state.blend.blendEnable, state.viewport.x, state.viewport.y, state.viewport.width, state.viewport.height, state.scissor.offset.x, state.scissor.offset.y, state.scissor.extent.width, state.scissor.extent.height, context.textureCache->DescribeContents(view).c_str());
                 } catch (const std::exception& error) {
                     APS5_LOG_OUT("[draw-target] 0x%llx: %s", static_cast<unsigned long long>(state.color.address), error.what());
                 }
                 for (const auto& texture : resources->Textures()) {
-                    if (texture->Extent().width * texture->Extent().height < 64 * 64) continue;
-                    APS5_LOG_OUT("[draw-target]   reads 0x%llx %ux%u vk%u%s:%s", static_cast<unsigned long long>(texture->GuestAddress()), texture->Extent().width, texture->Extent().height, static_cast<unsigned>(texture->GuestFormat()), texture->IsDirectView() ? " direct" : "", context.textureCache->DescribeContents(*texture).c_str());
+                    if (!scissoredDraw && texture->Extent().width * texture->Extent().height < 64 * 64) continue;
+                    std::string guest;
+                    if (scissoredDraw) {
+                        std::array<std::uint32_t, 4> words{};
+                        try {
+                            GuestMemory::Read(texture->GuestAddress(), std::as_writable_bytes(std::span(words)), 1);
+                            guest = " guest";
+                            for (const auto word : words) { char item[12]; std::snprintf(item, sizeof(item), " %08x", word); guest += item; }
+                        } catch (...) { guest = " guest unreadable"; }
+                    }
+                    APS5_LOG_OUT("[draw-target]   reads 0x%llx %ux%u vk%u%s:%s%s", static_cast<unsigned long long>(texture->GuestAddress()), texture->Extent().width, texture->Extent().height, static_cast<unsigned>(texture->GuestFormat()), texture->IsDirectView() ? " direct" : "", context.textureCache->DescribeContents(*texture).c_str(), guest.c_str());
                 }
                 if (draw.indexed && draw.indexCount <= 6) {
                     for (std::size_t v = 0; v < vertexBuffers.size(); ++v) {
@@ -277,11 +304,11 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
                         for (std::size_t element = 0; element + 4 <= d.size(); element += 4) {
                             const auto base = d[element] | (static_cast<std::uint64_t>(d[element + 1] & 0xffffu) << 32u);
                             const auto stride = (d[element + 1] >> 16u) & 0x3fffu;
-                            char item[64];
-                            std::snprintf(item, sizeof(item), " [b%u base 0x%llx stride %u records %u", binding.binding, static_cast<unsigned long long>(base), stride, d[element + 2]);
+                            char item[96];
+                            std::snprintf(item, sizeof(item), " [b%u base 0x%llx stride %u records %u w3 %08x", binding.binding, static_cast<unsigned long long>(base), stride, d[element + 2], d[element + 3]);
                             buffers += item;
                             if (base != 0 && static_cast<std::uint64_t>(std::max(stride, 1u)) * d[element + 2] <= 4096) {
-                                std::array<std::uint32_t, 8> words{};
+                                std::vector<std::uint32_t> words(static_cast<std::uint64_t>(std::max(stride, 1u)) * d[element + 2] <= 128 ? 32 : 8);
                                 try {
                                     GuestMemory::Read(base, std::as_writable_bytes(std::span(words)), 1);
                                     buffers += " =";
@@ -447,7 +474,15 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
     }
     if (state.hasDepthTarget) storage->depth = context.renderCache->GetDepth(state.depth);
     timing.Mark("render_target_cache");
-    storage->pipeline = context.graphicsPipelines->Get(state, storage->color, storage->extraColors, storage->depth, *resources, shaders);
+    RequireValidViewport(context, state);
+    std::optional<State> preservedStencil;
+    if (storage->depth && storage->depth->Description().stencil && !state.depth.stencil) {
+        preservedStencil = state;
+        preservedStencil->depth.format = storage->depth->Description().format;
+        preservedStencil->depth.stencil = true;
+        preservedStencil->depth.stencilAddress = storage->depth->Description().stencilAddress;
+    }
+    storage->pipeline = context.graphicsPipelines->Get(preservedStencil ? *preservedStencil : state, storage->color, storage->extraColors, storage->depth, *resources, shaders);
     auto& pipeline = *storage->pipeline;
     timing.Mark("pipeline_cache");
     RenderPassKey passKey;
@@ -494,6 +529,7 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
         pipeline.Bind(commands);
         context.drawQueue->SetBoundPipeline(pipeline.Handle());
     }
+    pipeline.SetViewport(commands, state);
     resources->Bind(commands, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline.Layout());
     pipeline.PushConstants(commands, shaders);
     if (state.stages.mesh) {
@@ -507,9 +543,53 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
             context.Function<PFN_vkCmdDraw>("vkCmdDraw")(commands, draw.indexCount, draw.instanceCount, draw.firstVertex, draw.firstInstance);
         }
     }
+    if (GpuJournal::CommandLabel != nullptr) {
+        char text[80];
+        std::snprintf(text, sizeof(text), "draw 0x%llx n%u target 0x%llx", static_cast<unsigned long long>(GpuJournal::CurrentProgram), draw.indexCount, static_cast<unsigned long long>(state.hasColorTarget ? state.color.address : 0));
+        GpuJournal::Label(commands, text);
+    }
     if (writes || !mergePasses) context.drawQueue->EndPass();
     timing.Mark("command_record");
+    const auto probedDepth = storage->depth;
     context.drawQueue->Enqueue(std::move(resources), std::move(storage));
+    if (static const char* probe = std::getenv("ANYPS5_DEBUG_STENCIL_PROBE"); probe != nullptr && probedDepth && state.depth.address == std::strtoull(probe, nullptr, 16)) {
+        static int probes = 0;
+        if (probes++ < 600) {
+            context.drawQueue->Flush();
+            APS5_LOG_OUT("[stencil-probe] after %u indices (target 0x%llx, stencil %s ref %u ops %u/%u/%u wmask 0x%x, clear %d):%s", draw.indexCount, static_cast<unsigned long long>(state.hasColorTarget ? state.color.address : 0), state.depthState.stencilTest ? "on" : "off", state.depthState.front.reference, static_cast<unsigned>(state.depthState.front.failOp), static_cast<unsigned>(state.depthState.front.passOp), static_cast<unsigned>(state.depthState.front.depthFailOp), state.depthState.front.writeMask, state.depthState.clearStencil ? 1 : 0, context.renderCache->DescribeStencil(*probedDepth).c_str());
+        }
+    }
+    if (reportedTarget) {
+        context.drawQueue->Flush();
+        context.drawQueue->Wait();
+        try {
+            Texture view(context, reportedTarget, reportedView, VkComponentMapping{VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY}, Texture::DirectView{});
+            APS5_LOG_OUT("[draw-target]   after the draw:%s", context.textureCache->DescribeContents(view).c_str());
+            const auto after = context.textureCache->Contents(view);
+            const auto texel = view.GuestTexelBytes();
+            const auto width = view.Extent().width;
+            std::size_t inside = 0, changed = 0;
+            std::string first;
+            if (texel != 0 && after.size() == reportedBefore.size()) {
+                for (std::uint32_t y = reportedScissor.offset.y; y < reportedScissor.offset.y + reportedScissor.extent.height && y < view.Extent().height; ++y) {
+                    for (std::uint32_t x = reportedScissor.offset.x; x < reportedScissor.offset.x + reportedScissor.extent.width && x < width; ++x) {
+                        const std::size_t at = (static_cast<std::size_t>(y) * width + x) * texel;
+                        ++inside;
+                        if (std::memcmp(after.data() + at, reportedBefore.data() + at, texel) == 0) continue;
+                        if (++changed <= 3) {
+                            char item[64]; std::snprintf(item, sizeof(item), " @%u,%u ", x, y); first += item;
+                            for (std::uint32_t b = texel; b-- > 0;) { std::snprintf(item, sizeof(item), "%02x", reportedBefore[at + b]); first += item; }
+                            first += "->";
+                            for (std::uint32_t b = texel; b-- > 0;) { std::snprintf(item, sizeof(item), "%02x", after[at + b]); first += item; }
+                        }
+                    }
+                }
+            }
+            APS5_LOG_OUT("[draw-target]   scissor changed %zu of %zu pixels%s", changed, inside, first.c_str());
+        } catch (const std::exception& error) {
+            APS5_LOG_OUT("[draw-target]   after the draw: %s", error.what());
+        }
+    }
     timing.Mark("enqueue");
 }
 

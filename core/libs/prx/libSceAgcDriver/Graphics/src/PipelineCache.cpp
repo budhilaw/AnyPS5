@@ -65,9 +65,16 @@ PipelineCache::~PipelineCache() {
     context.Function<PFN_vkDestroyPipelineCache>("vkDestroyPipelineCache")(context.device, cache, nullptr);
 }
 
+void PipelineCache::SaveIfDue() {
+    if (!created.load(std::memory_order_relaxed) || std::chrono::steady_clock::now() - lastSave < std::chrono::seconds(30)) return;
+    Save();
+}
+
 void PipelineCache::Save() {
     if (path.empty() || cache == VK_NULL_HANDLE) return;
     std::lock_guard lock(saving);
+    created.store(false, std::memory_order_relaxed);
+    lastSave = std::chrono::steady_clock::now();
     const auto getData = context.Function<PFN_vkGetPipelineCacheData>("vkGetPipelineCacheData");
     std::size_t size = 0;
     if (getData(context.device, cache, &size, nullptr) != VK_SUCCESS || size == 0) return;

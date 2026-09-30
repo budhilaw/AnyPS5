@@ -3,6 +3,9 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <stdexcept>
+#include <string>
+#include <vector>
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 
@@ -17,12 +20,14 @@ int APS5_VABI sceAgcDriverSubmitAcb(uint32_t queue, const Packet* packet) {
 }
 
 int APS5_VABI sceAgcDriverSubmitMultiAcbs(uint32_t queue, uint32_t* const* acbs, const uint32_t* sizes_in_dwords, uint32_t count) {
- (void)queue;
- (void)acbs;
- (void)sizes_in_dwords;
- (void)count;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+    if (queue < 0x20 || queue >= 0x58) {
+        throw std::runtime_error(std::string(__func__) + ": unsupported compute queue");
+    }
+    if (count == 0 || acbs == nullptr || sizes_in_dwords == nullptr) throw std::invalid_argument(std::string(__func__) + ": invalid multi-buffer submission");
+    std::vector<Packet> packets(count);
+    for (std::uint32_t index = 0; index < count; ++index) packets[index] = Packet{acbs[index], sizes_in_dwords[index], 0, {}};
+    AgcDriver::Submit(packets.data(), count, queue);
+    return 0;
 }
 
 }

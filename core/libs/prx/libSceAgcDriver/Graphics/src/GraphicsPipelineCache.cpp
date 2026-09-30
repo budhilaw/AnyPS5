@@ -42,17 +42,7 @@ std::string makeKey(const Context& context, const State& state, const std::share
     append(key, state.renderExtent.width);
     append(key, state.renderExtent.height);
     append(key, state.topology);
-    append(key, state.viewport.x);
-    append(key, state.viewport.y);
-    append(key, state.viewport.width);
-    append(key, state.viewport.height);
-    append(key, state.viewport.minDepth);
-    append(key, state.viewport.maxDepth);
     append(key, state.negativeOneToOne);
-    append(key, state.scissor.offset.x);
-    append(key, state.scissor.offset.y);
-    append(key, state.scissor.extent.width);
-    append(key, state.scissor.extent.height);
     append(key, state.cullMode);
     append(key, state.frontFace);
     append(key, state.depthClamp);
@@ -148,6 +138,7 @@ std::shared_ptr<Pipeline> GraphicsPipelineCache::Get(const State& state, const s
     auto pipeline = std::make_shared<Pipeline>(context, state, target ? &target->Target() : nullptr, extraViews, depth.get(), resources, shaders);
     timing.Mark("create");
     ReportSlowPipeline("graphics", creationStart, shaders);
+    if (context.pipelineCacheOwner) context.pipelineCacheOwner->NoteCreated();
     if (context.pipelineCacheOwner && std::chrono::steady_clock::now() - creationStart > std::chrono::milliseconds(100)) context.pipelineCacheOwner->Save();
     entries.push_back({std::move(key), target, std::vector<std::shared_ptr<ResidentColor>>(extraTargets.begin(), extraTargets.end()), depth, pipeline});
     try {
@@ -157,7 +148,18 @@ std::shared_ptr<Pipeline> GraphicsPipelineCache::Get(const State& state, const s
         entries.pop_back();
         throw;
     }
-    while (entries.size() > 128) {
+    const auto abandoned = [](const Entry& entry) {
+        if (entry.pipeline.use_count() != 1) return false;
+        if (entry.target && entry.target.use_count() == 1) return true;
+        if (entry.depth && entry.depth.use_count() == 1) return true;
+        return std::any_of(entry.extraTargets.begin(), entry.extraTargets.end(), [](const auto& extra) { return extra.use_count() == 1; });
+    };
+    for (auto it = entries.begin(); it != entries.end();) {
+        if (!abandoned(*it)) { ++it; continue; }
+        lookup.erase(it->key);
+        it = entries.erase(it);
+    }
+    while (entries.size() > 1024) {
         const auto it = std::find_if(entries.begin(), entries.end(), [](const auto& entry) { return entry.pipeline.use_count() == 1; });
         if (it == entries.end()) break;
         lookup.erase(it->key);

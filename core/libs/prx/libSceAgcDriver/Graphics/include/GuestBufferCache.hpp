@@ -4,11 +4,14 @@
 #include "prx/libSceAgcDriver/Graphics/include/Resources.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
 #include "prx/libc/include/GuestMemoryTracking.hpp"
+#include "prx/libc/include/GuestMemoryBacking.hpp"
 #include <cstdint>
 #include <list>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <set>
+#include <span>
 #include <vector>
 #include <string>
 
@@ -37,6 +40,9 @@ public:
         VkDeviceSize offset = 0;
     };
     HostView HostRange(std::uint64_t address, std::uint64_t bytes);
+    bool HostImportable(std::uint64_t address, std::uint64_t bytes) const;
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> AddressWindows(std::uint64_t begin, std::uint64_t end, std::span<const std::pair<std::uint64_t, std::uint64_t>> required);
+    bool LearnAddress(std::uint64_t address);
     std::shared_ptr<Buffer> ImageCopy(const std::shared_ptr<const GuestAllocations::Range>& range, std::uint64_t padding, VkBufferUsageFlags usage);
     void ReleaseTracking(std::uint64_t address, std::size_t bytes);
     void Flush();
@@ -82,8 +88,16 @@ private:
         std::uint64_t serial;
         std::uint64_t bytes;
         std::shared_ptr<Buffer> buffer;
+        std::uint64_t lastUse = 0;
     };
+    static constexpr std::uint64_t HostWindowBytes = 32ull << 20;
+    static constexpr std::uint64_t HostBudgetBytes = 2ull << 30;
+    void trimHost();
+    bool hostExtent(std::uint64_t address, std::uint64_t bytes, GuestMemoryBacking::GuestMemoryBackingExtentInfo& extent, std::uint64_t& importBytes) const;
     std::map<std::uint64_t, HostMapping> hostMappings;
+    std::uint64_t hostBytes = 0;
+    std::uint64_t hostUses = 0;
+    std::set<std::uint64_t> addressWindows;
     std::uint64_t unmapGeneration = 0;
     std::map<const GuestAllocations::Range*, std::pair<std::shared_ptr<const GuestAllocations::Range>, std::shared_ptr<Buffer>>> imageCopies;
     std::uint64_t copiedBytes = 0;

@@ -4,6 +4,7 @@
 namespace AgcDriver {
 
 const char* ResolveVulkanLibrary();
+void RetainMetalCommandReferences();
 
 }
 

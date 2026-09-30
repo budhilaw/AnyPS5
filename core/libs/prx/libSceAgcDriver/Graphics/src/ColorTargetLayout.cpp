@@ -36,9 +36,11 @@ ColorTargetLayout::ColorTargetLayout(std::uint32_t width, std::uint32_t height, 
     require(bytesPerPixel == 1 || bytesPerPixel == 2 || bytesPerPixel == 4 || bytesPerPixel == 8 || bytesPerPixel == 16, "AGC graphics: unsupported color texel size");
     std::uint32_t paddedHeight = height;
     switch (mode) {
-        case ColorTileMode::Linear:
-            require((width * bytesPerPixel) % 256u == 0, "AGC graphics: linear surface pitch requires a width aligned to 256 bytes");
+        case ColorTileMode::Linear: {
+            const std::uint32_t pitchAlignment = 256u / bytesPerPixel;
+            pitch = (width + pitchAlignment - 1u) / pitchAlignment * pitchAlignment;
             break;
+        }
         case ColorTileMode::ZOrder64KB:
         case ColorTileMode::RenderTarget: {
             const std::uint32_t blockWidth = bytesPerPixel <= 2 ? 256u : bytesPerPixel <= 8 ? 128u : 64u;

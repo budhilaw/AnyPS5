@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <cstdio>
 #include <limits>
+#include <mutex>
 
 namespace AgcDriver::Graphics {
 
@@ -58,7 +59,7 @@ void TextureCache::addEntry(Entry entry) {
     index.emplace(hash, std::prev(entries.end()));
 }
 
-std::list<TextureCache::Entry>::iterator TextureCache::findEntry(const std::array<std::uint32_t, 8>& descriptor, TextureDimension viewDimension) {
+std::list<TextureCache::Entry>::iterator TextureCache::findEntry(const std::array<std::uint32_t, 8>& descriptor, TextureDimension viewDimension, bool compare) {
     if (++lookupsSinceSweep >= 1024) {
         lookupsSinceSweep = 0;
         for (auto it = entries.begin(); it != entries.end();) it = it->surface && it->surface->stale ? eraseEntry(it) : std::next(it);
@@ -71,7 +72,7 @@ std::list<TextureCache::Entry>::iterator TextureCache::findEntry(const std::arra
             eraseEntry(it);
             continue;
         }
-        if (it->descriptor == descriptor && it->viewDimension == viewDimension) return it;
+        if (it->descriptor == descriptor && it->viewDimension == viewDimension && it->compare == compare) return it;
     }
     return entries.end();
 }
@@ -80,23 +81,38 @@ bool TextureCache::SameSurface(const GuestTextureResource& a, const GuestTexture
     return a.baseAddress == b.baseAddress && a.width == b.width && a.height == b.height && a.mipCount == b.mipCount && a.tileMode == b.tileMode && FullArrayLayers(a) == FullArrayLayers(b) && (a.dimension == b.dimension || (a.dimension != TextureDimension::k3D && b.dimension != TextureDimension::k3D && a.dimension != TextureDimension::kCube && b.dimension != TextureDimension::kCube && a.dimension != TextureDimension::k1D && b.dimension != TextureDimension::k1D)) && ResolveTextureFormat(a.format) == ResolveTextureFormat(b.format);
 }
 
-std::shared_ptr<Texture> TextureCache::Get(std::span<const std::uint32_t> words, const GuestTextureResource& resource, VkComponentMapping components) {
+std::shared_ptr<Texture> TextureCache::Get(std::span<const std::uint32_t> words, const GuestTextureResource& resource, VkComponentMapping components, bool storage, bool compare) {
     Require(words.size() == 8, "texture cache descriptor must contain eight DWORDs");
     PerformanceTimer timing("Graphics.TextureCache");
     trim();
     std::array<std::uint32_t, 8> key;
     std::copy(words.begin(), words.end(), key.begin());
-    std::shared_ptr<DepthImage> depthSource;
-    if (resource.tileMode == TextureTileMode::Depth64KB) {
-        bool stencil = false;
-        depthSource = context.renderCache ? context.renderCache->FindDepth(resource.baseAddress, &stencil) : nullptr;
-        if (depthSource == nullptr) {
-            char text[160];
-            std::snprintf(text, sizeof(text), "AGC graphics: depth swizzled texture at 0x%llx (%ux%u format 0x%x, %u mips) does not name a resident depth target; targets:", static_cast<unsigned long long>(resource.baseAddress), resource.width, resource.height, resource.format, resource.mipCount);
-            throw std::runtime_error(text + (context.renderCache ? context.renderCache->DescribeDepthTargets() : std::string(" (no render cache)")));
+    std::vector<std::shared_ptr<DepthImage>> depthSources;
+    bool stencil = false;
+    if (resource.tileMode == TextureTileMode::Depth64KB && context.renderCache && !storage) {
+        if (auto first = context.renderCache->FindDepth(resource.baseAddress, &stencil)) {
+            const auto layers = FullArrayLayers(resource);
+            const auto sliceBytes = DepthSliceBytes(BytesPerElement(resource.format), resource.width, resource.height);
+            depthSources.push_back(std::move(first));
+            for (std::uint32_t layer = 1; layer < layers; ++layer) {
+                bool sliceStencil = false;
+                auto slice = context.renderCache->FindDepth(resource.baseAddress + layer * sliceBytes, &sliceStencil);
+                if (slice == nullptr || sliceStencil != stencil) break;
+                depthSources.push_back(std::move(slice));
+            }
+            if (depthSources.size() != layers) {
+                static std::once_flag once;
+                std::call_once(once, [&] { APS5_LOG_OUT("depth texture 0x%llx has %zu of %u slices resident: sampled from guest memory", static_cast<unsigned long long>(resource.baseAddress), depthSources.size(), layers); });
+                depthSources.clear();
+            }
         }
-        if (const auto it = findEntry(key, resource.viewDimension); it != entries.end()) {
-            if (it->depthSource.lock() == depthSource && it->generation == depthSource->Generation()) {
+    }
+    if (!depthSources.empty()) {
+        std::uint64_t generation = 0;
+        for (const auto& slice : depthSources) generation += slice->Generation();
+        if (const auto it = findEntry(key, resource.viewDimension, compare && !stencil); it != entries.end()) {
+            const bool sameSources = it->depthSources.size() == depthSources.size() && std::equal(depthSources.begin(), depthSources.end(), it->depthSources.begin(), [](const auto& slice, const auto& cached) { return cached.lock() == slice; });
+            if (sameSources && it->generation == generation) {
                 auto result = it->texture;
                 entries.splice(entries.end(), entries, it);
                 timing.Mark("depth_hit");
@@ -104,8 +120,8 @@ std::shared_ptr<Texture> TextureCache::Get(std::span<const std::uint32_t> words,
             }
             eraseEntry(it);
         }
-        auto texture = std::make_shared<Texture>(context, depthSource, stencil, resource, components);
-        addEntry({key, resource.viewDimension, texture, nullptr, {}, depthSource, depthSource->Generation(), texture->AllocationBytes()});
+        auto texture = std::make_shared<Texture>(context, std::span<const std::shared_ptr<DepthImage>>(depthSources), stencil, resource, components, compare && !stencil);
+        addEntry({key, resource.viewDimension, texture, nullptr, {}, {depthSources.begin(), depthSources.end()}, generation, texture->AllocationBytes(), compare && !stencil});
         retainedBytes += texture->AllocationBytes();
         trim();
         timing.Mark("depth_copy");
@@ -127,7 +143,7 @@ std::shared_ptr<Texture> TextureCache::Get(std::span<const std::uint32_t> words,
     }
     static const bool traceTextures = std::getenv("ANYPS5_TRACE_TEXTURES") != nullptr;
     if (auto it = findEntry(key, resource.viewDimension); it != entries.end()) do {
-        if (source || it->generation != 0) {
+        if (source || it->generation != 0 || !it->depthSources.empty()) {
             if (source && it->source.lock() == source && it->texture->IsDirectView() && it->texture->Image() == source->Target().Image()) {
                 auto result = it->texture;
                 entries.splice(entries.end(), entries, it);
@@ -273,6 +289,11 @@ std::vector<unsigned char> ReadbackTexture(const Context& context, const Texture
     const auto* data = reinterpret_cast<const unsigned char*>(readback.Bytes().data());
     return std::vector<unsigned char>(data, data + bytes);
 }
+}
+
+std::vector<unsigned char> TextureCache::Contents(const Texture& texture) {
+    if (context.drawQueue) context.drawQueue->Wait();
+    return ReadbackTexture(context, texture);
 }
 
 std::string TextureCache::DescribeContents(const Texture& texture) {

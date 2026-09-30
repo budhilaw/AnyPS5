@@ -586,7 +586,11 @@ void ValidateShaders(std::span<const CompiledShader> shaders, const State& state
         if (i != 0) {
             for (const auto& [location, signature] : current->inputs) {
                 const auto output = previous->outputs.find(location);
-                Require(output != previous->outputs.end() && output->second == signature, "graphics interfaces disagree at location " + std::to_string(location));
+                if (output == previous->outputs.end() || output->second != signature) {
+                    std::string outputs;
+                    for (const auto& [written, type] : previous->outputs) outputs += " " + std::to_string(written) + "=" + type;
+                    throw std::runtime_error("AGC graphics: graphics interfaces disagree at location " + std::to_string(location) + ": stage " + std::to_string(i) + " reads " + signature + ", previous stage writes" + (outputs.empty() ? std::string(" nothing") : outputs));
+                }
             }
         }
         previous = current;

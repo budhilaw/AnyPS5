@@ -19,6 +19,8 @@
 namespace AgcDriver::Graphics {
 namespace {
 
+constexpr std::size_t EmptyBufferBytes = 16;
+
 bool overlap(std::uint64_t first, std::size_t firstSize, std::uint64_t second, std::size_t secondSize) {
     return first < second + secondSize && second < first + firstSize;
 }
@@ -115,7 +117,10 @@ void ShaderResources::build(std::span<const CompiledShader> shaders, const Color
                         static const bool writeBackAll = std::getenv("ANYPS5_DEBUG_WRITEBACK_ALL") != nullptr;
                         const bool written = writeBackAll || element >= binding.elementWritten.size() || binding.elementWritten[element];
                         const bool read = writeBackAll || element >= binding.elementRead.size() || binding.elementRead[element];
-                        item.allocations.push_back(addGuestBuffer(std::span<const std::uint32_t>(binding.guestDescriptor).subspan(static_cast<std::size_t>(element) * 4, 4), written, read, target, indexAddress, indexBytes));
+                        auto words = std::span<const std::uint32_t>(binding.guestDescriptor).subspan(static_cast<std::size_t>(element) * 4, 4);
+                        static constexpr std::array<std::uint32_t, 4> nullDescriptor{};
+                        if (element < binding.elementOptional.size() && binding.elementOptional[element] && !usableOptionalBuffer(words)) words = nullDescriptor;
+                        item.allocations.push_back(addGuestBuffer(words, written, read, target, indexAddress, indexBytes));
                     }
                 } else if (addressRole) {
                     item.allocations.push_back(allocations.size());
@@ -212,6 +217,13 @@ void ShaderResources::build(std::span<const CompiledShader> shaders, const Color
     }
 }
 
+bool ShaderResources::usableOptionalBuffer(std::span<const std::uint32_t> words) const {
+    const ShaderRecompiler::ShaderBufferResource descriptor{{words[0], words[1], words[2], words[3]}};
+    const auto address = descriptor.Base48();
+    const auto bytes = descriptor.GetSize();
+    return address != 0 && bytes != 0 && bytes <= (64ull << 20u) && !guestMemory.OverlapsImmutable(address, bytes);
+}
+
 std::size_t ShaderResources::addGuestBuffer(std::span<const std::uint32_t> words, bool written, bool read, const ColorTarget* target, std::uint64_t indexAddress, std::size_t indexBytes) {
     Require(words.size() == 4, "buffer descriptor must contain four DWORDs");
     Require((words[1] & 0x40000000u) == 0, "buffer descriptor has reserved bits set");
@@ -223,8 +235,7 @@ std::size_t ShaderResources::addGuestBuffer(std::span<const std::uint32_t> words
     }
     const auto address = descriptor.Base48();
     const auto byteSize = descriptor.GetSize();
-    Require(address != 0, "null shader buffer descriptor address");
-    Require(byteSize != 0, "empty shader buffer descriptor");
+    if (address == 0 || byteSize == 0) return addZeroBuffer(address, EmptyBufferBytes);
     Require(byteSize <= context.limits.maxStorageBufferRange, "shader buffer exceeds descriptor range limit");
     Require(byteSize <= std::numeric_limits<std::size_t>::max(), "shader buffer size exceeds host address space");
     const auto size = static_cast<std::size_t>(byteSize);
@@ -237,17 +248,21 @@ std::size_t ShaderResources::addGuestBuffer(std::span<const std::uint32_t> words
     } catch (const std::exception& error) {
         static std::once_flag once;
         std::call_once(once, [&] { APS5_LOG_OUT("shader buffer at 0x%llx (%zu bytes) is not mapped (%s); binding zeros", static_cast<unsigned long long>(address), size, error.what()); });
-        const auto padded = size + static_cast<std::size_t>(address % GuestBufferMemory::ViewAlignment);
-        auto buffer = std::make_unique<Buffer>(context, padded, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-        std::memset(buffer->Bytes().data(), 0, padded);
-        allocations.push_back({0, padded, false, std::move(buffer)});
-        return allocations.size() - 1;
+        return addZeroBuffer(address, size);
     }
     Require(target == nullptr || !overlap(address, size, target->address, target->bytes), "shader buffer aliases the render target");
     Require(!written || !overlap(address, size, indexAddress, indexBytes), "writable shader buffer aliases the index buffer");
     if (written) guestMemory.AddWritable(address, size, true);
     else guestMemory.AddReadOnly(address, size, true);
     allocations.push_back({address, size, true, nullptr});
+    return allocations.size() - 1;
+}
+
+std::size_t ShaderResources::addZeroBuffer(std::uint64_t address, std::size_t size) {
+    const auto padded = size + static_cast<std::size_t>(address % GuestBufferMemory::ViewAlignment);
+    auto buffer = std::make_unique<Buffer>(context, padded, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    std::memset(buffer->Bytes().data(), 0, padded);
+    allocations.push_back({0, padded, false, std::move(buffer)});
     return allocations.size() - 1;
 }
 
@@ -303,9 +318,14 @@ void ShaderResources::addImageBinding(const ShaderRecompiler::DescriptorBinding&
                 std::call_once(once, [&] { APS5_LOG_OUT("sampling textures through a differently shaped sampler (dimension %d as shape %d)", static_cast<int>(resource.dimension), static_cast<int>(shape)); });
             }
             const VkComponentMapping components{ComponentSwizzleFor(resource.dstSelX), ComponentSwizzleFor(resource.dstSelY), ComponentSwizzleFor(resource.dstSelZ), ComponentSwizzleFor(resource.dstSelW)};
-            textures.push_back(context.textureCache->Get(words, resource, components));
+            static const std::uint64_t replaced = std::getenv("ANYPS5_DEBUG_NULL_TEXTURE") != nullptr ? std::strtoull(std::getenv("ANYPS5_DEBUG_NULL_TEXTURE"), nullptr, 16) : 0u;
+            textures.push_back(replaced != 0 && resource.baseAddress == replaced ? context.textureCache->Null(resource.viewDimension) : context.textureCache->Get(words, resource, components, storageImage, binding.imageDepthCompare));
             textureBindings.emplace_back(binding.binding, element);
-            Require(!storageImage || textures.back()->StorageView() != VK_NULL_HANDLE, "storage image format or source does not support shader stores");
+            if (storageImage && textures.back()->StorageView() == VK_NULL_HANDLE) {
+                char message[200];
+                std::snprintf(message, sizeof(message), "AGC graphics: storage image 0x%llx (%ux%u format 0x%x tile %u dimension %u mips %u) does not support shader stores", static_cast<unsigned long long>(resource.baseAddress), resource.width, resource.height, resource.format, static_cast<unsigned>(resource.tileMode), static_cast<unsigned>(resource.dimension), resource.mipCount);
+                throw std::runtime_error(message);
+            }
             if (storageImage) {
                 textures.back()->MarkStored();
                 storesImages = true;
@@ -362,7 +382,7 @@ std::string ShaderResources::DescribeTextures() const {
 }
 
 void ShaderResources::WriteBack(std::uint64_t sequence) {
-    if (bda) bda->CheckFault();
+    if (bda) bda->CheckFault(guestMemory);
     guestMemory.WriteBack(sequence);
     for (auto& texture : textures) texture->FlushStores();
 }

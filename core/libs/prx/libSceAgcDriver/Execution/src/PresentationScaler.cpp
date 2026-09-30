@@ -1,5 +1,6 @@
 #include "prx/libSceAgcDriver/Execution/include/PresentationScaler.hpp"
 #include "prx/libSceAgcDriver/Execution/include/AspectFit.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/Resources.hpp"
 
 namespace AgcDriver {
 
@@ -19,8 +20,7 @@ PresentationScaler::~PresentationScaler() {
 }
 
 void PresentationScaler::release() noexcept {
-    if (sourceImage != VK_NULL_HANDLE) context.Function<PFN_vkDestroyImage>("vkDestroyImage")(context.device, sourceImage, nullptr);
-    if (sourceMemory != VK_NULL_HANDLE) context.Function<PFN_vkFreeMemory>("vkFreeMemory")(context.device, sourceMemory, nullptr);
+    Graphics::ReleaseImage(context, VK_NULL_HANDLE, sourceImage, sourceMemory);
     sourceImage = VK_NULL_HANDLE;
     sourceMemory = VK_NULL_HANDLE;
     sourceWidth = 0;

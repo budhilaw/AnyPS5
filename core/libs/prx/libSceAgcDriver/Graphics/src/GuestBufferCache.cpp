@@ -1,4 +1,5 @@
 #include "prx/libSceAgcDriver/Graphics/include/GuestBufferCache.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/ReleaseQueue.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
 #include "prx/libc/include/General.hpp"
@@ -243,11 +244,11 @@ std::shared_ptr<GuestBufferCache::Mirror> GuestBufferCache::import(std::uint64_t
             if (retained != nullptr) GuestMemoryBacking::GuestMemoryBackingReleaseAlias_nid_postfix(retained);
             throw;
         }
-        auto buffer = std::shared_ptr<Buffer>(imported.release(), [retained](Buffer* released) {
+        auto buffer = std::shared_ptr<Buffer>(imported.release(), [retained, releases = context.releaseQueue](Buffer* released) {
             delete released;
-            if (retained != nullptr) GuestMemoryBacking::GuestMemoryBackingReleaseAlias_nid_postfix(retained);
+            if (retained != nullptr) Release(releases, [retained] { GuestMemoryBacking::GuestMemoryBackingReleaseAlias_nid_postfix(retained); });
         });
-        if (reported++ < 4) APS5_LOG_OUT("guest range 0x%llx+%.1f MiB bound in place (host import)", static_cast<unsigned long long>(begin), (end - begin) / 1048576.0);
+        if (reported++ < 4 || end - begin > HostWindowBytes) APS5_LOG_OUT("guest range 0x%llx+%.1f MiB bound in place (host import)", static_cast<unsigned long long>(begin), (end - begin) / 1048576.0);
         auto mirror = std::make_shared<Mirror>(Mirror{begin, end, std::move(buffer), 0, 0});
         mirror->imported = true;
         return mirror;
@@ -258,63 +259,123 @@ std::shared_ptr<GuestBufferCache::Mirror> GuestBufferCache::import(std::uint64_t
     }
 }
 
-GuestBufferCache::HostView GuestBufferCache::HostRange(std::uint64_t address, std::uint64_t bytes) {
+bool GuestBufferCache::hostExtent(std::uint64_t address, std::uint64_t bytes, GuestMemoryBacking::GuestMemoryBackingExtentInfo& extent, std::uint64_t& importBytes) const {
     static const bool disabled = std::getenv("ANYPS5_NO_HOST_VERTEX") != nullptr;
-    if (disabled || !context.hostPointerImport || bytes == 0) return {};
-    GuestMemoryBacking::GuestMemoryBackingExtentInfo extent{};
+    if (disabled || !context.hostPointerImport || bytes == 0) return false;
     const bool found = GuestMemoryBacking::GuestMemoryBackingExtent_nid_postfix(address, static_cast<std::size_t>(bytes), &extent);
     const auto alignment = static_cast<std::uint64_t>(context.hostPointerAlignment);
-    const auto importBytes = extent.bytes / alignment * alignment;
+    importBytes = extent.bytes / alignment * alignment;
     if (!found || reinterpret_cast<std::uintptr_t>(extent.alias) % alignment != 0 || address + bytes > extent.address + importBytes) {
         static const bool trace = std::getenv("ANYPS5_TRACE_WAITS") != nullptr;
         static int reported = 0;
         if (trace && bytes >= (1u << 20) && reported++ < 20) APS5_LOG_OUT("host range 0x%llx+0x%llx unavailable: extent %d 0x%llx+0x%llx alias %p", static_cast<unsigned long long>(address), static_cast<unsigned long long>(bytes), found ? 1 : 0, static_cast<unsigned long long>(extent.address), static_cast<unsigned long long>(extent.bytes), extent.alias);
-        return {};
+        return false;
     }
+    return true;
+}
+
+bool GuestBufferCache::HostImportable(std::uint64_t address, std::uint64_t bytes) const {
+    GuestMemoryBacking::GuestMemoryBackingExtentInfo extent{};
+    std::uint64_t importBytes = 0;
+    return hostExtent(address, bytes, extent, importBytes);
+}
+
+GuestBufferCache::HostView GuestBufferCache::HostRange(std::uint64_t address, std::uint64_t bytes) {
+    GuestMemoryBacking::GuestMemoryBackingExtentInfo extent{};
+    std::uint64_t importBytes = 0;
+    if (!hostExtent(address, bytes, extent, importBytes)) return {};
     std::lock_guard registryLock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
     std::lock_guard lock(mutex);
     if (const auto generation = GuestMemoryBacking::GuestMemoryBackingUnmapGeneration_nid_postfix(); generation != unmapGeneration) {
         unmapGeneration = generation;
         for (auto it = hostMappings.begin(); it != hostMappings.end();) {
             GuestMemoryBacking::GuestMemoryBackingExtentInfo current{};
-            const bool live = GuestMemoryBacking::GuestMemoryBackingExtent_nid_postfix(it->first, 1, &current) && current.address == it->first && current.serial == it->second.serial;
-            static int reported = 0;
-            if (!live && reported++ < 16) APS5_LOG_OUT("guest mapping 0x%llx was unmapped: its import goes once its users finish", static_cast<unsigned long long>(it->first));
-            it = live ? std::next(it) : hostMappings.erase(it);
-        }
-    }
-    auto& mapping = hostMappings[extent.address];
-    if (!mapping.buffer || mapping.serial != extent.serial || mapping.bytes != importBytes) {
-        void* alias = GuestMemoryBacking::GuestMemoryBackingRetainAlias_nid_postfix(extent.address, extent.serial);
-        if (alias == nullptr) {
-            hostMappings.erase(extent.address);
-            return {};
-        }
-        try {
-            const VkBufferUsageFlags usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | (context.bufferDeviceAddress ? VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT : 0u);
-            std::unique_ptr<Buffer> imported;
-            try {
-                imported = std::make_unique<Buffer>(context, Buffer::HostImport{}, alias, static_cast<std::size_t>(importBytes), 0, static_cast<std::size_t>(importBytes), usage);
-            } catch (...) {
-                GuestMemoryBacking::GuestMemoryBackingReleaseAlias_nid_postfix(alias);
-                throw;
+            const bool live = GuestMemoryBacking::GuestMemoryBackingExtent_nid_postfix(it->first, 1, &current) && current.serial == it->second.serial;
+            if (live) {
+                ++it;
+                continue;
             }
-            mapping.buffer = std::shared_ptr<Buffer>(imported.release(), [alias](Buffer* buffer) {
-                delete buffer;
-                GuestMemoryBacking::GuestMemoryBackingReleaseAlias_nid_postfix(alias);
-            });
-            mapping.serial = extent.serial;
-            mapping.bytes = importBytes;
             static int reported = 0;
-            if (reported++ < 8) APS5_LOG_OUT("guest mapping 0x%llx+%.1f MiB imported for vertex and index data", static_cast<unsigned long long>(extent.address), importBytes / 1048576.0);
-        } catch (const std::exception& error) {
-            static int reported = 0;
-            if (reported++ < 4) APS5_LOG_OUT("host import of guest mapping 0x%llx failed (%s); copying its data", static_cast<unsigned long long>(extent.address), error.what());
-            hostMappings.erase(extent.address);
-            return {};
+            if (reported++ < 16) APS5_LOG_OUT("guest mapping 0x%llx was unmapped: its import goes once its users finish", static_cast<unsigned long long>(it->first));
+            hostBytes -= it->second.bytes;
+            it = hostMappings.erase(it);
         }
     }
-    return {mapping.buffer, address - extent.address};
+    if (auto window = hostMappings.upper_bound(address); window != hostMappings.begin()) {
+        auto& [first, mapping] = *std::prev(window);
+        if (mapping.serial == extent.serial && address + bytes <= first + mapping.bytes) {
+            mapping.lastUse = ++hostUses;
+            return {mapping.buffer, address - first};
+        }
+    }
+    const auto first = extent.address + (address - extent.address) / HostWindowBytes * HostWindowBytes;
+    const auto last = std::min(extent.address + importBytes, extent.address + (address + bytes - extent.address + HostWindowBytes - 1) / HostWindowBytes * HostWindowBytes);
+    void* alias = GuestMemoryBacking::GuestMemoryBackingRetainAlias_nid_postfix(extent.address, extent.serial);
+    if (alias == nullptr) return {};
+    std::shared_ptr<Buffer> buffer;
+    try {
+        const VkBufferUsageFlags usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | (context.bufferDeviceAddress ? VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT : 0u);
+        std::unique_ptr<Buffer> imported;
+        try {
+            imported = std::make_unique<Buffer>(context, Buffer::HostImport{}, static_cast<std::byte*>(alias) + (first - extent.address), static_cast<std::size_t>(last - first), 0, static_cast<std::size_t>(last - first), usage);
+        } catch (...) {
+            GuestMemoryBacking::GuestMemoryBackingReleaseAlias_nid_postfix(alias);
+            throw;
+        }
+        buffer = std::shared_ptr<Buffer>(imported.release(), [alias, releases = context.releaseQueue](Buffer* released) {
+            delete released;
+            Release(releases, [alias] { GuestMemoryBacking::GuestMemoryBackingReleaseAlias_nid_postfix(alias); });
+        });
+    } catch (const std::exception& error) {
+        static int reported = 0;
+        if (reported++ < 4) APS5_LOG_OUT("host import of guest range 0x%llx+0x%llx failed (%s); copying its data", static_cast<unsigned long long>(first), static_cast<unsigned long long>(last - first), error.what());
+        return {};
+    }
+    auto& mapping = hostMappings[first];
+    if (mapping.buffer) hostBytes -= mapping.bytes;
+    mapping = {extent.serial, last - first, buffer, ++hostUses};
+    hostBytes += last - first;
+    static int reported = 0;
+    if (reported++ < 8 || last - first > HostWindowBytes) APS5_LOG_OUT("guest range 0x%llx+%.1f MiB imported for vertex, index and buffer data (request 0x%llx+0x%llx, %.1f MiB imported in all)", static_cast<unsigned long long>(first), (last - first) / 1048576.0, static_cast<unsigned long long>(address), static_cast<unsigned long long>(bytes), hostBytes / 1048576.0);
+    trimHost();
+    return {std::move(buffer), address - first};
+}
+
+std::vector<std::pair<std::uint64_t, std::uint64_t>> GuestBufferCache::AddressWindows(std::uint64_t begin, std::uint64_t end, std::span<const std::pair<std::uint64_t, std::uint64_t>> required) {
+    std::lock_guard lock(mutex);
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> windows;
+    for (auto it = addressWindows.lower_bound(begin - begin % HostWindowBytes); it != addressWindows.end() && *it < end; ++it) windows.emplace_back(*it, *it + HostWindowBytes);
+    for (const auto& [first, last] : required) {
+        if (last <= begin || end <= first) continue;
+        windows.emplace_back(first - first % HostWindowBytes, (last + HostWindowBytes - 1) / HostWindowBytes * HostWindowBytes);
+    }
+    std::sort(windows.begin(), windows.end());
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> merged;
+    for (const auto& window : windows) {
+        const auto first = std::max(window.first, begin);
+        const auto last = std::min(window.second, end);
+        if (first >= last) continue;
+        if (!merged.empty() && first <= merged.back().second) merged.back().second = std::max(merged.back().second, last);
+        else merged.emplace_back(first, last);
+    }
+    return merged;
+}
+
+bool GuestBufferCache::LearnAddress(std::uint64_t address) {
+    std::lock_guard lock(mutex);
+    return addressWindows.insert(address - address % HostWindowBytes).second;
+}
+
+void GuestBufferCache::trimHost() {
+    while (hostBytes > HostBudgetBytes) {
+        auto oldest = hostMappings.end();
+        for (auto it = hostMappings.begin(); it != hostMappings.end(); ++it) {
+            if (oldest == hostMappings.end() || it->second.lastUse < oldest->second.lastUse) oldest = it;
+        }
+        if (oldest == hostMappings.end() || oldest->second.lastUse == hostUses) return;
+        hostBytes -= oldest->second.bytes;
+        hostMappings.erase(oldest);
+    }
 }
 
 std::shared_ptr<Buffer> GuestBufferCache::ImageCopy(const std::shared_ptr<const GuestAllocations::Range>& range, std::uint64_t padding, VkBufferUsageFlags usage) {

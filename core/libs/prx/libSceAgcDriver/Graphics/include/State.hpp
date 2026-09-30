@@ -45,6 +45,8 @@ struct DepthTarget {
     VkFormat format;
     bool stencil;
     std::uint64_t stencilAddress = 0;
+    std::uint64_t writeAddress = 0;
+    std::uint64_t stencilWriteAddress = 0;
 };
 
 struct DepthState {
@@ -73,6 +75,7 @@ struct State {
     VkExtent2D renderExtent;
     VkPrimitiveTopology topology;
     VkViewport viewport;
+    bool emptyViewport = false;
     bool negativeOneToOne;
     VkRect2D scissor;
     VkCullModeFlags cullMode;

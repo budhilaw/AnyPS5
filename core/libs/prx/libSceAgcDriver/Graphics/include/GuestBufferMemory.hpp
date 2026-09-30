@@ -20,9 +20,11 @@ class GuestBufferMemory {
 public:
     static constexpr std::uint64_t ViewAlignment = 256;
     explicit GuestBufferMemory(const Context& context);
-    void AcquireRegistered();
+    void AcquireRegistered(std::span<const GuestMemorySnapshot> snapshots);
+    bool LearnAddress(std::uint64_t address) const;
     void AddWritable(std::uint64_t address, std::size_t bytes, bool checked = false);
     void AddReadOnly(std::uint64_t address, std::size_t bytes, bool checked = false);
+    bool OverlapsImmutable(std::uint64_t address, std::uint64_t bytes) const;
     void AddSnapshot(const GuestMemorySnapshot& snapshot);
     void Upload(bool addressable);
     VkDescriptorBufferInfo Descriptor(std::uint64_t address, std::size_t bytes) const;

@@ -1,4 +1,6 @@
 #include "prx/libSceAgcDriver/Graphics/include/GuestTextureResource.hpp"
+#include "prx/libc/include/General.hpp"
+#include <mutex>
 #include "prx/libSceAgcDriver/Graphics/include/Context.hpp"
 #include <stdexcept>
 #include <cstdio>
@@ -86,8 +88,10 @@ GuestTextureResource DecodeTextureResource(std::span<const std::uint32_t> words)
     requireValidDstSel(dstSelZ);
     requireValidDstSel(dstSelW);
 
-    Require(minLod == 0, "guest texture descriptor uses a nonzero minimum LOD clamp which is not implemented");
-    Require(minLodWarn == 0, "guest texture descriptor uses a minimum LOD warning threshold which is not implemented");
+    if (minLod != 0 || minLodWarn != 0) {
+        static std::once_flag once;
+        std::call_once(once, [&] { APS5_LOG_OUT("guest texture descriptors use a minimum LOD clamp (0x%x, warn 0x%x); sampling ignores it", static_cast<unsigned>(minLod), static_cast<unsigned>(minLodWarn)); });
+    }
     Require(mipStatsCntId == 0 && !mipStatsCntEn, "guest texture descriptor uses mip statistics counters which are not implemented");
     Require(!cornerSample, "guest texture descriptor uses corner sampling which is not implemented");
     Require(!prtDefColor, "guest texture descriptor uses a partially resident default color which is not implemented");

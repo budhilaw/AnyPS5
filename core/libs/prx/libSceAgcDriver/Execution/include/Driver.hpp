@@ -7,6 +7,7 @@
 namespace AgcDriver {
 
 void Submit(const Packet* packet, std::uint32_t queue);
+void Submit(const Packet* packets, std::uint32_t count, std::uint32_t queue);
 
 }
 

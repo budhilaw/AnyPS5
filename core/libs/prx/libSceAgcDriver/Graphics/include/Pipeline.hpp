@@ -14,6 +14,7 @@ public:
     VkPipelineLayout Layout() const;
     void BeginPass(VkCommandBuffer commands, VkExtent2D extent) const;
     void Bind(VkCommandBuffer commands) const;
+    void SetViewport(VkCommandBuffer commands, const State& state) const;
     VkPipeline Handle() const { return pipeline; }
 private:
     VkClearValue clearValues[9]{};
@@ -31,6 +32,7 @@ private:
     VkPipeline pipeline = VK_NULL_HANDLE;
 };
 
+void RequireValidViewport(const Context& context, const State& state);
 void ValidateShaderPair(const ShaderRecompiler::RecompileResult& vertex, const ShaderRecompiler::RecompileResult& fragment);
 void ValidateShaders(std::span<const CompiledShader> shaders, const State& state, const VkPhysicalDeviceSubgroupProperties& subgroup, bool fragmentShaderBarycentric);
 

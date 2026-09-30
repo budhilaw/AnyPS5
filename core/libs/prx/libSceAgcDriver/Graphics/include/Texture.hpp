@@ -22,7 +22,7 @@ public:
     Texture(const Context& context, const std::shared_ptr<ResidentColor>& source, const GuestTextureResource& descriptor, VkComponentMapping components, DirectView);
     bool IsDirectView() const { return directView; }
     Texture(const Context& context, const std::shared_ptr<Texture>& shared, const GuestTextureResource& descriptor, VkComponentMapping components);
-    Texture(const Context& context, const std::shared_ptr<DepthImage>& source, bool stencil, const GuestTextureResource& descriptor, VkComponentMapping components);
+    Texture(const Context& context, std::span<const std::shared_ptr<DepthImage>> sources, bool stencil, const GuestTextureResource& descriptor, VkComponentMapping components, bool compare = false);
     Texture(const Context& context, TextureDimension dimension);
     ~Texture();
     Texture(const Texture&) = delete;
@@ -65,7 +65,7 @@ private:
     bool stored = false;
     VkDeviceSize allocationBytes = 0;
     std::shared_ptr<ResidentColor> source;
-    std::shared_ptr<DepthImage> depthSource;
+    std::vector<std::shared_ptr<DepthImage>> depthSources;
     std::uint64_t guestAddress = 0;
     TextureTileMode guestTileMode = TextureTileMode::kLinear;
     VkFormat guestFormat = VK_FORMAT_UNDEFINED;

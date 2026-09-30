@@ -24,6 +24,7 @@ private:
     VkDevice device;
     PFN_vkDestroyDescriptorPool destroyPool;
     PFN_vkDestroyDescriptorSetLayout destroyLayout;
+    std::shared_ptr<ReleaseQueue> releases;
     std::vector<std::uint32_t> key;
     VkDescriptorSetLayout layout = VK_NULL_HANDLE;
     VkDescriptorSet set = VK_NULL_HANDLE;

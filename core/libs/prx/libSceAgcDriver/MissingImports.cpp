@@ -36,9 +36,6 @@ int APS5_VABI libSceAgcDriverUnknown_ls4jfY576lw() { NotImplemented_nid_no_patch
 APS5_EXPORT("mXn+K9E-wOA", libSceAgcDriverUnknown_mXn_plus_K9E_minus_wOA);
 int APS5_VABI libSceAgcDriverUnknown_mXn_plus_K9E_minus_wOA() { NotImplemented_nid_no_patch(__func__); return 0; }
 
-APS5_EXPORT("n5ElQVYsU1A", libSceAgcDriverUnknown_n5ElQVYsU1A);
-int APS5_VABI libSceAgcDriverUnknown_n5ElQVYsU1A() { NotImplemented_nid_no_patch(__func__); return 0; }
-
 APS5_EXPORT("rI9lNAXPMIw", libSceAgcDriverUnknown_rI9lNAXPMIw);
 int APS5_VABI libSceAgcDriverUnknown_rI9lNAXPMIw() { NotImplemented_nid_no_patch(__func__); return 0; }
 

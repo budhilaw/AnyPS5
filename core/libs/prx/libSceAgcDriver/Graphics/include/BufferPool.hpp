@@ -46,6 +46,7 @@ private:
     PFN_vkUnmapMemory unmap;
     PFN_vkDestroyBuffer destroyBuffer;
     PFN_vkFreeMemory freeMemory;
+    std::shared_ptr<ReleaseQueue> releases;
     std::mutex mutex;
     std::array<Slot, capacity> slots;
     std::array<std::size_t, bucketCount> buckets;

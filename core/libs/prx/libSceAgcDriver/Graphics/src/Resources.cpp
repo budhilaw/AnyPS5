@@ -1,6 +1,8 @@
 #include "prx/libSceAgcDriver/Graphics/include/Resources.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/BufferPool.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/ReleaseQueue.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
+#include "prx/libc/include/General.hpp"
 #include <exception>
 
 namespace AgcDriver::Graphics {
@@ -34,6 +36,7 @@ Buffer::Buffer(const Context& context, std::size_t size, VkBufferUsageFlags usag
         allocationBytes = requirements.size;
         allocation.memoryTypeIndex = context.MemoryType(requirements.memoryTypeBits, properties);
         Check(context.Function<PFN_vkAllocateMemory>("vkAllocateMemory")(context.device, &allocation, nullptr, &memory), "vkAllocateMemory buffer");
+        if (requirements.size >= (256ull << 20)) APS5_LOG_OUT("GPU buffer of %.1f MiB allocated (usage 0x%x)", requirements.size / 1048576.0, static_cast<unsigned>(usage));
         Check(context.Function<PFN_vkBindBufferMemory>("vkBindBufferMemory")(context.device, buffer, memory, 0), "vkBindBufferMemory");
         initializeAddress(usage);
         if ((properties & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) != 0) Check(context.Function<PFN_vkMapMemory>("vkMapMemory")(context.device, memory, 0, VK_WHOLE_SIZE, 0, &mapping), "vkMapMemory");
@@ -89,9 +92,12 @@ void Buffer::release() noexcept {
         cache->Put({buffer, memory, mapping, deviceAddress, allocationBytes, size, usage, properties});
         return;
     }
-    if (mapping && !imported) context.Function<PFN_vkUnmapMemory>("vkUnmapMemory")(context.device, memory);
-    if (buffer) context.Function<PFN_vkDestroyBuffer>("vkDestroyBuffer")(context.device, buffer, nullptr);
-    if (memory) context.Function<PFN_vkFreeMemory>("vkFreeMemory")(context.device, memory, nullptr);
+    if (!buffer && !memory) return;
+    Release(context.releaseQueue, [device = context.device, unmap = mapping && !imported ? context.Function<PFN_vkUnmapMemory>("vkUnmapMemory") : nullptr, destroyBuffer = context.Function<PFN_vkDestroyBuffer>("vkDestroyBuffer"), freeMemory = context.Function<PFN_vkFreeMemory>("vkFreeMemory"), buffer = buffer, memory = memory] {
+        if (unmap) unmap(device, memory);
+        if (buffer) destroyBuffer(device, buffer, nullptr);
+        if (memory) freeMemory(device, memory, nullptr);
+    });
 }
 
 VkBuffer Buffer::Handle() const {
@@ -109,6 +115,15 @@ void Buffer::Invalidate() {
     range.memory = memory;
     range.size = VK_WHOLE_SIZE;
     Check(context.Function<PFN_vkInvalidateMappedMemoryRanges>("vkInvalidateMappedMemoryRanges")(context.device, 1, &range), "vkInvalidateMappedMemoryRanges");
+}
+
+void ReleaseImage(const Context& context, VkImageView view, VkImage image, VkDeviceMemory memory) {
+    if (!view && !image && !memory) return;
+    Release(context.releaseQueue, [device = context.device, destroyView = context.Function<PFN_vkDestroyImageView>("vkDestroyImageView"), destroyImage = context.Function<PFN_vkDestroyImage>("vkDestroyImage"), freeMemory = context.Function<PFN_vkFreeMemory>("vkFreeMemory"), view, image, memory] {
+        if (view) destroyView(device, view, nullptr);
+        if (image) destroyImage(device, image, nullptr);
+        if (memory) freeMemory(device, memory, nullptr);
+    });
 }
 
 VkFormat StorageFormat(VkFormat format) {
@@ -174,9 +189,7 @@ RenderTarget::~RenderTarget() {
 }
 
 void RenderTarget::release() noexcept {
-    if (view) context.Function<PFN_vkDestroyImageView>("vkDestroyImageView")(context.device, view, nullptr);
-    if (image) context.Function<PFN_vkDestroyImage>("vkDestroyImage")(context.device, image, nullptr);
-    if (memory) context.Function<PFN_vkFreeMemory>("vkFreeMemory")(context.device, memory, nullptr);
+    ReleaseImage(context, view, image, memory);
 }
 
 VkImage RenderTarget::Image() const {
@@ -233,9 +246,7 @@ DepthImage::~DepthImage() {
 }
 
 void DepthImage::release() noexcept {
-    if (view) context.Function<PFN_vkDestroyImageView>("vkDestroyImageView")(context.device, view, nullptr);
-    if (image) context.Function<PFN_vkDestroyImage>("vkDestroyImage")(context.device, image, nullptr);
-    if (memory) context.Function<PFN_vkFreeMemory>("vkFreeMemory")(context.device, memory, nullptr);
+    ReleaseImage(context, view, image, memory);
 }
 
 void DepthImage::Prepare(VkCommandBuffer commands) {

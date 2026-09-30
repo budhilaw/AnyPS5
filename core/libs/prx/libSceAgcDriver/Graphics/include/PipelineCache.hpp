@@ -2,6 +2,8 @@
 #define CORE_LIBS_PRX_LIBSCEAGCDRIVER_GRAPHICS_INCLUDE_PIPELINECACHE_HPP
 
 #include "prx/libSceAgcDriver/Graphics/include/Context.hpp"
+#include <atomic>
+#include <chrono>
 #include <mutex>
 #include <string>
 
@@ -17,12 +19,16 @@ public:
     PipelineCache& operator=(const PipelineCache&) = delete;
     VkPipelineCache Handle() const { return cache; }
     void Save();
+    void NoteCreated() { created.store(true, std::memory_order_relaxed); }
+    void SaveIfDue();
 
 private:
     Context context;
     VkPipelineCache cache = VK_NULL_HANDLE;
     std::string path;
     std::mutex saving;
+    std::atomic<bool> created{false};
+    std::chrono::steady_clock::time_point lastSave = std::chrono::steady_clock::now();
 };
 
 }

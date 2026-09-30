@@ -317,10 +317,8 @@ void Texture::release() noexcept {
     upload.reset();
     staging.reset();
     linear.reset();
-    if (storageView) context.Function<PFN_vkDestroyImageView>("vkDestroyImageView")(context.device, storageView, nullptr);
-    if (view) context.Function<PFN_vkDestroyImageView>("vkDestroyImageView")(context.device, view, nullptr);
-    if (ownsImage && image) context.Function<PFN_vkDestroyImage>("vkDestroyImage")(context.device, image, nullptr);
-    if (ownsImage && memory) context.Function<PFN_vkFreeMemory>("vkFreeMemory")(context.device, memory, nullptr);
+    ReleaseImage(context, storageView, VK_NULL_HANDLE, VK_NULL_HANDLE);
+    ReleaseImage(context, view, ownsImage ? image : VK_NULL_HANDLE, ownsImage ? memory : VK_NULL_HANDLE);
     sharedImage.reset();
 }
 

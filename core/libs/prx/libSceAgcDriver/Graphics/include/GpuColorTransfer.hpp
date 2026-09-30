@@ -21,6 +21,7 @@ public:
     void WriteBackTracked(std::uint64_t address);
     bool MatchesGuest(std::uint64_t address);
     VkBuffer LinearBuffer() const;
+    const std::shared_ptr<Buffer>& UploadSource() const { return uploadSource; }
     RenderTarget& Target(const ColorTarget& color, bool blending);
 
 private:

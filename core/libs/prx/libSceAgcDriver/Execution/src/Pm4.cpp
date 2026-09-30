@@ -7,6 +7,7 @@
 #include <thread>
 #include "prx/libSceAgcDriver/Execution/include/Pm4.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
+#include "prx/libSceAgcDriver/Execution/include/GpuJournal.hpp"
 #include "prx/libc/include/General.hpp"
 #include <algorithm>
 #include <cstdio>
@@ -47,7 +48,7 @@ Registers& registersFor(QueueState& queue, std::uint32_t opcode) {
 }
 
 void writeRegister(QueueState& queue, std::uint32_t opcode, std::uint32_t offset, std::uint32_t value) {
-    if (offset == 0x80 && value != 0) {
+    if (offset == 0x80 && value != 0 && &registersFor(queue, opcode) == &queue.context) {
         static std::once_flag once;
         std::call_once(once, [&] { std::fprintf(stderr, "AGC driver: PA_SC_WINDOW_OFFSET written with 0x%08x by packet opcode 0x%02x\n", value, opcode); });
     }
@@ -66,6 +67,12 @@ std::uint32_t dmaSource(std::span<const std::uint32_t> packet) {
 std::uint32_t dmaDestination(std::span<const std::uint32_t> packet) {
     return ((packet[1] >> 20u) & 3u) | ((packet[6] >> 25u) & 4u) | ((packet[6] >> 26u) & 8u);
 }
+
+constexpr std::uint32_t DmaNowhere = 2;
+constexpr std::uint32_t PixelPipeStatDump = 0x39;
+constexpr std::uint32_t OcclusionRenderBackends = 16;
+constexpr std::uint64_t OcclusionVisibleSamples = 1u << 20u;
+constexpr std::uint64_t OcclusionResultValid = 1ull << 63u;
 
 void copyMemory(std::uint64_t source, std::uint64_t destination, std::size_t bytes, bool immediate) {
     if (bytes == 0) return;
@@ -240,6 +247,11 @@ void Validate(std::span<const std::uint32_t> packet, std::uint32_t queue) {
                     size(2);
                     require(eventIndex == 0 || eventIndex == 7, "invalid cache-flush event index");
                     break;
+                case PixelPipeStatDump:
+                    graphics();
+                    size(4);
+                    require(eventIndex == 1 && (packet[2] & 7u) == 0 && (packet[2] | packet[3]) != 0, "invalid pixel pipe statistics dump");
+                    break;
                 default: throw std::runtime_error("EVENT_WRITE event type " + std::to_string(eventType) + " is not implemented");
             }
             break;
@@ -283,7 +295,7 @@ void Validate(std::span<const std::uint32_t> packet, std::uint32_t queue) {
             break;
         case 0x37: {
             require(packet.size() >= 5, "WRITE_DATA has no data");
-            require((packet[1] & ~0x06110f00u) == 0, "WRITE_DATA engine or reserved fields are not implemented");
+            require((packet[1] & ~0xc6110f00u) == 0, "WRITE_DATA reserved fields are not implemented");
             const auto destination = (packet[1] >> 8u) & 0xfu;
             require(destination == 1 || destination == 2 || (queue != 0 && destination == 5), "WRITE_DATA register or GDS destination is not implemented");
             require((packet[2] & 3u) == 0, "misaligned WRITE_DATA destination");
@@ -307,6 +319,10 @@ void Validate(std::span<const std::uint32_t> packet, std::uint32_t queue) {
                 if (dmaDestination(packet) == 1) require(packet[4] <= 0x10000u && bytes <= 0x10000u - packet[4], "DMA_DATA GDS destination exceeds the GDS size");
                 if (dmaSource(packet) == 1) require(packet[2] <= 0x10000u && bytes <= 0x10000u - packet[2], "DMA_DATA GDS source exceeds the GDS size");
                 require(dmaDestination(packet) == 1 ? memorySelector(dmaSource(packet)) || dmaSource(packet) == 2 : memorySelector(dmaDestination(packet)), "DMA_DATA GDS transfer with a register or GDS peer is not implemented");
+                break;
+            }
+            if (dmaDestination(packet) == DmaNowhere) {
+                require(memorySelector(dmaSource(packet)), "DMA_DATA prefetch from a register, GDS or immediate source is not implemented");
                 break;
             }
             if (!memorySelector(dmaDestination(packet))) {
@@ -343,6 +359,7 @@ bool TryWait(std::span<const std::uint32_t> packet, const std::function<bool(std
 bool DmaGdsDestination(std::span<const std::uint32_t> packet) { return dmaDestination(packet) == 1; }
 bool DmaGdsSource(std::span<const std::uint32_t> packet) { return dmaSource(packet) == 1; }
 bool DmaImmediateSource(std::span<const std::uint32_t> packet) { return dmaSource(packet) == 2; }
+bool EventWritesMemory(std::span<const std::uint32_t> packet) { return ((packet[0] >> 8u) & 0xffu) == 0x46 && (packet[1] & 0x3fu) == PixelPipeStatDump; }
 
 void TransferRanges(std::span<const std::uint32_t> packet, std::uint64_t& destination, std::size_t& destinationBytes, std::uint64_t& source, std::size_t& sourceBytes) {
     destination = source = 0;
@@ -362,7 +379,7 @@ void TransferRanges(std::span<const std::uint32_t> packet, std::uint64_t& destin
         }
         case 0x50: {
             const auto bytes = static_cast<std::size_t>(packet[6] & 0x3ffffffu);
-            if (dmaDestination(packet) != 1) { destination = address(packet[4], packet[5]); destinationBytes = bytes; }
+            if (dmaDestination(packet) != 1 && dmaDestination(packet) != DmaNowhere) { destination = address(packet[4], packet[5]); destinationBytes = bytes; }
             if (dmaSource(packet) != 2 && dmaSource(packet) != 1) { source = address(packet[2], packet[3]); sourceBytes = bytes; }
             break;
         }
@@ -390,7 +407,7 @@ bool DeferrableWrite(std::span<const std::uint32_t> packet, std::uint64_t& addre
         }
         case 0x50: {
             const auto size = packet[6] & 0x3ffffffu;
-            if (dmaSource(packet) != 2 || dmaDestination(packet) == 1 || (size != 4 && size != 8)) return false;
+            if (dmaSource(packet) != 2 || dmaDestination(packet) == 1 || dmaDestination(packet) == DmaNowhere || (size != 4 && size != 8)) return false;
             address_ = address(packet[4], packet[5]);
             bytes = size;
             value = size == 8 ? address(packet[2], packet[3]) : packet[2];
@@ -569,6 +586,16 @@ void Execute(std::span<const std::uint32_t> packet, QueueState& queue) {
         case 0x83:
             GuestMemory::Write(address(packet[3], packet[4]), std::as_bytes(std::span(queue.constantRam).subspan(packet[1] / 4, packet[2])), 4);
             return;
+        case 0x46: {
+            require((packet[1] & 0x3fu) == PixelPipeStatDump, "EVENT_WRITE without memory results is executed by the driver");
+            const auto destination = address(packet[2], packet[3]);
+            const bool end = (destination & 8u) != 0;
+            for (std::uint32_t backend = 0; backend < OcclusionRenderBackends; ++backend) {
+                const std::uint64_t value = OcclusionResultValid | (end && backend == 0 ? OcclusionVisibleSamples : 0);
+                GuestMemory::Write(destination + backend * 16u, std::as_bytes(std::span(&value, 1)), 8);
+            }
+            return;
+        }
         case 0x37: {
             const auto destination = address(packet[2], packet[3]);
             static const bool traceWrites = std::getenv("ANYPS5_TRACE_LABELS") != nullptr;
@@ -587,8 +614,14 @@ void Execute(std::span<const std::uint32_t> packet, QueueState& queue) {
         }
         case 0x50: {
             require(!DmaGdsDestination(packet) && !DmaGdsSource(packet), "GDS DMA_DATA transfers are executed by the driver, not the packet executor");
+            if (dmaDestination(packet) == DmaNowhere) return;
             static const bool traceDma = std::getenv("ANYPS5_TRACE_LABELS") != nullptr;
             if (traceDma && (packet[6] & 0x3ffffffu) <= 64) std::fprintf(stderr, "[write] dma 0x%llx from 0x%llx (%s) %u bytes\n", static_cast<unsigned long long>(address(packet[4], packet[5])), static_cast<unsigned long long>(address(packet[2], packet[3])), dmaSource(packet) == 2 ? "immediate" : "memory", packet[6] & 0x3ffffffu);
+            if ((packet[6] & 0x3ffffffu) >= 4096u) {
+                char text[96];
+                std::snprintf(text, sizeof(text), "dma 0x%llx <- 0x%llx %u bytes%s", static_cast<unsigned long long>(address(packet[4], packet[5])), static_cast<unsigned long long>(address(packet[2], packet[3])), packet[6] & 0x3ffffffu, dmaSource(packet) == 2 ? " (fill)" : "");
+                GpuJournal::Record(text);
+            }
             copyMemory(address(packet[2], packet[3]), address(packet[4], packet[5]), packet[6] & 0x3ffffffu, dmaSource(packet) == 2);
             return;
         }

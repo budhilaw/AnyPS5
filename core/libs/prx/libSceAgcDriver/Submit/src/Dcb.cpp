@@ -4,11 +4,26 @@
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include <algorithm>
 #include <iterator>
+#include <stdexcept>
+#include <vector>
 
 #include <cstdint>
 #include <cstddef>
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
+
+namespace {
+
+std::vector<Packet> Packets(std::uint32_t* const* addresses, const std::uint32_t* sizes, std::uint32_t count) {
+    if (count == 0 || addresses == nullptr || sizes == nullptr) throw std::invalid_argument("AGC driver: invalid multi-buffer submission");
+    AgcDriver::GuestMemory::CheckRange(addresses, sizeof(*addresses) * count, alignof(std::uint32_t*));
+    AgcDriver::GuestMemory::CheckRange(sizes, sizeof(*sizes) * count, alignof(std::uint32_t));
+    std::vector<Packet> packets(count);
+    for (std::uint32_t index = 0; index < count; ++index) packets[index] = Packet{addresses[index], sizes[index], 0, {}};
+    return packets;
+}
+
+}
 
 extern "C" {
 
@@ -34,11 +49,8 @@ int APS5_VABI sceAgcDriverSubmitDcb(const Packet* packet) {
 }
 
 int APS5_VABI sceAgcDriverSubmitMultiDcbs(uint32_t* const* dcb_gpu_addrs, const uint32_t* dcb_sizes_in_dwords, uint32_t count) {
- (void)dcb_gpu_addrs;
- (void)dcb_sizes_in_dwords;
- (void)count;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+    AgcDriver::Submit(Packets(dcb_gpu_addrs, dcb_sizes_in_dwords, count).data(), count, 0);
+    return 0;
 }
 
 int APS5_VABI sceAgcDriverAgrSubmitDcb(const Packet* packet) {
@@ -47,10 +59,7 @@ int APS5_VABI sceAgcDriverAgrSubmitDcb(const Packet* packet) {
 }
 
 int APS5_VABI sceAgcDriverAgrSubmitMultiDcbs(std::uint32_t* const* dcbGpuAddrs, const std::uint32_t* dcbSizesInDwords, std::uint32_t count) {
-    (void)dcbGpuAddrs;
-    (void)dcbSizesInDwords;
-    (void)count;
-    NotImplemented_nid_no_patch(__func__);
+    AgcDriver::Submit(Packets(dcbGpuAddrs, dcbSizesInDwords, count).data(), count, 0);
     return 0;
 }
 

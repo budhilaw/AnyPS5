@@ -88,7 +88,10 @@ public:
     }
 
     void IncludeSubmission(std::uint64_t serial, Clock::time_point received, Clock::time_point enqueued, Clock::time_point dequeued, bool firstSegment) {
-        if (serial == 0 || received > enqueued || enqueued > dequeued) throw std::runtime_error("Frame timing: invalid submission timestamps");
+        if (serial == 0 || received > enqueued || enqueued > dequeued) {
+            broken = true;
+            return;
+        }
         if (firstSerial == 0) {
             firstSerial = serial;
             start = received;
@@ -103,7 +106,7 @@ public:
     }
 
     void SetFlip(std::uint64_t serial, std::size_t offset, Clock::time_point received, Clock::time_point reached) {
-        if (serial != lastSerial || received > reached || executionStart > reached) throw std::runtime_error("Frame timing: invalid flip lineage");
+        if (serial != lastSerial || received > reached || executionStart > reached) broken = true;
         flipSerial = serial;
         flipOffset = offset;
         flipReceived = received;
@@ -112,7 +115,7 @@ public:
 
     void Print(std::uint32_t outputHandle, std::int32_t buffer, std::int64_t argument, Clock::time_point finished, Clock::duration interval) {
         std::lock_guard lock(mutex);
-        if (firstSerial == 0 || flipSerial == 0) throw std::runtime_error("Frame timing: incomplete submission lineage");
+        if (broken || firstSerial == 0 || flipSerial == 0) return;
         std::ostringstream output;
         output.imbue(std::locale::classic());
         output << std::fixed << std::setprecision(3);
@@ -182,6 +185,7 @@ private:
     std::uint64_t firstSerial = 0;
     std::uint64_t lastSerial = 0;
     std::uint64_t flipSerial = 0;
+    bool broken = false;
     std::size_t flipOffset = 0;
     Clock::time_point start{};
     Clock::time_point executionStart{};

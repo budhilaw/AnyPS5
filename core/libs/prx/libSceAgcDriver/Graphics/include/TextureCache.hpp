@@ -14,10 +14,11 @@ namespace AgcDriver::Graphics {
 class TextureCache {
 public:
     explicit TextureCache(const Context& context);
-    std::shared_ptr<Texture> Get(std::span<const std::uint32_t> words, const GuestTextureResource& resource, VkComponentMapping components);
+    std::shared_ptr<Texture> Get(std::span<const std::uint32_t> words, const GuestTextureResource& resource, VkComponentMapping components, bool storage = false, bool compare = false);
     std::shared_ptr<Texture> Null(TextureDimension dimension);
     void DumpTextures(const std::string& prefix);
     std::string DescribeContents(const Texture& texture);
+    std::vector<unsigned char> Contents(const Texture& texture);
 
 private:
     struct Surface {
@@ -33,13 +34,14 @@ private:
         std::shared_ptr<Texture> texture;
         std::shared_ptr<Surface> surface;
         std::weak_ptr<ResidentColor> source;
-        std::weak_ptr<DepthImage> depthSource;
+        std::vector<std::weak_ptr<DepthImage>> depthSources;
         std::uint64_t generation = 0;
         std::uint64_t retained = 0;
+        bool compare = false;
     };
     void trim();
     std::list<Entry>::iterator eraseEntry(std::list<Entry>::iterator it);
-    std::list<Entry>::iterator findEntry(const std::array<std::uint32_t, 8>& descriptor, TextureDimension viewDimension);
+    std::list<Entry>::iterator findEntry(const std::array<std::uint32_t, 8>& descriptor, TextureDimension viewDimension, bool compare = false);
     void addEntry(Entry entry);
     static std::uint64_t descriptorHash(const std::array<std::uint32_t, 8>& descriptor);
     static bool SameSurface(const GuestTextureResource& a, const GuestTextureResource& b);

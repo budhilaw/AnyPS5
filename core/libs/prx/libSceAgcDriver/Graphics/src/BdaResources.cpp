@@ -3,6 +3,7 @@
 #include <cstring>
 #include <limits>
 #include <sstream>
+#include "prx/libc/include/General.hpp"
 
 namespace AgcDriver::Graphics {
 
@@ -34,7 +35,7 @@ VkDescriptorBufferInfo BdaResources::Fault() const {
     return {fault->Handle(), 0, sizeof(ShaderRecompiler::BdaAbi::Fault)};
 }
 
-void BdaResources::CheckFault() const {
+void BdaResources::CheckFault(const GuestBufferMemory& memory) const {
     ShaderRecompiler::BdaAbi::Fault report{};
     std::memcpy(&report, fault->Bytes().data(), sizeof(report));
     if (report.state == ShaderRecompiler::BdaAbi::FaultState::Empty) {
@@ -43,6 +44,12 @@ void BdaResources::CheckFault() const {
     }
     Require(report.state == ShaderRecompiler::BdaAbi::FaultState::Ready && report.reserved == 0, "incomplete or invalid BDA fault record");
     Require(report.reason != ShaderRecompiler::BdaAbi::FaultReason::InvalidRectangle, "rect-list requires finite nondegenerate axis-aligned positions with equal positive W");
+    if (report.reason == ShaderRecompiler::BdaAbi::FaultReason::Unmapped) {
+        const bool learned = memory.LearnAddress(report.address);
+        static int reported = 0;
+        if (reported++ < 64) APS5_LOG_OUT("BDA access to 0x%llx (instruction 0x%x, %u bytes) found no GPU mapping: %s", static_cast<unsigned long long>(report.address), report.instruction, report.bytes, learned ? "its window is mapped from now on" : "it is outside guest GPU memory and the invocation stopped");
+        return;
+    }
     std::ostringstream message;
     message << "BDA access failed: address=0x" << std::hex << report.address << " instruction=0x" << report.instruction << std::dec << " bytes=" << report.bytes << " stage=" << report.stage << " reason=" << static_cast<std::uint32_t>(report.reason);
     throw std::runtime_error(message.str());

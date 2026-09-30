@@ -1,8 +1,12 @@
 #include "prx/libSceAgcDriver/Execution/include/VulkanLibrary.hpp"
 #include <SDL.h>
 #include <array>
+#include <mutex>
 #include <stdexcept>
 #include <string>
+#if defined(__APPLE__)
+#include <dlfcn.h>
+#endif
 
 namespace AgcDriver {
 namespace {
@@ -70,5 +74,59 @@ const char* ResolveVulkanLibrary() {
     static const std::string resolved = resolve();
     return resolved.c_str();
 }
+
+#if defined(__APPLE__)
+namespace {
+
+using Object = void*;
+using Selector = void*;
+
+struct MetalRuntime {
+    Object (*createDevice)() = nullptr;
+    Selector (*selector)(const char*) = nullptr;
+    void* (*classOf)(Object) = nullptr;
+    void* (*instanceMethod)(void*, Selector) = nullptr;
+    void* (*setImplementation)(void*, void*) = nullptr;
+    void* send = nullptr;
+    Selector retainReferences = nullptr;
+    void* commandBuffer = nullptr;
+};
+
+MetalRuntime metal;
+
+Object retainedCommandBuffer(Object queue, Selector command, Object descriptor) {
+    reinterpret_cast<void (*)(Object, Selector, bool)>(metal.send)(descriptor, metal.retainReferences, true);
+    return reinterpret_cast<Object (*)(Object, Selector, Object)>(metal.commandBuffer)(queue, command, descriptor);
+}
+
+}
+
+void RetainMetalCommandReferences() {
+    static std::once_flag once;
+    std::call_once(once, [] {
+        metal.createDevice = reinterpret_cast<Object (*)()>(dlsym(RTLD_DEFAULT, "MTLCreateSystemDefaultDevice"));
+        metal.selector = reinterpret_cast<Selector (*)(const char*)>(dlsym(RTLD_DEFAULT, "sel_registerName"));
+        metal.classOf = reinterpret_cast<void* (*)(Object)>(dlsym(RTLD_DEFAULT, "object_getClass"));
+        metal.instanceMethod = reinterpret_cast<void* (*)(void*, Selector)>(dlsym(RTLD_DEFAULT, "class_getInstanceMethod"));
+        metal.setImplementation = reinterpret_cast<void* (*)(void*, void*)>(dlsym(RTLD_DEFAULT, "method_setImplementation"));
+        metal.send = dlsym(RTLD_DEFAULT, "objc_msgSend");
+        if (!metal.createDevice || !metal.selector || !metal.classOf || !metal.instanceMethod || !metal.setImplementation || !metal.send) throw std::runtime_error("Vulkan loader: the Metal runtime is unavailable");
+        const auto send = reinterpret_cast<Object (*)(Object, Selector)>(metal.send);
+        const auto device = metal.createDevice();
+        if (device == nullptr) throw std::runtime_error("Vulkan loader: no Metal device");
+        const auto queue = send(device, metal.selector("newCommandQueue"));
+        const auto method = queue != nullptr ? metal.instanceMethod(metal.classOf(queue), metal.selector("commandBufferWithDescriptor:")) : nullptr;
+        if (method != nullptr) {
+            metal.retainReferences = metal.selector("setRetainedReferences:");
+            metal.commandBuffer = metal.setImplementation(method, reinterpret_cast<void*>(&retainedCommandBuffer));
+        }
+        if (queue != nullptr) send(queue, metal.selector("release"));
+        send(device, metal.selector("release"));
+        if (method == nullptr) throw std::runtime_error("Vulkan loader: Metal command queues cannot be configured");
+    });
+}
+#else
+void RetainMetalCommandReferences() {}
+#endif
 
 }

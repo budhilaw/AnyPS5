@@ -1,4 +1,5 @@
 #include "prx/libSceAgcDriver/Graphics/include/Pipeline.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/ReleaseQueue.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/VertexInput.hpp"
 #include <algorithm>
 #include <cmath>
@@ -6,6 +7,17 @@
 #include <vector>
 
 namespace AgcDriver::Graphics {
+
+void RequireValidViewport(const Context& context, const State& state) {
+    const auto& viewport = state.viewport;
+    Require(std::isfinite(viewport.minDepth) && std::isfinite(viewport.maxDepth), "non-finite viewport depth range");
+    if (!context.depthRangeUnrestricted && !(viewport.minDepth >= 0 && viewport.minDepth <= 1 && viewport.maxDepth >= 0 && viewport.maxDepth <= 1)) Require(false, "viewport depth [" + std::to_string(viewport.minDepth) + ", " + std::to_string(viewport.maxDepth) + "] outside [0, 1] requires VK_EXT_depth_range_unrestricted (negativeOneToOne=" + std::to_string(state.negativeOneToOne) + ")");
+    Require(std::isfinite(viewport.x) && std::isfinite(viewport.y) && std::isfinite(viewport.width) && std::isfinite(viewport.height), "viewport arithmetic overflow");
+    Require(viewport.width <= context.limits.maxViewportDimensions[0] && std::abs(viewport.height) <= context.limits.maxViewportDimensions[1], "viewport dimensions exceed device limits");
+    if (!(viewport.x >= context.limits.viewportBoundsRange[0] && viewport.x + viewport.width <= context.limits.viewportBoundsRange[1]) || !(std::min(viewport.y, viewport.y + viewport.height) >= context.limits.viewportBoundsRange[0] && std::max(viewport.y, viewport.y + viewport.height) <= context.limits.viewportBoundsRange[1])) {
+        throw std::runtime_error("AGC graphics: viewport exceeds device bounds: x=" + std::to_string(viewport.x) + " y=" + std::to_string(viewport.y) + " width=" + std::to_string(viewport.width) + " height=" + std::to_string(viewport.height) + " bounds [" + std::to_string(context.limits.viewportBoundsRange[0]) + ", " + std::to_string(context.limits.viewportBoundsRange[1]) + "] render extent " + std::to_string(state.renderExtent.width) + "x" + std::to_string(state.renderExtent.height));
+    }
+}
 
 Pipeline::Pipeline(const Context& context, const State& state, const RenderTarget* target, std::span<const RenderTarget* const> extraTargets, const DepthImage* depth, const ShaderResources& resources, std::span<const CompiledShader> shaders) : context(context), _modules(shaders.size()) {
     Require((target != nullptr) == state.hasColorTarget, "render target does not match decoded color state");
@@ -26,14 +38,7 @@ Pipeline::Pipeline(const Context& context, const State& state, const RenderTarge
         Require(mesh.threadsPerGroup <= context.meshLimits.maxMeshWorkGroupInvocations && mesh.threadsPerGroup <= context.meshLimits.maxMeshWorkGroupSize[0], "mesh workgroup exceeds device limits");
         Require(mesh.maxVertices <= context.meshLimits.maxMeshOutputVertices && mesh.maxPrimitives <= context.meshLimits.maxMeshOutputPrimitives && static_cast<std::uint64_t>(mesh.ldsSizeDwords) * 4 <= context.meshLimits.maxMeshSharedMemorySize, "mesh output or LDS exceeds device limits");
     }
-    const auto& viewport = state.viewport;
-    Require(std::isfinite(viewport.minDepth) && std::isfinite(viewport.maxDepth), "non-finite viewport depth range");
-    if (!context.depthRangeUnrestricted && !(viewport.minDepth >= 0 && viewport.minDepth <= 1 && viewport.maxDepth >= 0 && viewport.maxDepth <= 1)) Require(false, "viewport depth [" + std::to_string(viewport.minDepth) + ", " + std::to_string(viewport.maxDepth) + "] outside [0, 1] requires VK_EXT_depth_range_unrestricted (negativeOneToOne=" + std::to_string(state.negativeOneToOne) + ")");
-    Require(std::isfinite(viewport.x) && std::isfinite(viewport.y) && std::isfinite(viewport.width) && std::isfinite(viewport.height), "viewport arithmetic overflow");
-    Require(viewport.width <= context.limits.maxViewportDimensions[0] && std::abs(viewport.height) <= context.limits.maxViewportDimensions[1], "viewport dimensions exceed device limits");
-    if (!(viewport.x >= context.limits.viewportBoundsRange[0] && viewport.x + viewport.width <= context.limits.viewportBoundsRange[1]) || !(std::min(viewport.y, viewport.y + viewport.height) >= context.limits.viewportBoundsRange[0] && std::max(viewport.y, viewport.y + viewport.height) <= context.limits.viewportBoundsRange[1])) {
-        throw std::runtime_error("AGC graphics: viewport exceeds device bounds: x=" + std::to_string(viewport.x) + " y=" + std::to_string(viewport.y) + " width=" + std::to_string(viewport.width) + " height=" + std::to_string(viewport.height) + " bounds [" + std::to_string(context.limits.viewportBoundsRange[0]) + ", " + std::to_string(context.limits.viewportBoundsRange[1]) + "] render extent " + std::to_string(state.renderExtent.width) + "x" + std::to_string(state.renderExtent.height));
-    }
+    RequireValidViewport(context, state);
     const auto pushStages = PushConstantStages(shaders);
     Require(pushStages == 0 || context.limits.maxPushConstantsSize >= PipelinePushConstantBytes, "graphics push constant range exceeds device limit");
     try {
@@ -131,9 +136,11 @@ Pipeline::Pipeline(const Context& context, const State& state, const RenderTarge
         depthClip.negativeOneToOne = state.negativeOneToOne;
         if (state.negativeOneToOne) viewports.pNext = &depthClip;
         viewports.viewportCount = 1;
-        viewports.pViewports = &state.viewport;
         viewports.scissorCount = 1;
-        viewports.pScissors = &state.scissor;
+        const VkDynamicState dynamicStates[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+        VkPipelineDynamicStateCreateInfo dynamic{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
+        dynamic.dynamicStateCount = 2;
+        dynamic.pDynamicStates = dynamicStates;
         VkPipelineRasterizationStateCreateInfo raster{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
         raster.polygonMode = VK_POLYGON_MODE_FILL;
         raster.cullMode = state.cullMode;
@@ -173,6 +180,7 @@ Pipeline::Pipeline(const Context& context, const State& state, const RenderTarge
         pipelineInfo.pVertexInputState = state.stages.mesh ? nullptr : &input;
         pipelineInfo.pInputAssemblyState = state.stages.mesh ? nullptr : &assembly;
         pipelineInfo.pViewportState = &viewports;
+        pipelineInfo.pDynamicState = &dynamic;
         pipelineInfo.pRasterizationState = &raster;
         pipelineInfo.pMultisampleState = &samples;
         pipelineInfo.pColorBlendState = &blend;
@@ -191,13 +199,15 @@ Pipeline::~Pipeline() {
 }
 
 void Pipeline::release() noexcept {
-    if (pipeline) context.Function<PFN_vkDestroyPipeline>("vkDestroyPipeline")(context.device, pipeline, nullptr);
-    if (framebuffer) context.Function<PFN_vkDestroyFramebuffer>("vkDestroyFramebuffer")(context.device, framebuffer, nullptr);
-    if (renderPass) context.Function<PFN_vkDestroyRenderPass>("vkDestroyRenderPass")(context.device, renderPass, nullptr);
-    if (layout) context.Function<PFN_vkDestroyPipelineLayout>("vkDestroyPipelineLayout")(context.device, layout, nullptr);
-    for (auto module : _modules) {
-        if (module) context.Function<PFN_vkDestroyShaderModule>("vkDestroyShaderModule")(context.device, module, nullptr);
-    }
+    Release(context.releaseQueue, [device = context.device, destroyPipeline = context.Function<PFN_vkDestroyPipeline>("vkDestroyPipeline"), destroyFramebuffer = context.Function<PFN_vkDestroyFramebuffer>("vkDestroyFramebuffer"), destroyRenderPass = context.Function<PFN_vkDestroyRenderPass>("vkDestroyRenderPass"), destroyLayout = context.Function<PFN_vkDestroyPipelineLayout>("vkDestroyPipelineLayout"), destroyModule = context.Function<PFN_vkDestroyShaderModule>("vkDestroyShaderModule"), pipeline = pipeline, framebuffer = framebuffer, renderPass = renderPass, layout = layout, modules = _modules] {
+        if (pipeline) destroyPipeline(device, pipeline, nullptr);
+        if (framebuffer) destroyFramebuffer(device, framebuffer, nullptr);
+        if (renderPass) destroyRenderPass(device, renderPass, nullptr);
+        if (layout) destroyLayout(device, layout, nullptr);
+        for (auto module : modules) {
+            if (module) destroyModule(device, module, nullptr);
+        }
+    });
 }
 
 VkPipelineLayout Pipeline::Layout() const {
@@ -216,6 +226,11 @@ void Pipeline::BeginPass(VkCommandBuffer commands, VkExtent2D extent) const {
 
 void Pipeline::Bind(VkCommandBuffer commands) const {
     context.Function<PFN_vkCmdBindPipeline>("vkCmdBindPipeline")(commands, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+}
+
+void Pipeline::SetViewport(VkCommandBuffer commands, const State& state) const {
+    context.Function<PFN_vkCmdSetViewport>("vkCmdSetViewport")(commands, 0, 1, &state.viewport);
+    context.Function<PFN_vkCmdSetScissor>("vkCmdSetScissor")(commands, 0, 1, &state.scissor);
 }
 
 void Pipeline::PushConstants(VkCommandBuffer commands, std::span<const CompiledShader> shaders) const {
