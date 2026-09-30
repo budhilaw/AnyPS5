@@ -50,7 +50,18 @@ void CheckRange(const void* pointer, std::size_t bytes, std::size_t alignment, b
     GuestMemoryTracking::GuestMemoryTrackingResolve_nid_postfix(address, bytes, writable);
     auto cursor = address;
     const auto end = address + bytes;
+#if defined(_WIN32) || defined(__APPLE__)
+    struct VerifiedRegion { std::uint64_t epoch = 0; std::uintptr_t first = 0; std::uintptr_t end = 0; bool writable = false; };
+    thread_local std::array<VerifiedRegion, 8> verified{};
+    thread_local std::size_t nextVerified = 0;
+    const auto epoch = GuestAllocations::GuestAllocationsMapEpoch_nid_postfix();
+    for (const auto& region : verified) {
+        if (region.epoch == epoch && address >= region.first && end <= region.end && (region.writable || !writable)) return;
+    }
+#endif
 #ifdef _WIN32
+    bool rangeWritable = true;
+    bool coveredByOneRegion = false;
     while (cursor < end) {
         MEMORY_BASIC_INFORMATION memory{};
         require(VirtualQuery(reinterpret_cast<const void*>(cursor), &memory, sizeof(memory)) == sizeof(memory), "cannot query guest memory");
@@ -59,17 +70,17 @@ void CheckRange(const void* pointer, std::size_t bytes, std::size_t alignment, b
         require(protection == PAGE_READONLY || protection == PAGE_READWRITE || protection == PAGE_WRITECOPY || protection == PAGE_EXECUTE_READ || protection == PAGE_EXECUTE_READWRITE || protection == PAGE_EXECUTE_WRITECOPY, "guest memory has no read permission");
         const auto base = reinterpret_cast<std::uintptr_t>(memory.BaseAddress);
         require(memory.RegionSize <= std::numeric_limits<std::uintptr_t>::max() - base && base + memory.RegionSize > cursor, "invalid guest memory mapping");
-        require(!writable || protection == PAGE_READWRITE || protection == PAGE_WRITECOPY || protection == PAGE_EXECUTE_READWRITE || protection == PAGE_EXECUTE_WRITECOPY, "guest memory has no write permission");
+        const bool regionWritable = protection == PAGE_READWRITE || protection == PAGE_WRITECOPY || protection == PAGE_EXECUTE_READWRITE || protection == PAGE_EXECUTE_WRITECOPY;
+        require(!writable || regionWritable, "guest memory has no write permission");
+        rangeWritable = rangeWritable && regionWritable;
+        if (base <= address && base + memory.RegionSize >= end) {
+            verified[nextVerified++ % verified.size()] = {epoch, base, base + memory.RegionSize, regionWritable};
+            coveredByOneRegion = true;
+        }
         cursor = std::min(end, base + memory.RegionSize);
     }
+    if (!coveredByOneRegion) verified[nextVerified++ % verified.size()] = {epoch, address, end, rangeWritable};
 #elif defined(__APPLE__)
-    struct VerifiedRegion { std::uint64_t epoch = 0; std::uintptr_t first = 0; std::uintptr_t end = 0; bool writable = false; };
-    thread_local std::array<VerifiedRegion, 8> verified{};
-    thread_local std::size_t nextVerified = 0;
-    const auto epoch = GuestAllocations::GuestAllocationsMapEpoch_nid_postfix();
-    for (const auto& region : verified) {
-        if (region.epoch == epoch && address >= region.first && end <= region.end && (region.writable || !writable)) return;
-    }
     while (cursor < end) {
         mach_vm_address_t first = cursor;
         mach_vm_size_t size = 0;
