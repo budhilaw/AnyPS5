@@ -181,10 +181,13 @@ configure_windows_unwind(agc_driver_flip_tests)
 
 add_executable(agc_driver_pm4_tests EXCLUDE_FROM_ALL
         tests/Pm4.cpp
+        tests/Device.cpp
 )
 
 target_include_directories(agc_driver_pm4_tests PRIVATE
         ${LIBS_INCLUDE_DIR}
+        ${CMAKE_SOURCE_DIR}/core/shader/recompiler
+        ${CMAKE_SOURCE_DIR}/3rdparty/Vulkan-Headers/include
 )
 
 target_link_libraries(agc_driver_pm4_tests PRIVATE

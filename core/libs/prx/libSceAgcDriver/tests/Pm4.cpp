@@ -1,3 +1,4 @@
+#include "DeviceTests.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Pm4.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/MemoryAccessScope.hpp"
@@ -418,6 +419,7 @@ int main(int argc, char** argv) {
         testContextAndBases();
         testIndexedDraw();
         testAutoDraw();
+        RunDeviceTests();
         testMemory();
         testCopies();
         testMemorySynchronization();
