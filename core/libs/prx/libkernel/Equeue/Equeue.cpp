@@ -1,4 +1,5 @@
 #include "prx/libc/include/General.hpp"
+#include "prx/libc/include/PreciseWait.hpp"
 #include <string>
 #include "Equeue.hpp"
 
@@ -42,6 +43,7 @@ void KernelEqueuePrivate::Close() {
         }
     }
     m_events.clear();
+    ++m_wakeups;
     m_cond.notify_all();
 }
 
@@ -167,7 +169,8 @@ int KernelEqueuePrivate::WaitForEvents(KernelEvent* ev, int num, uint32_t micros
             const auto waitUs = hasTimer
                 ? std::min<uint64_t>(static_cast<uint64_t>(remaining), timerWait)
                 : static_cast<uint64_t>(remaining);
-            m_cond.wait_for(lock, std::chrono::microseconds(waitUs));
+            const auto wakeups = m_wakeups;
+            PreciseWait::For(m_cond, lock, std::chrono::microseconds(waitUs), [&] { return m_wakeups != wakeups; });
         }
     }
 }
@@ -191,6 +194,7 @@ int KernelEqueuePrivate::AddEvent(const KernelEqueueEvent& event) {
     } else {
         m_events.push_back(event);
     }
+    ++m_wakeups;
     m_cond.notify_one();
     return EQUEUE_OK;
 }
@@ -213,6 +217,7 @@ int KernelEqueuePrivate::TriggerEvent(uintptr_t ident, int16_t filter, void* tri
     } else {
         it->triggered = true;
     }
+    ++m_wakeups;
     m_cond.notify_one();
     return EQUEUE_OK;
 }

@@ -5,6 +5,7 @@
 #include <mutex>
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
+#include "prx/libc/include/PreciseWait.hpp"
 
 extern "C" int* APS5_VABI __error_nid_postfix();
 
@@ -80,13 +81,14 @@ int APS5_VABI sem_timedwait_nid_postfix(void* sem, const KernelTimespec* abstime
     if (abstime == nullptr || abstime->tv_nsec < 0 || abstime->tv_nsec >= 1000000000) return Fail(GuestEinval);
     const auto deadline = std::chrono::system_clock::time_point(std::chrono::duration_cast<std::chrono::system_clock::duration>(std::chrono::seconds(abstime->tv_sec) + std::chrono::nanoseconds(abstime->tv_nsec)));
     return Acquire(sem, [&](auto& lock, Semaphore& semaphore) {
-        return semaphore.available.wait_until(lock, deadline, [&] { return semaphore.value > 0; });
+        const auto steadyDeadline = std::chrono::steady_clock::now() + std::chrono::duration_cast<std::chrono::steady_clock::duration>(deadline - std::chrono::system_clock::now());
+        return PreciseWait::Until(semaphore.available, lock, steadyDeadline, [&] { return semaphore.value > 0; });
     });
 }
 
 int APS5_VABI sem_reltimedwait_np_nid_postfix(void* sem, uint32_t usec) {
     return Acquire(sem, [&](auto& lock, Semaphore& semaphore) {
-        return semaphore.available.wait_for(lock, std::chrono::microseconds(usec), [&] { return semaphore.value > 0; });
+        return PreciseWait::For(semaphore.available, lock, std::chrono::microseconds(usec), [&] { return semaphore.value > 0; });
     });
 }
 

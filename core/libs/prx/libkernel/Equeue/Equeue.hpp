@@ -78,6 +78,7 @@ private:
     std::list<KernelEqueueEvent> m_events;
     std::mutex m_mutex;
     std::condition_variable_any m_cond;
+    std::uint64_t m_wakeups = 0;
     std::string m_name;
     KernelEqueue m_handle;
     bool m_closed = false;

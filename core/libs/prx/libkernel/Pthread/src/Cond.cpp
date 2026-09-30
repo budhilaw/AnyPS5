@@ -3,6 +3,7 @@
 #include <thread>
 #include <string>
 #include "prx/libc/include/General.hpp"
+#include "prx/libc/include/PreciseWait.hpp"
 #include <chrono>
 #include <stdexcept>
 
@@ -57,12 +58,16 @@ static PthreadCondPrivate* EnsureCond(PthreadCond* cond, const char* caller) {
 }
 
 int APS5_VABI scePthreadCondSignal(PthreadCond* cond) {
-    EnsureCond(cond, "scePthreadCondSignal")->_cv.notify_one();
+    auto* c = EnsureCond(cond, "scePthreadCondSignal");
+    c->_signals.fetch_add(1, std::memory_order_release);
+    c->_cv.notify_one();
     return SCE_OK;
 }
 
 int APS5_VABI scePthreadCondBroadcast(PthreadCond* cond) {
-    EnsureCond(cond, "scePthreadCondBroadcast")->_cv.notify_all();
+    auto* c = EnsureCond(cond, "scePthreadCondBroadcast");
+    c->_signals.fetch_add(1, std::memory_order_release);
+    c->_cv.notify_all();
     return SCE_OK;
 }
 
@@ -91,9 +96,10 @@ int APS5_VABI scePthreadCondTimedwait(PthreadCond* cond, PthreadMutex* mutex, un
     auto* c = EnsureCond(cond, "scePthreadCondTimedwait");
     HeldMutex held{*mutex};
     std::unique_lock<HeldMutex> lk(held, std::adopt_lock);
-    const auto res = c->_cv.wait_for(lk, std::chrono::microseconds(usec));
+    const auto signals = c->_signals.load(std::memory_order_acquire);
+    const bool signaled = PreciseWait::For(c->_cv, lk, std::chrono::microseconds(usec), [&] { return c->_signals.load(std::memory_order_acquire) != signals; });
     lk.release();
-    return res == std::cv_status::timeout ? SCE_KERNEL_ERROR_ETIMEDOUT : SCE_OK;
+    return signaled ? SCE_OK : SCE_KERNEL_ERROR_ETIMEDOUT;
 }
 
 int APS5_VABI scePthreadCondSignalto(PthreadCond* cond, Pthread thread) {

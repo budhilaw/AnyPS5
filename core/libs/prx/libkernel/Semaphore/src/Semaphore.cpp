@@ -1,4 +1,5 @@
 #include "prx/libkernel/Semaphore/include/Semaphore.hpp"
+#include "prx/libc/include/PreciseWait.hpp"
 
 #include <stdexcept>
 #include <string>
@@ -62,7 +63,7 @@ int APS5_VABI sceKernelWaitSema(KernelSema sem, int need, KernelUseconds* time) 
   sem->condition.wait(lock, wake);
  } else {
   const auto start = std::chrono::steady_clock::now();
-  acquired = sem->condition.wait_for(lock, std::chrono::microseconds(*time), wake);
+  acquired = PreciseWait::For(sem->condition, lock, std::chrono::microseconds(*time), wake);
   const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count();
   *time = elapsed >= static_cast<long long>(*time) ? 0 : *time - static_cast<KernelUseconds>(elapsed);
  }

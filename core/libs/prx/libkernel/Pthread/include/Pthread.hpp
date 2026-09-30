@@ -45,6 +45,7 @@ struct PthreadCondattrPrivate {
 
 struct PthreadCondPrivate {
     std::condition_variable_any _cv;
+    std::atomic<std::uint64_t> _signals{0};
     int _clockid = 0;
 };
 

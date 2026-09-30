@@ -6,6 +6,7 @@
 #include <string>
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
+#include "prx/libc/include/PreciseWait.hpp"
 
 namespace {
 
@@ -118,7 +119,7 @@ int APS5_VABI sceKernelWaitEventFlag(KernelEventFlag ef, uint64_t bit_pattern, u
     ++ef->waiters;
     bool woken = true;
     if (timeout == nullptr) ef->condition.wait(lock, wake);
-    else woken = ef->condition.wait_for(lock, std::chrono::microseconds(*timeout), wake);
+    else woken = PreciseWait::For(ef->condition, lock, std::chrono::microseconds(*timeout), wake);
     --ef->waiters;
     if (timeout != nullptr) {
         const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count();
