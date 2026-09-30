@@ -35,8 +35,7 @@ void ResidentColor::ReleaseMemory() {
     memoryWatch.reset();
 }
 
-bool ResidentColor::SharesPages(const ColorTarget& other) const {
-    const auto pageSize = GuestMemoryTracking::GuestMemoryTrackingPageSize_nid_postfix();
+bool ResidentColor::SharesPages(const ColorTarget& other, std::uint64_t pageSize) const {
     Require(color.bytes != 0 && other.bytes != 0, "empty render target page range");
     Require(color.bytes <= std::numeric_limits<std::uint64_t>::max() - color.address && other.bytes <= std::numeric_limits<std::uint64_t>::max() - other.address, "render target page range overflow");
     const auto first = color.address / pageSize;

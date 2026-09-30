@@ -4,6 +4,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/GpuColorTransfer.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Resources.hpp"
 #include "prx/libc/include/GuestMemoryTracking.hpp"
+#include <atomic>
 #include <functional>
 #include <map>
 
@@ -36,7 +37,7 @@ public:
     void MarkWritten() { dirty = true; ++generation; }
     void Adopt(VkCommandBuffer commands, VkImage image);
     void DebugClear(VkCommandBuffer commands, float r, float g, float b);
-    bool SharesPages(const ColorTarget& other) const;
+    bool SharesPages(const ColorTarget& other, std::uint64_t pageSize) const;
 
 private:
     void resolveCpuAccess(GuestMemoryTracking::Access access);
@@ -54,9 +55,10 @@ private:
 
 class RenderCache {
 public:
-    explicit RenderCache(const Context& context) : context(context) {}
+    explicit RenderCache(const Context& context) : context(context), pageSize(GuestMemoryTracking::GuestMemoryTrackingPageSize_nid_postfix()) {}
     ~RenderCache();
     std::shared_ptr<ResidentColor> Get(const ColorTarget& color, bool blending);
+    std::uint64_t Epoch() const { return epoch.load(std::memory_order_acquire); }
     void AppendColorRanges(std::vector<std::pair<std::uint64_t, std::uint64_t>>& ranges) const {
         for (const auto& [address, entry] : entries) ranges.emplace_back(address, address + entry->Description().bytes);
     }
@@ -75,10 +77,16 @@ public:
     void Flush();
 
 private:
+    using Entries = std::map<std::uint64_t, std::shared_ptr<ResidentColor>>;
     void retire(std::shared_ptr<ResidentColor> entry);
+    Entries::iterator release(Entries::iterator entry);
+    std::uint64_t reachStart(std::uint64_t address) const { return address > largestTarget + pageSize ? address - largestTarget - pageSize : 0; }
     std::vector<std::pair<std::uint64_t, std::uint64_t>> excluding(std::uint64_t begin, std::uint64_t end, const std::function<bool(const ResidentColor&)>& excluded) const;
     Context context;
-    std::map<std::uint64_t, std::shared_ptr<ResidentColor>> entries;
+    std::uint64_t pageSize;
+    Entries entries;
+    std::uint64_t largestTarget = 0;
+    std::atomic<std::uint64_t> epoch{0};
     std::uint64_t useCounter = 0;
     struct DepthEntry {
         DepthTarget target;

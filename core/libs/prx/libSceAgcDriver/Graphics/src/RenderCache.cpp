@@ -163,8 +163,8 @@ std::vector<std::pair<std::uint64_t, std::uint64_t>> RenderCache::UnwatchedRange
 
 std::vector<std::pair<std::uint64_t, std::uint64_t>> RenderCache::excluding(std::uint64_t begin, std::uint64_t end, const std::function<bool(const ResidentColor&)>& excluded) const {
     std::vector<std::pair<std::uint64_t, std::uint64_t>> result{{begin, end}};
-    const auto pageSize = GuestMemoryTracking::GuestMemoryTrackingPageSize_nid_postfix();
-    for (const auto& [address, entry] : entries) {
+    for (auto it = entries.lower_bound(reachStart(begin)); it != entries.end(); ++it) {
+        const auto& [address, entry] = *it;
         if (address >= end + pageSize) break;
         if (!excluded(*entry)) continue;
         const auto& color = entry->Description();
@@ -189,11 +189,24 @@ void RenderCache::retire(std::shared_ptr<ResidentColor> entry) {
     if (context.drawQueue) context.drawQueue->EnqueueCompletion([entry = std::move(entry)] {});
 }
 
+RenderCache::Entries::iterator RenderCache::release(Entries::iterator entry) {
+    const auto bytes = entry->second->Description().bytes;
+    entry->second->ReleaseMemory();
+    retire(entry->second);
+    const auto next = entries.erase(entry);
+    if (bytes >= largestTarget) {
+        largestTarget = 0;
+        for (const auto& [address, remaining] : entries) largestTarget = std::max<std::uint64_t>(largestTarget, remaining->Description().bytes);
+    }
+    epoch.fetch_add(1, std::memory_order_release);
+    return next;
+}
+
 std::shared_ptr<ResidentColor> RenderCache::Get(const ColorTarget& color, bool blending) {
     PerformanceTimer timing("Graphics.RenderCache.Get");
     Require(color.address != 0 && color.bytes != 0 && color.bytes <= std::numeric_limits<std::uint64_t>::max() - color.address, "invalid resident color range");
-    if (context.drawQueue && context.drawQueue->WritesPending(color.address, color.bytes)) {
-        const bool ordered = !color.gpuOnly && context.guestBufferCache != nullptr && context.guestBufferCache->HostImportable(color.address, color.bytes);
+    if (!color.gpuOnly && context.drawQueue && context.drawQueue->WritesPending(color.address, color.bytes)) {
+        const bool ordered = context.guestBufferCache != nullptr && context.guestBufferCache->HostImportable(color.address, color.bytes);
         context.drawQueue->Resolve(color.address, color.bytes, ordered);
         timing.Mark("pending_writes");
     }
@@ -202,9 +215,10 @@ std::shared_ptr<ResidentColor> RenderCache::Get(const ColorTarget& color, bool b
         context.formatProperties(context.physical, color.format, &properties);
         Require((properties.optimalTilingFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT) != 0, "render target format does not support blending");
     }
-    for (auto it = entries.begin(); it != entries.end();) {
+    const auto lastPage = (color.address + color.bytes - 1) / pageSize;
+    for (auto it = entries.lower_bound(reachStart(color.address)); it != entries.end() && it->first / pageSize <= lastPage;) {
         const auto& previous = it->second->Description();
-        if (!it->second->SharesPages(color)) {
+        if (!it->second->SharesPages(color, pageSize)) {
             ++it;
             continue;
         }
@@ -216,9 +230,7 @@ std::shared_ptr<ResidentColor> RenderCache::Get(const ColorTarget& color, bool b
         static const bool traceTargets = std::getenv("ANYPS5_TRACE_TARGETS") != nullptr;
         if (traceTargets) APS5_LOG_OUT("resident target 0x%llx (%ux%u, %zu bytes) released for 0x%llx (%ux%u, %zu bytes) sharing its pages", static_cast<unsigned long long>(previous.address), previous.extent.width, previous.extent.height, previous.bytes, static_cast<unsigned long long>(color.address), color.extent.width, color.extent.height, color.bytes);
         Resolve(previous.address, previous.bytes, true);
-        it->second->ReleaseMemory();
-        retire(it->second);
-        it = entries.erase(it);
+        it = release(it);
         timing.Mark("shared_pages");
     }
     if (entries.size() >= 160) {
@@ -233,9 +245,7 @@ std::shared_ptr<ResidentColor> RenderCache::Get(const ColorTarget& color, bool b
         for (const auto& it : candidates) {
             if (entries.size() <= 120) break;
             if (traceEviction) APS5_LOG_OUT("resident target 0x%llx (%ux%u) evicted (least recently used, %zu entries)", static_cast<unsigned long long>(it->first), it->second->Description().extent.width, it->second->Description().extent.height, entries.size());
-            it->second->ReleaseMemory();
-            retire(it->second);
-            entries.erase(it);
+            release(it);
             SlowOperationRecord_nid_no_patch("render target evict", 0);
         }
         timing.Mark("evict");
@@ -243,6 +253,8 @@ std::shared_ptr<ResidentColor> RenderCache::Get(const ColorTarget& color, bool b
     auto entry = std::make_shared<ResidentColor>(context, color);
     entry->lastUse = ++useCounter;
     entries.emplace(color.address, entry);
+    largestTarget = std::max<std::uint64_t>(largestTarget, color.bytes);
+    epoch.fetch_add(1, std::memory_order_release);
     timing.Mark("create");
     return entry;
 }
@@ -546,7 +558,7 @@ std::shared_ptr<ResidentColor> RenderCache::Find(std::uint64_t address) const {
     if (it == entries.end()) return nullptr;
     const auto& entry = it->second;
     const auto bytes = entry->Description().bytes;
-    if (context.drawQueue && context.drawQueue->WritesPending(address, bytes, entry->AdoptedThrough())) {
+    if (!entry->Description().gpuOnly && context.drawQueue && context.drawQueue->WritesPending(address, bytes, entry->AdoptedThrough())) {
         const bool reloaded = !entry->Valid() && !context.drawQueue->WritesPending(address, bytes, context.drawQueue->NextSequence()) && entry->Refresh(context.drawQueue->BeginBarrier(context));
         if (!reloaded) {
             static const bool trace = std::getenv("ANYPS5_TRACE_WAITS") != nullptr;
@@ -560,9 +572,15 @@ std::shared_ptr<ResidentColor> RenderCache::Find(std::uint64_t address) const {
 
 void RenderCache::Resolve(std::uint64_t address, std::size_t bytes, bool writable) {
     std::vector<std::shared_ptr<ResidentColor>> affected;
-    for (const auto& [base, entry] : entries) {
+    const auto end = address + bytes;
+    for (auto it = entries.lower_bound(reachStart(address)); it != entries.end() && it->first < end; ++it) {
+        const auto& [base, entry] = *it;
         const auto& color = entry->Description();
-        if (address >= base + color.bytes || base >= address + bytes) continue;
+        if (address >= base + color.bytes) continue;
+        if (color.gpuOnly) {
+            if (writable) entry->Invalidate();
+            continue;
+        }
         if (entry->Dirty()) affected.push_back(entry);
         else if (writable) entry->Invalidate();
     }
@@ -594,9 +612,11 @@ void RenderCache::Resolve(std::uint64_t address, std::size_t bytes, bool writabl
 }
 
 void RenderCache::DiscardCovered(std::uint64_t address, std::size_t bytes) {
-    for (const auto& [base, entry] : entries) {
+    const auto end = address + bytes;
+    for (auto it = entries.lower_bound(address); it != entries.end() && it->first < end; ++it) {
+        const auto& [base, entry] = *it;
         const auto& color = entry->Description();
-        if (base >= address && base + color.bytes <= address + bytes && base + color.bytes > base) entry->Discard();
+        if (base + color.bytes <= end && base + color.bytes > base) entry->Discard();
     }
 }
 
