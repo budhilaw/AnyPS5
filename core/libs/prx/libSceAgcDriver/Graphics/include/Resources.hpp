@@ -2,6 +2,7 @@
 #define CORE_LIBS_PRX_LIBSCEAGCDRIVER_GRAPHICS_INCLUDE_RESOURCES_HPP
 
 #include "prx/libSceAgcDriver/Graphics/include/State.hpp"
+#include <chrono>
 #include <span>
 
 namespace AgcDriver::Graphics {

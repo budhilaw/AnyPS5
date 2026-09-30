@@ -1,5 +1,3 @@
-#include <execinfo.h>
-#include <dlfcn.h>
 #include <chrono>
 #include <cstdlib>
 #include <cstdio>
@@ -9,6 +7,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/DrawQueue.hpp"
 #include "prx/libSceAgcDriver/Execution/include/MemoryAccessScope.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
+#include "prx/libSceAgcDriver/Execution/include/CallerSymbol.hpp"
 #include <cstdlib>
 #include <limits>
 #include <algorithm>
@@ -566,15 +565,9 @@ void RenderCache::Resolve(std::uint64_t address, std::size_t bytes, bool writabl
         if (traceValue != nullptr && reported < 60 && std::chrono::duration<double>(std::chrono::steady_clock::now() - traceStart).count() >= std::atof(traceValue)) {
             ++reported;
             void* frames[8];
-            const int count = ::backtrace(frames, 8);
+            const int count = CaptureCallers(frames, 8);
             std::string chain;
-            for (int i = 1; i < count; ++i) {
-                Dl_info info{};
-                dladdr(frames[i], &info);
-                char item[96];
-                std::snprintf(item, sizeof(item), " <- %s+0x%lx", info.dli_sname ? info.dli_sname : "?", info.dli_saddr ? static_cast<unsigned long>(static_cast<const char*>(frames[i]) - static_cast<const char*>(info.dli_saddr)) : 0ul);
-                chain += item;
-            }
+            for (int i = 1; i < count; ++i) chain += " <- " + DescribeCaller(frames[i]);
             APS5_LOG_OUT("resolve 0x%llx+0x%zx %s: %zu dirty target(s), first 0x%llx%s", static_cast<unsigned long long>(address), bytes, writable ? "write" : "read", affected.size(), static_cast<unsigned long long>(affected.front()->Description().address), chain.c_str());
         }
     }

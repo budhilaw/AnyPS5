@@ -4,6 +4,7 @@
 #include "prx/libc/include/GuestAllocations.hpp"
 #include "prx/libSceAgcDriver/Execution/include/MemoryAccessScope.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
+#include "prx/libSceAgcDriver/Execution/include/CallerSymbol.hpp"
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -12,7 +13,6 @@
 #include <mutex>
 #include <vector>
 #include <cstdlib>
-#include <dlfcn.h>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
@@ -137,9 +137,7 @@ void Read(std::uint64_t address, std::span<std::byte> destination, std::size_t a
             for (const auto& [caller, value] : callers) sorted.push_back({value.first, caller});
             std::sort(sorted.rbegin(), sorted.rend());
             for (std::size_t i = 0; i < std::min<std::size_t>(sorted.size(), 6); ++i) {
-                Dl_info info{};
-                dladdr(sorted[i].second, &info);
-                std::fprintf(stderr, "[read-callers] %.1f MiB in %llu reads from %p (%s+0x%lx)\n", sorted[i].first / 1048576.0, static_cast<unsigned long long>(callers[sorted[i].second].second), sorted[i].second, info.dli_sname ? info.dli_sname : "?", info.dli_saddr ? static_cast<unsigned long>(static_cast<const char*>(sorted[i].second) - static_cast<const char*>(info.dli_saddr)) : 0ul);
+                std::fprintf(stderr, "[read-callers] %.1f MiB in %llu reads from %p (%s)\n", sorted[i].first / 1048576.0, static_cast<unsigned long long>(callers[sorted[i].second].second), sorted[i].second, DescribeCaller(sorted[i].second).c_str());
             }
             callers.clear();
         }
