@@ -75,14 +75,11 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
             Require(context.textureCompressionBC, "device does not support BC compressed textures");
         }
 
-        const auto mips = ComputeMipLayout(descriptor.tileMode, descriptor.format, descriptor.width, descriptor.height, descriptor.mipCount);
+        const auto mips = ComputeMipLayout(descriptor);
         const auto arrayLayers = FullArrayLayers(descriptor);
         const auto elementBytes = BytesPerElement(descriptor.format);
         const bool volume = descriptor.dimension == TextureDimension::k3D;
-        if (volume) {
-            static std::once_flag once;
-            std::call_once(once, [&] { APS5_LOG_OUT("3D texture %ux%ux%u (%u mips) is detiled as 2D slices: an approximation of the console's thick tiling", descriptor.width, descriptor.height, arrayLayers, descriptor.mipCount); });
-        }
+        const auto tiledLayers = mips.front().blockDepth > 1u ? 1u : arrayLayers;
         const auto imageLayers = volume ? 1u : arrayLayers;
         this->imageLayers = imageLayers;
         extent = {descriptor.width, descriptor.height};
@@ -97,12 +94,12 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
         promotable = (descriptor.dimension == TextureDimension::k2D || descriptor.dimension == TextureDimension::k2DArray) && descriptor.mipCount == 1 && arrayLayers == 1 && !IsBlockCompressed(descriptor.format) && (elementBytes == 1 || (elementBytes == 2 && std::getenv("ANYPS5_PROMOTE_16BIT") != nullptr) || elementBytes == 4 || elementBytes == 8 || elementBytes == 16) && (descriptor.tileMode == TextureTileMode::RenderTarget64KB || descriptor.tileMode == TextureTileMode::kLinear);
 
         const auto guestBytes = ComputeSurfaceSize(mips, arrayLayers);
-        const auto guestSliceBytes = guestBytes / arrayLayers;
+        const auto guestSliceBytes = guestBytes / tiledLayers;
         Require(snapshot.size() == guestBytes, "texture snapshot size mismatch");
 
         const auto sliceLinearBytes = SliceLinearBytes(mips);
-        Require(arrayLayers == 0 || sliceLinearBytes <= UINT64_MAX / arrayLayers, "detiled texture buffer size overflows");
-        const auto linearBytes = sliceLinearBytes * arrayLayers;
+        Require(tiledLayers == 0 || sliceLinearBytes <= UINT64_MAX / tiledLayers, "detiled texture buffer size overflows");
+        const auto linearBytes = sliceLinearBytes * tiledLayers;
 
         bool storageCapable = false;
         if (context.storageImages && !IsBlockCompressed(descriptor.format)) {
@@ -174,7 +171,7 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
             const VkBufferMemoryBarrier preBarriers[] = {stagingReadBarrier, linearWriteBarrier};
             context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(commands, VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 2, preBarriers, 0, nullptr);
 
-            for (std::uint32_t layer = 0; layer < arrayLayers; ++layer) {
+            for (std::uint32_t layer = 0; layer < tiledLayers; ++layer) {
                 const auto guestLayerOffset = static_cast<std::uint64_t>(layer) * guestSliceBytes;
                 const auto linearLayerOffset = static_cast<std::uint64_t>(layer) * sliceLinearBytes;
                 for (const auto& mip : mips) {
@@ -203,8 +200,8 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
             context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(commands, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 1, &linearReadBarrier, 1, &toTransferDst);
 
             std::vector<VkBufferImageCopy> regions;
-            regions.reserve(static_cast<std::size_t>(arrayLayers) * mips.size());
-            for (std::uint32_t layer = 0; layer < arrayLayers; ++layer) {
+            regions.reserve(static_cast<std::size_t>(tiledLayers) * mips.size());
+            for (std::uint32_t layer = 0; layer < tiledLayers; ++layer) {
                 const auto linearLayerOffset = static_cast<std::uint64_t>(layer) * sliceLinearBytes;
                 for (std::uint32_t level = 0; level < descriptor.mipCount; ++level) {
                     if (volume && layer >= std::max(arrayLayers >> level, 1u)) break;
@@ -215,7 +212,7 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
                     region.bufferImageHeight = 0;
                     region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, level, volume ? 0u : layer, 1};
                     region.imageOffset = {0, 0, volume ? static_cast<std::int32_t>(layer) : 0};
-                    region.imageExtent = {std::max(descriptor.width >> level, 1u), std::max(descriptor.height >> level, 1u), 1u};
+                    region.imageExtent = {std::max(descriptor.width >> level, 1u), std::max(descriptor.height >> level, 1u), mip.depth};
                     regions.push_back(region);
                 }
             }

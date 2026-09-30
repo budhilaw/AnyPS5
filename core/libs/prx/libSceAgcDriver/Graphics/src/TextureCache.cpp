@@ -263,7 +263,7 @@ std::shared_ptr<Texture> TextureCache::Get(std::span<const std::uint32_t> words,
         timing.Mark("surface_view");
         return texture;
     }
-    const auto mips = ComputeMipLayout(resource.tileMode, resource.format, resource.width, resource.height, resource.mipCount);
+    const auto mips = ComputeMipLayout(resource);
     const auto layers = FullArrayLayers(resource);
     const auto bytes = ComputeSurfaceSize(mips, layers);
     Require(bytes != 0 && bytes <= std::numeric_limits<std::size_t>::max(), "texture cache surface size overflow");
