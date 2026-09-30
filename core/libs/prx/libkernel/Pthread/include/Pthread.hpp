@@ -89,5 +89,6 @@ struct PthreadPrivate {
 
 void MutexNoteOwner(PthreadMutexPrivate* mutex);
 void MutexClearOwner(PthreadMutexPrivate* mutex);
+void ApplyHostThreadPriority(PthreadPrivate* thread);
 
 #endif

@@ -107,6 +107,12 @@ static void* StartPosixThread(void* opaque) {
 
 #ifdef _WIN32
 
+static int HostThreadPriority(int guestPriority) {
+    if (guestPriority <= 300) return THREAD_PRIORITY_ABOVE_NORMAL;
+    if (guestPriority <= 700) return THREAD_PRIORITY_NORMAL;
+    return THREAD_PRIORITY_LOWEST;
+}
+
 static void ReleaseThread(PthreadPrivate* thread) {
     if (thread->references.fetch_sub(1, std::memory_order_acq_rel) != 1)
         return;
@@ -155,6 +161,15 @@ static unsigned __stdcall StartNativeThread(void* opaque) {
 }
 #endif
 
+void ApplyHostThreadPriority(PthreadPrivate* thread) {
+#ifdef _WIN32
+    if (thread->nativeHandle != nullptr && !SetThreadPriority(thread->nativeHandle, HostThreadPriority(thread->schedPriority)))
+        throw std::system_error(GetLastError(), std::system_category(), "Setting guest thread priority");
+#else
+    static_cast<void>(thread);
+#endif
+}
+
 extern "C" {
 
 int APS5_VABI scePthreadCreate(Pthread* thread, const PthreadAttr* attr, PthreadEntry entry, void* arg, const char* name) {
@@ -182,6 +197,7 @@ int APS5_VABI scePthreadCreate(Pthread* thread, const PthreadAttr* attr, Pthread
         throw std::system_error(errno, std::generic_category(), "Creating guest thread");
     p->nativeHandle = reinterpret_cast<void*>(handle);
     native.release();
+    ApplyHostThreadPriority(p.get());
     try {
         initialized.get();
     } catch (...) {
@@ -294,6 +310,7 @@ int APS5_VABI scePthreadSetschedparam(Pthread thread, int policy, const KernelSc
     if (param->sched_priority < 256 || param->sched_priority > 767) return SCE_KERNEL_ERROR_EINVAL;
     thread->schedPolicy = policy;
     thread->schedPriority = param->sched_priority;
+    ApplyHostThreadPriority(thread);
     return SCE_OK;
 }
 
@@ -406,6 +423,7 @@ int APS5_VABI scePthreadSetcanceltype(int type, int* old_type) {
 int APS5_VABI scePthreadSetprio(Pthread thread, int prio) {
     if (!thread) return SCE_KERNEL_ERROR_ESRCH;
     thread->schedPriority = prio;
+    ApplyHostThreadPriority(thread);
     return SCE_OK;
 }
 

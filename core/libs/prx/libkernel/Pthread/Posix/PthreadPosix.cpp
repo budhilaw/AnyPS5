@@ -170,6 +170,7 @@ int APS5_VABI pthread_setschedparam_nid_postfix(Pthread thread, int policy, cons
     if (!param || policy < 0 || policy > 3) return EInval;
     thread->schedPolicy = policy;
     thread->schedPriority = param->sched_priority;
+    ApplyHostThreadPriority(thread);
     return 0;
 }
 int APS5_VABI pthread_getschedparam_nid_postfix(Pthread thread, int* policy, KernelSchedParam* param) {
@@ -182,6 +183,7 @@ int APS5_VABI pthread_getschedparam_nid_postfix(Pthread thread, int* policy, Ker
 int APS5_VABI pthread_setprio_nid_postfix(Pthread thread, int priority) {
     if (!thread) return ESrch;
     thread->schedPriority = priority;
+    ApplyHostThreadPriority(thread);
     return 0;
 }
 int APS5_VABI pthread_setcancelstate_nid_postfix(int state, int* previous) {
