@@ -73,7 +73,7 @@ int APS5_VABI sceKernelUuidCreate(uint32_t* uuid) {
 }
 
 void APS5_VABI sceKernelSync(void) {
- NotImplemented_nid_no_patch(__func__);
+    ::sync();
 }
 
 int APS5_VABI sched_get_priority_max_nid_postfix(int policy) {

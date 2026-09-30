@@ -24,4 +24,28 @@ int APS5_VABI sceCoredumpUnregisterCoredumpHandler(void) {
  return 0;
 }
 
+int APS5_VABI sceCoredumpAttachMemoryRegion(uint64_t address, size_t size, uint32_t flags) {
+ (void)address;
+ (void)size;
+ (void)flags;
+ return 0;
+}
+
+int APS5_VABI sceCoredumpAttachUserMemoryFile(uint64_t address, size_t size, uint32_t flags) {
+ (void)address;
+ (void)size;
+ (void)flags;
+ return 0;
+}
+
+int APS5_VABI sceCoredumpSetUserDataType(uint32_t type) {
+ (void)type;
+ return 0;
+}
+
+int64_t APS5_VABI sceCoredumpWriteUserData(const void* data, size_t size) {
+ (void)data;
+ return static_cast<int64_t>(size);
+}
+
 }

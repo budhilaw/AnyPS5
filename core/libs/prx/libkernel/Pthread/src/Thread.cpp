@@ -350,8 +350,15 @@ int APS5_VABI scePthreadGetprio(Pthread thread, int* prio) {
 }
 
 int APS5_VABI scePthreadGetthreadid(void) {
- NotImplemented_nid_no_patch(__func__);
- return 0;
+#ifdef _WIN32
+    return static_cast<int>(GetCurrentThreadId());
+#elif defined(__APPLE__)
+    std::uint64_t id = 0;
+    pthread_threadid_np(nullptr, &id);
+    return static_cast<int>(id);
+#else
+    return static_cast<int>(syscall(SYS_gettid));
+#endif
 }
 
 int APS5_VABI scePthreadRename(Pthread thread, const char* name) {

@@ -9,7 +9,7 @@
 
 static constexpr int SCE_OK = 0;
 static constexpr int SCE_KERNEL_ERROR_ENOMEM = 0x8002000C;
-static constexpr int SCE_KERNEL_ERROR_EDEADLK = 0x80020023;
+static constexpr int SCE_KERNEL_ERROR_EDEADLK = static_cast<int>(0x8002000B);
 static constexpr int SCE_KERNEL_ERROR_EPERM = 0x80020001;
 static constexpr int SCE_KERNEL_ERROR_EBUSY = 0x80020010;
 static constexpr int SCE_KERNEL_ERROR_ETIMEDOUT = 0x8002003C;
