@@ -16,7 +16,7 @@ public:
     bool Upload(std::uint64_t address, std::uint32_t width, std::uint32_t height, ColorTileMode mode);
     bool UploadView(std::uint64_t address, std::uint32_t width, std::uint32_t height, ColorTileMode mode);
     void Prepare(std::uint32_t width, std::uint32_t height, ColorTileMode mode) { prepare(width, height, mode); }
-    void Detile(VkCommandBuffer commands, bool swapRedBlue = false);
+    void Detile(VkCommandBuffer commands, bool swapRedBlue = false, bool tenBit = false);
     void Tile(VkCommandBuffer commands);
     void WriteBack(std::uint64_t address);
     void WriteBackTracked(std::uint64_t address);
@@ -28,7 +28,7 @@ public:
 private:
     void writeBack(std::uint64_t address, bool tracked);
     void prepare(std::uint32_t width, std::uint32_t height, ColorTileMode mode);
-    void convert(VkCommandBuffer commands, bool toTiled, bool swapRedBlue);
+    void convert(VkCommandBuffer commands, bool toTiled, bool swapRedBlue, bool tenBit);
     void createDescriptorSet();
     void release() noexcept;
     Context context;

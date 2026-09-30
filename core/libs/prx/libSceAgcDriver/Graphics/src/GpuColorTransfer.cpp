@@ -147,14 +147,14 @@ bool GpuColorTransfer::Upload(std::uint64_t address, std::uint32_t newWidth, std
     return false;
 }
 
-void GpuColorTransfer::convert(VkCommandBuffer commands, bool toTiled, bool swapRedBlue) {
+void GpuColorTransfer::convert(VkCommandBuffer commands, bool toTiled, bool swapRedBlue, bool tenBit) {
     Require(commands != VK_NULL_HANDLE && tiled && linear, "color transfer is not prepared");
     VkMemoryBarrier before{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
     before.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
     before.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
     const auto barrier = context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier");
     barrier(commands, VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &before, 0, nullptr, 0, nullptr);
-    const std::array<std::uint32_t, 4> push{width, height, (width + 127u) / 128u, (toTiled ? 1u : 0u) | (swapRedBlue ? 2u : 0u) | (mode == ColorTileMode::RenderTarget ? 4u : 0u)};
+    const std::array<std::uint32_t, 4> push{width, height, (width + 127u) / 128u, (toTiled ? 1u : 0u) | (swapRedBlue ? 2u : 0u) | (mode == ColorTileMode::RenderTarget ? 4u : 0u) | (tenBit ? 8u : 0u)};
     context.Function<PFN_vkCmdBindPipeline>("vkCmdBindPipeline")(commands, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
     context.Function<PFN_vkCmdBindDescriptorSets>("vkCmdBindDescriptorSets")(commands, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout, 0, 1, &descriptorSet, 0, nullptr);
     context.Function<PFN_vkCmdPushConstants>("vkCmdPushConstants")(commands, pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), push.data());
@@ -165,7 +165,7 @@ void GpuColorTransfer::convert(VkCommandBuffer commands, bool toTiled, bool swap
     barrier(commands, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &after, 0, nullptr, 0, nullptr);
 }
 
-void GpuColorTransfer::Detile(VkCommandBuffer commands, bool swapRedBlue) {
+void GpuColorTransfer::Detile(VkCommandBuffer commands, bool swapRedBlue, bool tenBit) {
     Require(commands != VK_NULL_HANDLE && upload && tiled, "color upload is not prepared");
     VkMemoryBarrier before{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
     before.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
@@ -173,11 +173,11 @@ void GpuColorTransfer::Detile(VkCommandBuffer commands, bool swapRedBlue) {
     context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(commands, VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &before, 0, nullptr, 0, nullptr);
     const VkBufferCopy copy{uploadSource ? uploadSourceOffset : 0, 0, upload->Bytes().size()};
     context.Function<PFN_vkCmdCopyBuffer>("vkCmdCopyBuffer")(commands, uploadSource ? uploadSource->Handle() : upload->Handle(), tiled->Handle(), 1, &copy);
-    convert(commands, false, swapRedBlue);
+    convert(commands, false, swapRedBlue, tenBit);
 }
 
 void GpuColorTransfer::Tile(VkCommandBuffer commands) {
-    convert(commands, true, false);
+    convert(commands, true, false, false);
     VkMemoryBarrier before{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
     before.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
     before.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;

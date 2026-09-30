@@ -29,6 +29,10 @@ bool DisplayFormatRgba(std::uint64_t pixelFormat) {
     return (pixelFormat & 0x00ffffffffffffffull) == 0x22000000ull;
 }
 
+bool DisplayFormatTenBit(std::uint64_t pixelFormat) {
+    return (pixelFormat >> 56u) == 0x81u;
+}
+
 std::size_t DisplayBufferSize(const DisplayBuffer& buffer) {
     require(buffer.width != 0 && buffer.height != 0 && buffer.width <= 16384 && buffer.height <= 16384, "VideoOut: invalid display buffer dimensions");
     if (!DisplayFormatSupported(buffer.pixelFormat)) {
@@ -48,11 +52,23 @@ std::vector<std::byte> DecodeDisplayBuffer(const DisplayBuffer& buffer, std::spa
     std::vector<std::byte> pixels(static_cast<std::size_t>(buffer.width) * buffer.height * 4);
     const auto blocksPerRow = (buffer.width + 127u) / 128u;
     const bool rgba = DisplayFormatRgba(buffer.pixelFormat);
+    const bool tenBit = DisplayFormatTenBit(buffer.pixelFormat);
     timing.Mark("validate_allocate");
     for (std::uint32_t y = 0; y < buffer.height; ++y) {
         for (std::uint32_t x = 0; x < buffer.width; ++x) {
             const auto tiled = (static_cast<std::size_t>(y / 128u) * blocksPerRow + x / 128u) * 65536u + tileOffset(x, y);
             const auto linear = (static_cast<std::size_t>(y) * buffer.width + x) * 4;
+            if (tenBit) {
+                std::uint32_t pixel = 0;
+                std::memcpy(&pixel, source.data() + tiled, sizeof(pixel));
+                const auto low = static_cast<std::byte>((pixel >> 2u) & 0xffu);
+                const auto high = static_cast<std::byte>((pixel >> 22u) & 0xffu);
+                pixels[linear] = rgba ? high : low;
+                pixels[linear + 1] = static_cast<std::byte>((pixel >> 12u) & 0xffu);
+                pixels[linear + 2] = rgba ? low : high;
+                pixels[linear + 3] = static_cast<std::byte>((pixel >> 30u) * 85u);
+                continue;
+            }
             pixels[linear] = source[tiled + (rgba ? 2 : 0)];
             pixels[linear + 1] = source[tiled + 1];
             pixels[linear + 2] = source[tiled + (rgba ? 0 : 2)];

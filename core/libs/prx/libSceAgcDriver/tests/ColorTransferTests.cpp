@@ -53,6 +53,50 @@ void checkConversion(const Context& context, std::uint32_t width, std::uint32_t 
     Require(std::equal(expectedTiled.begin(), expectedTiled.end(), guest.begin()), "GPU tile changed pixels or surface padding");
 }
 
+void checkTenBitDetile(const Context& context, bool rgba) {
+    constexpr std::uint32_t width = 130, height = 129;
+    const ColorTargetLayout layout(width, height, ColorTileMode::RenderTarget);
+    std::vector<std::byte> storage(layout.Bytes() + layout.Alignment());
+    void* aligned = storage.data();
+    auto available = storage.size();
+    Require(std::align(layout.Alignment(), layout.Bytes(), aligned, available) != nullptr, "test surface alignment failed");
+    const auto address = reinterpret_cast<std::uintptr_t>(aligned);
+    std::span<std::byte> guest(static_cast<std::byte*>(aligned), layout.Bytes());
+    std::vector<std::byte> source(layout.LinearBytes());
+    for (std::size_t i = 0; i < source.size() / 4; ++i) {
+        const auto pixel = static_cast<std::uint32_t>(i * 2654435761u);
+        std::memcpy(source.data() + i * 4, &pixel, sizeof(pixel));
+    }
+    layout.Tile(source, guest);
+    GpuColorTransfer transfer(context);
+    transfer.Upload(address, width, height, ColorTileMode::RenderTarget);
+    Buffer readback(context, source.size(), VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+    {
+        CommandBatch batch(context);
+        const auto commands = batch.Handle();
+        transfer.Detile(commands, rgba, true);
+        const VkBufferCopy copy{0, 0, source.size()};
+        context.Function<PFN_vkCmdCopyBuffer>("vkCmdCopyBuffer")(commands, transfer.LinearBuffer(), readback.Handle(), 1, &copy);
+        VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+        context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
+        batch.SubmitAndWait();
+    }
+    std::vector<std::byte> expected(source.size());
+    for (std::size_t i = 0; i < source.size(); i += 4) {
+        std::uint32_t pixel = 0;
+        std::memcpy(&pixel, source.data() + i, sizeof(pixel));
+        const auto low = static_cast<std::byte>((pixel >> 2u) & 0xffu);
+        const auto high = static_cast<std::byte>((pixel >> 22u) & 0xffu);
+        expected[i] = rgba ? high : low;
+        expected[i + 1] = static_cast<std::byte>((pixel >> 12u) & 0xffu);
+        expected[i + 2] = rgba ? low : high;
+        expected[i + 3] = static_cast<std::byte>((pixel >> 30u) * 85u);
+    }
+    Require(std::equal(expected.begin(), expected.end(), readback.Bytes().begin()), "GPU 10-bit display detile differs from CPU reference");
+}
+
 void checkBufferReuse(const Context& context) {
     constexpr auto usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
     VkBuffer handle = VK_NULL_HANDLE;
@@ -115,4 +159,6 @@ void RunColorTransferTests(const AgcDriver::Graphics::Context& context) {
     checkConversion(context, 130, 129, AgcDriver::Graphics::ColorTileMode::RenderTarget, false);
     checkConversion(context, 257, 17, AgcDriver::Graphics::ColorTileMode::RenderTarget, true);
     checkConversion(context, 192, 13, AgcDriver::Graphics::ColorTileMode::Linear, false);
+    checkTenBitDetile(context, false);
+    checkTenBitDetile(context, true);
 }

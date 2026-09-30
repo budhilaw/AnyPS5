@@ -1057,7 +1057,7 @@ void VulkanDevice::present(std::uint32_t width, std::uint32_t height, bool opaqu
         resident->DebugClear(batch.Handle(), 1.0f, 0.0f, 1.0f);
         batch.SubmitAndWait();
     }
-    auto* scaler = resident && DisplayFormatRgba(display->pixelFormat) ? state->rgbaScaler.get() : state->scaler.get();
+    auto* scaler = resident && DisplayFormatRgba(display->pixelFormat) && !DisplayFormatTenBit(display->pixelFormat) ? state->rgbaScaler.get() : state->scaler.get();
     if (!pixels.empty()) state->Upload(pixels);
     timing.Mark("pixel_upload");
     auto wait = state->DeviceFunction<PFN_vkWaitForFences>("vkWaitForFences");
@@ -1103,9 +1103,9 @@ void VulkanDevice::present(std::uint32_t width, std::uint32_t height, bool opaqu
         scaler->EnsureSourceImage(width, height);
         if (resident) {
             resident->Transition(commands, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-            scaler->RecordImage(commands, resident->Target().Image());
+            scaler->RecordImage(commands, resident->Target().Image(), resident->Description().format);
         } else {
-            if (display != nullptr) state->colorTransfer->Detile(commands, DisplayFormatRgba(display->pixelFormat));
+            if (display != nullptr) state->colorTransfer->Detile(commands, DisplayFormatRgba(display->pixelFormat), DisplayFormatTenBit(display->pixelFormat));
             scaler->RecordUpload(commands, display != nullptr ? state->colorTransfer->LinearBuffer() : state->uploadBuffer);
         }
         VkClearColorValue letterbox{};
