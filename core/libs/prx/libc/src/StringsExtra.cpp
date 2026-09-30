@@ -6,6 +6,9 @@
 #include <cstring>
 #include <cwchar>
 #include <stdexcept>
+#ifdef _WIN32
+#include "prx/libc/include/WindowsFormatting.hpp"
+#endif
 
 namespace {
 constexpr int InvalidArgument = 22, OutOfRange = 34;
@@ -24,20 +27,34 @@ int APS5_VABI strcpy_s_nid_postfix(char* destination, size_t size, const char* s
 
 int APS5_VABI snprintf_s_nid_postfix(char* buffer, size_t size, const char* format, ...) {
     if (buffer == nullptr || format == nullptr || size == 0) throw std::invalid_argument("snprintf_s: invalid argument");
+#ifdef _WIN32
+    __builtin_sysv_va_list arguments;
+    __builtin_sysv_va_start(arguments, format);
+    const int result = LibcDetail::FormatWindows(buffer, size, format, arguments);
+    __builtin_sysv_va_end(arguments);
+#else
     std::va_list arguments;
     va_start(arguments, format);
     const int result = std::vsnprintf(buffer, size, format, arguments);
     va_end(arguments);
+#endif
     if (result < 0 || static_cast<size_t>(result) >= size) { buffer[0] = 0; return -1; }
     return result;
 }
 
 int APS5_VABI sprintf_s_nid_postfix(char* buffer, size_t size, const char* format, ...) {
     if (buffer == nullptr || format == nullptr || size == 0) throw std::invalid_argument("sprintf_s: invalid argument");
+#ifdef _WIN32
+    __builtin_sysv_va_list arguments;
+    __builtin_sysv_va_start(arguments, format);
+    const int result = LibcDetail::FormatWindows(buffer, size, format, arguments);
+    __builtin_sysv_va_end(arguments);
+#else
     std::va_list arguments;
     va_start(arguments, format);
     const int result = std::vsnprintf(buffer, size, format, arguments);
     va_end(arguments);
+#endif
     if (result < 0 || static_cast<size_t>(result) >= size) { buffer[0] = 0; return -1; }
     return result;
 }
