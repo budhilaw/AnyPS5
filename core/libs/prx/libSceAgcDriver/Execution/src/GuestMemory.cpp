@@ -69,6 +69,11 @@ void CheckRange(const void* pointer, std::size_t bytes, std::size_t alignment, b
     timing.Mark("verified_miss");
 #endif
 #ifdef _WIN32
+    if (GuestAllocations::GuestAllocationsCovers_nid_postfix(address, bytes, writable)) {
+        verified[nextVerified++ % verified.size()] = {epoch, address, end, writable};
+        timing.Mark("registry");
+        return;
+    }
     bool rangeWritable = true;
     bool coveredByOneRegion = false;
     while (cursor < end) {

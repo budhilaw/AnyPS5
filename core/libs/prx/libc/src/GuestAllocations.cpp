@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include "prx/libc/include/GuestAllocations.hpp"
@@ -267,6 +268,69 @@ std::atomic<std::uint64_t>& guestMapEpoch() {
 
 std::uint64_t GuestAllocationsMapEpoch_nid_postfix() {
     return guestMapEpoch().load(std::memory_order_acquire);
+}
+
+namespace {
+
+struct Coverage {
+    struct Entry {
+        std::uint64_t begin;
+        std::uint64_t end;
+        bool readable;
+        bool writable;
+    };
+    std::uint64_t epoch = 0;
+    std::vector<Entry> ranges;
+};
+
+std::mutex coverageMutex;
+std::shared_ptr<const Coverage> publishedCoverage;
+
+std::shared_ptr<const Coverage> currentCoverage() {
+    thread_local std::shared_ptr<const Coverage>* cached = nullptr;
+    if (cached == nullptr) cached = new std::shared_ptr<const Coverage>();
+    const auto epoch = guestMapEpoch().load(std::memory_order_acquire);
+    if (*cached && (*cached)->epoch == epoch) return *cached;
+    {
+        std::lock_guard lock(coverageMutex);
+        if (publishedCoverage && publishedCoverage->epoch == epoch) {
+            *cached = publishedCoverage;
+            return *cached;
+        }
+    }
+    auto built = std::make_shared<Coverage>();
+    {
+        std::lock_guard lock(registry().mutex);
+        built->epoch = guestMapEpoch().load(std::memory_order_acquire);
+        built->ranges.reserve(registry().ranges.size());
+        for (const auto& [base, range] : registry().ranges) built->ranges.push_back({range->address, range->address + range->bytes, range->readable, range->writable});
+    }
+    {
+        std::lock_guard lock(coverageMutex);
+        if (!publishedCoverage || publishedCoverage->epoch < built->epoch) publishedCoverage = built;
+    }
+    *cached = std::move(built);
+    return *cached;
+}
+
+}
+
+bool GuestAllocationsCovers_nid_postfix(std::uint64_t address, std::size_t bytes, bool writable) {
+    if (address == 0 || bytes == 0 || bytes > std::numeric_limits<std::uint64_t>::max() - address) return false;
+    const auto coverage = currentCoverage();
+    const auto& ranges = coverage->ranges;
+    const auto end = address + bytes;
+    auto found = std::upper_bound(ranges.begin(), ranges.end(), address, [](std::uint64_t value, const Coverage::Entry& entry) { return value < entry.begin; });
+    if (found == ranges.begin()) return false;
+    --found;
+    auto cursor = address;
+    for (; found != ranges.end() && found->begin <= cursor; ++found) {
+        if (found->end <= cursor) return false;
+        if (!found->readable || (writable && !found->writable)) return false;
+        cursor = found->end;
+        if (cursor >= end) return true;
+    }
+    return false;
 }
 
 std::uint64_t GuestAllocationsProtectionGeneration_nid_postfix() {

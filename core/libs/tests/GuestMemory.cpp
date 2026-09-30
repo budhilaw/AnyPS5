@@ -155,4 +155,15 @@ int main() {
     }
     RequirePhysicalAliasing();
     RequireTrackingFastPath();
+    void* writable = mmap_nid_postfix(nullptr, page, 3, 0x1002, -1, 0);
+    void* readOnly = mmap_nid_postfix(nullptr, page, 1, 0x1002, -1, 0);
+    Require(writable != failed && readOnly != failed);
+    const auto writableAddress = reinterpret_cast<std::uint64_t>(writable);
+    const auto readOnlyAddress = reinterpret_cast<std::uint64_t>(readOnly);
+    Require(GuestAllocations::GuestAllocationsCovers_nid_postfix(writableAddress + 8, page - 8, true));
+    Require(GuestAllocations::GuestAllocationsCovers_nid_postfix(readOnlyAddress, page, false));
+    Require(!GuestAllocations::GuestAllocationsCovers_nid_postfix(readOnlyAddress, 16, true));
+    Require(munmap_nid_postfix(writable, page) == 0 && munmap_nid_postfix(readOnly, page) == 0);
+    Require(!GuestAllocations::GuestAllocationsCovers_nid_postfix(writableAddress, 16, false));
+    Require(!GuestAllocations::GuestAllocationsCovers_nid_postfix(readOnlyAddress, 16, false));
 }
