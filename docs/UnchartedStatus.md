@@ -55,6 +55,7 @@ Build and relink as described in the README. The run folder holds the relinked `
 - `VirtualQuery` walks page tables and costs milliseconds on multi-GiB views; guest range checks consult the allocation registry first, and watches keep their original protections instead of querying them again.
 - Remapping a view unmaps it for a moment. A guest thread that faults on it waits for the remap and retries; the retry budget restarts after every remap.
 - Fatal exception reports print the state and protection of the faulting page.
+- Guest threads run at `THREAD_PRIORITY_ABOVE_NORMAL` (guest priority 300 or less), `NORMAL` (700 or less) or `LOWEST`. The driver worker and graphics threads run at `THREAD_PRIORITY_HIGHEST`, so busy guest threads no longer preempt them.
 
 ## Frame rate
 
@@ -125,7 +126,7 @@ Still open after that run: the title above 120 fps. Before the default limit is 
 
 - `ANYPS5_DUAL_LANE=1`: runs every wave64 compute program with two guest lanes per invocation, as before single-lane compute; `recompile_replay` prints which cached compute programs run single-lane.
 - `ANYPS5_SAMPLE_THREADS=1`: samples the title, worker and graphics threads every millisecond (Windows) and prints the hottest functions and call chains every 30 s.
-- `ANYPS5_TRACE_SLOW_OPS=1`: prints 5 s summaries of lock waits, the reasons the driver worker waits for the graphics thread, the stages of recording draws and dispatches, and slow memory, tracking and device operations. On Windows it also prints the first tracking fault of each guest instruction with the watch it hit.
+- `ANYPS5_TRACE_SLOW_OPS=1`: prints 5 s summaries of lock waits, the reasons the driver worker waits for the graphics thread, the stages of recording draws and dispatches, and slow memory, tracking and device operations. On Windows it also prints the first tracking fault of each guest instruction with the watch it hit. Every 5 s the driver worker and graphics threads print the CPU time they used against wall time (`[slow-ops] worker thread: cpu=... ms wall=... ms`); the rest of the wall time went to waiting or preemption. The worker's `WAIT_REG_MEM` polling spins, so it counts as CPU time.
 - `ANYPS5_TRACE_TIMING=1`: per-frame timing of the driver stages and GPU timestamps per command batch. `Graphics.Draw.feedback` counts the draws that sample their own color or depth target. Draw-queue batches add up in `Graphics.GpuTime.execute`, one-off batches in `Graphics.GpuBatch.<name>` (`depth_copy`, `color_copy`, `resolve`, `cpu_access`, `flush_stores`, `null_texture`, `readback`, `present`). A batch is timed from the moment the GPU work submitted before it has finished, so batch times do not overlap.
 - `ANYPS5_TRACE_GPU_PASSES=1`: times every render pass, keyed by its color target (or its depth target when it has no color target) and its extent, and every compute dispatch, keyed by program address and group count. A draw-queue batch holds 512 timestamps; once they run out, the batch stops timing passes and dispatches and counts the ones it dropped. Every 5 s, `[gpu-time]` lines on stderr give the batch, pass, dispatch, untimed and one-off totals and the 20 most expensive passes and programs. With `ANYPS5_TRACE_TIMING=1` the frame lines also carry `Graphics.GpuPass.<width>x<height>` and `Graphics.GpuProgram.<address>`.
 
