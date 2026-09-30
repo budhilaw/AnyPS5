@@ -9,6 +9,7 @@
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GpuJournal.hpp"
 #include "prx/libc/include/General.hpp"
+#include "prx/libc/include/PreciseSleep.hpp"
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
@@ -433,7 +434,7 @@ void Wait(std::span<const std::uint32_t> packet) {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
     while (!TryWait(packet)) {
         require(std::chrono::steady_clock::now() < deadline, "WAIT_REG_MEM did not complete within 30 seconds");
-        std::this_thread::sleep_for(std::chrono::microseconds(20));
+        PreciseSleepNanos_nid_no_patch(20000);
     }
 }
 

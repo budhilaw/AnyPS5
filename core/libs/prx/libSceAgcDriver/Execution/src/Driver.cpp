@@ -22,6 +22,7 @@
 #include "prx/libSceAgcDriver/Execution/include/MemoryAccessScope.hpp"
 #include "prx/libSceAgcDriver/Eq/include/Event.hpp"
 #include "prx/libc/include/GuestMemoryTracking.hpp"
+#include "prx/libc/include/PreciseSleep.hpp"
 #include <bit>
 #include <algorithm>
 #include <array>
@@ -1333,8 +1334,12 @@ private:
                     timing.Mark("queue_mutex_wait");
                     const bool haveWork = std::any_of(queued.begin(), queued.end(), [](const auto& entry) { return !entry.second.empty(); });
                     if (!haveWork) {
-                        if (gpuPending) changed.wait_for(lock, std::chrono::microseconds(500), [&] { return failure || stopping || !pending.empty(); });
-                        else changed.wait(lock, [&] { return failure || stopping || !pending.empty(); });
+                        if (!gpuPending) changed.wait(lock, [&] { return failure || stopping || !pending.empty(); });
+                        else if (!failure && !stopping && pending.empty()) {
+                            lock.unlock();
+                            PreciseSleepNanos_nid_no_patch(200000);
+                            lock.lock();
+                        }
                     }
                     timing.Mark("wait_for_submission");
                     rethrowFailure();
@@ -1384,7 +1389,7 @@ private:
                 }
                 if (anyQueued && !progressed) {
                     require(FrameTiming::Clock::now() - oldestBlock < std::chrono::seconds(30), "WAIT_REG_MEM did not complete within 30 seconds (no queue or title thread releases the label)");
-                    std::this_thread::sleep_for(std::chrono::microseconds(20));
+                    PreciseSleepNanos_nid_no_patch(20000);
                 }
             }
             drainGraphics();

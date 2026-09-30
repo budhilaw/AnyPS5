@@ -26,8 +26,8 @@
 #include "prx/libSceAgcDriver/Graphics/include/SlowPipeline.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Pipeline.hpp"
 #include <chrono>
-#include <condition_variable>
 #include "prx/libc/include/General.hpp"
+#include "prx/libc/include/PreciseSleep.hpp"
 #include "prx/libSceAgcDriver/Execution/include/VulkanLibrary.hpp"
 #include <SDL_loadso.h>
 #include <SDL_error.h>
@@ -98,7 +98,6 @@ struct VulkanDevice::State {
         hostRanges = std::move(ranges);
     }
     std::mutex ticketMutex;
-    std::condition_variable ticketDone;
     std::uint64_t ticketsIssued = 0;
     std::uint64_t ticketsDone = 0;
     struct RetiredSwapchain {
@@ -718,11 +717,8 @@ std::uint64_t VulkanDevice::SubmitTicket() {
     }
     auto* shared = state.get();
     state->drawQueue->EnqueueCompletion([shared, ticket] {
-        {
-            std::lock_guard lock(shared->ticketMutex);
-            shared->ticketsDone = std::max(shared->ticketsDone, ticket);
-        }
-        shared->ticketDone.notify_all();
+        std::lock_guard lock(shared->ticketMutex);
+        shared->ticketsDone = std::max(shared->ticketsDone, ticket);
     });
     state->drawQueue->Flush();
     return ticket;
@@ -730,15 +726,17 @@ std::uint64_t VulkanDevice::SubmitTicket() {
 
 void VulkanDevice::WaitTicket(std::uint64_t ticket) {
     PerformanceTimer timing("Vulkan.WaitTicket");
-    std::unique_lock lock(state->ticketMutex);
-    while (state->ticketsDone < ticket) {
-        if (state->ticketDone.wait_for(lock, std::chrono::milliseconds(1), [&] { return state->ticketsDone >= ticket; })) break;
-        lock.unlock();
+    const auto done = [&] {
+        std::lock_guard lock(state->ticketMutex);
+        return state->ticketsDone >= ticket;
+    };
+    while (!done()) {
         {
             std::lock_guard memoryLock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
             state->drawQueue->Collect();
         }
-        lock.lock();
+        if (done()) break;
+        PreciseSleepNanos_nid_no_patch(100000);
     }
 }
 
