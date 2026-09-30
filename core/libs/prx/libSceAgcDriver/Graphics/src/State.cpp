@@ -4,6 +4,7 @@
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libc/include/General.hpp"
 #include <algorithm>
+#include <atomic>
 #include <set>
 #include <mutex>
 #include <bit>
@@ -11,6 +12,7 @@
 #include <limits>
 #include <sstream>
 #include <cstdlib>
+#include <tuple>
 
 namespace AgcDriver::Graphics {
 
@@ -91,25 +93,89 @@ std::uint32_t readOr(const Registers& registers, std::uint32_t offset, std::uint
     return it == registers.end() ? fallback : it->second;
 }
 
-VkStencilOp stencilOp(std::uint32_t value, std::uint32_t reference, std::uint32_t operand) {
-    switch (value) {
-        case 0: return VK_STENCIL_OP_KEEP;
-        case 1: return VK_STENCIL_OP_ZERO;
-        case 2:
-        case 4:
-            if ((value == 2 ? 0xffu : operand) != reference) {
-                static std::once_flag once;
-                std::call_once(once, [&] { APS5_LOG_OUT("stencil op %u writes 0x%02x but Vulkan replaces with the reference 0x%02x", value, value == 2 ? 0xffu : operand, reference); });
-            }
-            return VK_STENCIL_OP_REPLACE;
-        case 3: return VK_STENCIL_OP_REPLACE;
-        case 5: return VK_STENCIL_OP_INCREMENT_AND_CLAMP;
-        case 6: return VK_STENCIL_OP_DECREMENT_AND_CLAMP;
-        case 7: return VK_STENCIL_OP_INVERT;
-        case 8: return VK_STENCIL_OP_INCREMENT_AND_WRAP;
-        case 9: return VK_STENCIL_OP_DECREMENT_AND_WRAP;
-        default: throw std::runtime_error("AGC graphics: unsupported stencil logic operation " + std::to_string(value));
+bool firstStencilReport(std::uint32_t op) {
+    static std::array<std::atomic<bool>, 16> reported{};
+    return !reported[op].load(std::memory_order_relaxed) && !reported[op].exchange(true, std::memory_order_relaxed);
+}
+
+VkStencilOpState stencilFace(std::uint32_t ops, std::uint32_t mask, std::uint32_t compare) {
+    const auto reference = mask & 0xffu;
+    const auto operand = mask >> 24u;
+    VkStencilOpState face{VK_STENCIL_OP_KEEP, VK_STENCIL_OP_KEEP, VK_STENCIL_OP_KEEP, static_cast<VkCompareOp>(compare), (mask >> 8u) & 0xffu, (mask >> 16u) & 0xffu, reference};
+    const std::array<std::uint32_t, 3> codes{ops & 0xfu, (ops >> 4u) & 0xfu, (ops >> 8u) & 0xfu};
+    std::uint32_t logic = 0;
+    std::uint32_t writer = 0;
+    bool mixed = false;
+    for (const auto code : codes) {
+        if (code == 0) continue;
+        if (writer == 0) writer = code;
+        else if (code != writer) mixed = true;
+        if (code == 10 || code == 11 || code == 12 || code == 15) logic = code;
     }
+    if (logic != 0) {
+        if (mixed) throw std::runtime_error("AGC graphics: unsupported stencil logic operation " + std::to_string(logic) + " combined with other stencil operations of the same face");
+        face.writeMask &= (logic == 10 || logic == 15 ? ~operand : operand) & 0xffu;
+    }
+    std::array<std::pair<std::uint32_t, std::uint32_t>, 3> replaced{};
+    std::size_t replacedCount = 0;
+    const std::array<VkStencilOp*, 3> targets{&face.failOp, &face.passOp, &face.depthFailOp};
+    for (std::size_t slot = 0; slot < codes.size(); ++slot) {
+        const auto code = codes[slot];
+        auto& op = *targets[slot];
+        switch (code) {
+            case 0: op = VK_STENCIL_OP_KEEP; break;
+            case 1:
+            case 10: op = VK_STENCIL_OP_ZERO; break;
+            case 2:
+            case 3:
+            case 4:
+            case 11:
+                op = VK_STENCIL_OP_REPLACE;
+                replaced[replacedCount++] = {code, code == 3 ? reference : code == 4 ? operand : 0xffu};
+                break;
+            case 5:
+            case 6:
+            case 8:
+            case 9:
+                op = operand == 0 ? VK_STENCIL_OP_KEEP : code == 5 ? VK_STENCIL_OP_INCREMENT_AND_CLAMP : code == 6 ? VK_STENCIL_OP_DECREMENT_AND_CLAMP : code == 8 ? VK_STENCIL_OP_INCREMENT_AND_WRAP : VK_STENCIL_OP_DECREMENT_AND_WRAP;
+                if (operand != 1 && firstStencilReport(code)) APS5_LOG_OUT("stencil op %u steps by STENCILOPVAL %u, %s", code, operand, operand == 0 ? "which keeps the stencil" : "but Vulkan steps by one");
+                break;
+            case 7:
+            case 12:
+            case 15: op = VK_STENCIL_OP_INVERT; break;
+            default:
+                op = VK_STENCIL_OP_INVERT;
+                if ((operand & face.writeMask) != (code == 13 ? face.writeMask : 0u) && firstStencilReport(code)) APS5_LOG_OUT("stencil logic op %u with STENCILOPVAL 0x%02x under write mask 0x%02x is approximated by INVERT", code, operand, face.writeMask);
+                break;
+        }
+    }
+    if (replacedCount == 0) return face;
+    const auto value = replaced[0].second;
+    const auto compared = face.compareOp == VK_COMPARE_OP_NEVER || face.compareOp == VK_COMPARE_OP_ALWAYS ? 0u : face.compareMask;
+    const bool agree = std::all_of(replaced.begin(), replaced.begin() + static_cast<std::ptrdiff_t>(replacedCount), [&](const auto& item) { return ((item.second ^ value) & face.writeMask) == 0; });
+    if (agree && ((reference ^ value) & compared & face.writeMask) == 0) {
+        const auto replacedBits = face.writeMask & ~compared;
+        face.reference = (reference & ~replacedBits) | (value & replacedBits);
+    }
+    for (std::size_t item = 0; item < replacedCount; ++item) {
+        const auto [code, written] = replaced[item];
+        if (((written ^ face.reference) & face.writeMask) != 0 && firstStencilReport(code)) APS5_LOG_OUT("stencil op %u writes 0x%02x under write mask 0x%02x but Vulkan replaces with the reference 0x%02x", code, written, face.writeMask, face.reference);
+    }
+    return face;
+}
+
+void reportWriteBase(bool stencil, std::uint64_t read, std::uint64_t write, bool writes, VkExtent2D extent) {
+    using Key = std::tuple<bool, std::uint64_t, std::uint64_t, bool>;
+    thread_local std::array<Key, 2> last{};
+    const Key key{stencil, read, write, writes};
+    auto& previous = last[stencil ? 1u : 0u];
+    if (previous == key) return;
+    previous = key;
+    static std::mutex mutex;
+    static std::set<Key> reported;
+    std::lock_guard lock(mutex);
+    if (reported.size() >= 256 || !reported.insert(key).second) return;
+    APS5_LOG_OUT("%s write base 0x%llx differs from its read base 0x%llx (%ux%u, %s)", stencil ? "stencil" : "depth", static_cast<unsigned long long>(write), static_cast<unsigned long long>(read), extent.width, extent.height, writes ? "written" : "not written");
 }
 
 void zero(const Registers& registers, std::uint32_t offset, std::uint32_t mask, const char* name, const char* bank = "context") {
@@ -274,13 +340,8 @@ State DecodeState(const QueueState& queue) {
             const auto backMask = (control & 0x80u) != 0 ? readOr(cx, 0x10d, 0) : frontMask;
             const auto backOps = (control & 0x80u) != 0 ? ops >> 12u : ops;
             const auto backFunc = (control & 0x80u) != 0 ? (control >> 20u) & 7u : (control >> 8u) & 7u;
-            const auto face = [&](std::uint32_t faceOps, std::uint32_t mask, std::uint32_t compare) {
-                const auto reference = mask & 0xffu;
-                const auto operand = mask >> 24u;
-                return VkStencilOpState{stencilOp(faceOps & 0xfu, reference, operand), stencilOp((faceOps >> 4u) & 0xfu, reference, operand), stencilOp((faceOps >> 8u) & 0xfu, reference, operand), static_cast<VkCompareOp>(compare), (mask >> 8u) & 0xffu, (mask >> 16u) & 0xffu, reference};
-            };
-            depth.front = face(ops, frontMask, (control >> 8u) & 7u);
-            depth.back = face(backOps, backMask, backFunc);
+            depth.front = stencilFace(ops, frontMask, (control >> 8u) & 7u);
+            depth.back = stencilFace(backOps, backMask, backFunc);
         }
         if (depth.clearDepth) depth.write = false;
         if (depth.clearStencil) {
@@ -327,6 +388,11 @@ State DecodeState(const QueueState& queue) {
                 if (result.depth.writeAddress != 0) result.depth.writeAddress += sliceStart * DepthSliceBytes(zFormat == 1 ? 2u : 4u, result.depth.extent.width, result.depth.extent.height);
                 if (stencil) result.depth.stencilAddress += sliceStart * DepthSliceBytes(1u, result.depth.extent.width, result.depth.extent.height);
                 if (stencil && result.depth.stencilWriteAddress != 0) result.depth.stencilWriteAddress += sliceStart * DepthSliceBytes(1u, result.depth.extent.width, result.depth.extent.height);
+            }
+            if (result.depth.writeAddress != result.depth.address) reportWriteBase(false, result.depth.address, result.depth.writeAddress, depth.write || depth.clearDepth, result.depth.extent);
+            if (stencil && result.depth.stencilWriteAddress != result.depth.stencilAddress) {
+                const auto writesFace = [](const VkStencilOpState& face) { return face.writeMask != 0 && (face.failOp != VK_STENCIL_OP_KEEP || face.passOp != VK_STENCIL_OP_KEEP || face.depthFailOp != VK_STENCIL_OP_KEEP); };
+                reportWriteBase(true, result.depth.stencilAddress, result.depth.stencilWriteAddress, depth.clearStencil || (depth.stencilTest && (writesFace(depth.front) || writesFace(depth.back))), result.depth.extent);
             }
         }
     }
