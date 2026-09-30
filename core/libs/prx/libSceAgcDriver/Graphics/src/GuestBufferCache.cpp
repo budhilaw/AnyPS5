@@ -270,7 +270,7 @@ bool GuestBufferCache::hostExtent(std::uint64_t address, std::uint64_t bytes, Gu
     if (!found || reinterpret_cast<std::uintptr_t>(extent.alias) % alignment != 0 || address + bytes > extent.address + importBytes) {
         static const bool trace = std::getenv("ANYPS5_TRACE_WAITS") != nullptr;
         static int reported = 0;
-        if (trace && bytes >= (1u << 20) && reported++ < 20) APS5_LOG_OUT("host range 0x%llx+0x%llx unavailable: extent %d 0x%llx+0x%llx alias %p", static_cast<unsigned long long>(address), static_cast<unsigned long long>(bytes), found ? 1 : 0, static_cast<unsigned long long>(extent.address), static_cast<unsigned long long>(extent.bytes), extent.alias);
+        if (trace && reported++ < 60) APS5_LOG_OUT("host range 0x%llx+0x%llx unavailable: extent %d 0x%llx+0x%llx alias %p", static_cast<unsigned long long>(address), static_cast<unsigned long long>(bytes), found ? 1 : 0, static_cast<unsigned long long>(extent.address), static_cast<unsigned long long>(extent.bytes), extent.alias);
         return false;
     }
     return true;
