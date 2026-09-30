@@ -87,6 +87,8 @@ void ShaderWarmup::replay(std::vector<std::string> requests) noexcept {
             auto& request = deserialized.request;
             request.shader.codeHash = ShaderCodeHash(request.shader.code);
             (void)ShaderRecompiler::Recompile(request);
+        } catch (const std::exception& error) {
+            APS5_LOG_ERR("shader warmup: request skipped: %s", error.what());
         } catch (...) {
         }
     }
