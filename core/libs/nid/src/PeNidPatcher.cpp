@@ -84,7 +84,7 @@ void PeNidPatcher::PatchNids(std::vector<std::uint8_t>& pe, const std::string& l
     const std::size_t exportDirOffset = RvaToOffset(pe, exportDir.VirtualAddress, peHeaderOffset, numberOfSections, sizeOfOptionalHeader);
     const auto exportTable = Read<PeExportDirectory>(pe, exportDirOffset);
 
-    if (exportTable.NumberOfNames == 0u) throw std::runtime_error("no exported names");
+    if (exportTable.NumberOfNames == 0u) return;
 
     const std::size_t namesArrayOffset = RvaToOffset(pe, exportTable.AddressOfNames, peHeaderOffset, numberOfSections, sizeOfOptionalHeader);
     const std::size_t ordinalsArrayOffset = RvaToOffset(pe, exportTable.AddressOfNameOrdinals, peHeaderOffset, numberOfSections, sizeOfOptionalHeader);
