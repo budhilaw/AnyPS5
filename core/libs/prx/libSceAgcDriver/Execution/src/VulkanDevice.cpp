@@ -92,12 +92,22 @@ struct VulkanDevice::State {
     mutable std::mutex hostRangesMutex;
     std::shared_ptr<const std::vector<std::pair<std::uint64_t, std::uint64_t>>> hostRanges = std::make_shared<const std::vector<std::pair<std::uint64_t, std::uint64_t>>>();
     std::vector<std::pair<std::uint64_t, std::uint64_t>> hostRangesScratch;
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> hostRangesSource;
     void PublishHostRanges() {
         hostRangesScratch.clear();
         if (renderCache) renderCache->AppendColorRanges(hostRangesScratch);
         if (drawQueue) drawQueue->AppendWriteRanges(hostRangesScratch);
-        if (hostRangesScratch == *hostRanges) return;
-        auto ranges = std::make_shared<const std::vector<std::pair<std::uint64_t, std::uint64_t>>>(hostRangesScratch);
+        if (hostRangesScratch == hostRangesSource) return;
+        hostRangesSource = hostRangesScratch;
+        std::sort(hostRangesScratch.begin(), hostRangesScratch.end());
+        std::vector<std::pair<std::uint64_t, std::uint64_t>> merged;
+        merged.reserve(hostRangesScratch.size());
+        for (const auto& range : hostRangesScratch) {
+            if (range.first >= range.second) continue;
+            if (!merged.empty() && range.first <= merged.back().second) merged.back().second = std::max(merged.back().second, range.second);
+            else merged.push_back(range);
+        }
+        auto ranges = std::make_shared<const std::vector<std::pair<std::uint64_t, std::uint64_t>>>(std::move(merged));
         std::lock_guard lock(hostRangesMutex);
         hostRanges = std::move(ranges);
     }
@@ -1229,7 +1239,8 @@ bool VulkanDevice::NeedsResolve(std::uint64_t address, std::size_t bytes) const 
         ranges = state->hostRanges;
     }
     const auto end = address + bytes;
-    return std::any_of(ranges->begin(), ranges->end(), [&](const auto& range) { return range.first < end && address < range.second; });
+    const auto found = std::upper_bound(ranges->begin(), ranges->end(), address, [](std::uint64_t value, const std::pair<std::uint64_t, std::uint64_t>& range) { return value < range.second; });
+    return found != ranges->end() && found->first < end;
 }
 
 void VulkanDevice::Draw(const Graphics::State& graphics, const Pm4::DrawParameters& draw, std::span<const Graphics::CompiledShader> shaders, std::span<const Graphics::GuestMemorySnapshot> snapshots) {
