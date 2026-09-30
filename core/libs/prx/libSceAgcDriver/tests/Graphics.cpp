@@ -10,6 +10,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/GraphicsPipelineCache.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/GuestBufferMemory.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/RenderCache.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/TextureTiling.hpp"
 #include "prx/libc/include/GuestMemoryBacking.hpp"
 #include "prx/libc/include/GuestMemoryTracking.hpp"
 #include "IntermediateRepresentation/IrProgram.hpp"
@@ -368,6 +369,12 @@ struct MockDescriptorWrite {
     std::vector<VkDescriptorImageInfo> images;
 };
 
+struct MockImageBarrier {
+    VkPipelineStageFlags sourceStages;
+    VkPipelineStageFlags destinationStages;
+    VkImageMemoryBarrier barrier;
+};
+
 struct MockVulkan {
     std::uint64_t next = 1;
     std::int64_t live = 0;
@@ -397,6 +404,14 @@ struct MockVulkan {
     std::map<VkImageView, VkFormat> viewFormats;
     std::map<VkImageView, VkComponentMapping> viewComponents;
     std::map<VkImageView, VkImageUsageFlags> viewUsages;
+    std::map<VkImageView, VkImageAspectFlags> viewAspects;
+    std::map<VkImageView, VkImageViewType> viewTypes;
+    std::map<VkImageView, VkImage> viewImages;
+    std::map<VkImage, VkImageUsageFlags> imageUsages;
+    std::vector<MockImageBarrier> imageBarriers;
+    VkFormatFeatureFlags depthFeatures = 0;
+    std::uint32_t renderPasses = 0;
+    std::uint32_t draws = 0;
 };
 
 MockVulkan mock;
@@ -494,8 +509,9 @@ VKAPI_ATTR void VKAPI_CALL mockUpdateDescriptorSets(VkDevice, std::uint32_t coun
     }
 }
 
-VKAPI_ATTR VkResult VKAPI_CALL mockCreateImage(VkDevice, const VkImageCreateInfo*, const VkAllocationCallbacks*, VkImage* image) {
+VKAPI_ATTR VkResult VKAPI_CALL mockCreateImage(VkDevice, const VkImageCreateInfo* info, const VkAllocationCallbacks*, VkImage* image) {
     *image = makeHandle<VkImage>();
+    mock.imageUsages[*image] = info->usage;
     ++mock.live;
     return VK_SUCCESS;
 }
@@ -525,6 +541,9 @@ VKAPI_ATTR VkResult VKAPI_CALL mockCreateImageView(VkDevice, const VkImageViewCr
     mock.viewFormats[*view] = info->format;
     mock.viewComponents[*view] = info->components;
     mock.viewUsages[*view] = usage;
+    mock.viewAspects[*view] = info->subresourceRange.aspectMask;
+    mock.viewTypes[*view] = info->viewType;
+    mock.viewImages[*view] = info->image;
     ++mock.live;
     return VK_SUCCESS;
 }
@@ -552,8 +571,9 @@ VKAPI_ATTR VkResult VKAPI_CALL mockEndCommandBuffer(VkCommandBuffer) {
     return VK_SUCCESS;
 }
 
-VKAPI_ATTR void VKAPI_CALL mockCmdPipelineBarrier(VkCommandBuffer, VkPipelineStageFlags, VkPipelineStageFlags, VkDependencyFlags, std::uint32_t, const VkMemoryBarrier*, std::uint32_t, const VkBufferMemoryBarrier*, std::uint32_t, const VkImageMemoryBarrier*) {
+VKAPI_ATTR void VKAPI_CALL mockCmdPipelineBarrier(VkCommandBuffer, VkPipelineStageFlags sourceStages, VkPipelineStageFlags destinationStages, VkDependencyFlags, std::uint32_t, const VkMemoryBarrier*, std::uint32_t, const VkBufferMemoryBarrier*, std::uint32_t imageBarrierCount, const VkImageMemoryBarrier* imageBarriers) {
     ++mock.pipelineBarriers;
+    for (std::uint32_t i = 0; i < imageBarrierCount; ++i) mock.imageBarriers.push_back({sourceStages, destinationStages, imageBarriers[i]});
 }
 
 VKAPI_ATTR void VKAPI_CALL mockCmdClearColorImage(VkCommandBuffer, VkImage, VkImageLayout, const VkClearColorValue*, std::uint32_t, const VkImageSubresourceRange*) {}
@@ -750,6 +770,65 @@ PFN_vkVoidFunction VKAPI_CALL renderTargetProc(VkDevice device, const char* name
     };
     const auto it = table.find(name);
     return it == table.end() ? mockProc(device, name) : it->second;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL mockCreateRenderPass(VkDevice, const VkRenderPassCreateInfo*, const VkAllocationCallbacks*, VkRenderPass* pass) {
+    *pass = makeHandle<VkRenderPass>();
+    ++mock.live;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL mockDestroyRenderPass(VkDevice, VkRenderPass, const VkAllocationCallbacks*) {
+    --mock.live;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL mockCreateFramebuffer(VkDevice, const VkFramebufferCreateInfo*, const VkAllocationCallbacks*, VkFramebuffer* framebuffer) {
+    *framebuffer = makeHandle<VkFramebuffer>();
+    ++mock.live;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL mockDestroyFramebuffer(VkDevice, VkFramebuffer, const VkAllocationCallbacks*) {
+    --mock.live;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL mockCreateGraphicsPipelines(VkDevice, VkPipelineCache, std::uint32_t count, const VkGraphicsPipelineCreateInfo*, const VkAllocationCallbacks*, VkPipeline* pipelines) {
+    for (std::uint32_t i = 0; i < count; ++i) {
+        pipelines[i] = makeHandle<VkPipeline>();
+        ++mock.live;
+    }
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL mockCmdBeginRenderPass(VkCommandBuffer, const VkRenderPassBeginInfo*, VkSubpassContents) {
+    ++mock.renderPasses;
+}
+
+VKAPI_ATTR void VKAPI_CALL mockCmdEndRenderPass(VkCommandBuffer) {}
+
+VKAPI_ATTR void VKAPI_CALL mockCmdSetViewport(VkCommandBuffer, std::uint32_t, std::uint32_t, const VkViewport*) {}
+
+VKAPI_ATTR void VKAPI_CALL mockCmdSetScissor(VkCommandBuffer, std::uint32_t, std::uint32_t, const VkRect2D*) {}
+
+VKAPI_ATTR void VKAPI_CALL mockCmdDraw(VkCommandBuffer, std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t) {
+    ++mock.draws;
+}
+
+PFN_vkVoidFunction VKAPI_CALL drawProc(VkDevice device, const char* name) {
+    static const std::map<std::string_view, PFN_vkVoidFunction> table{
+        {"vkCreateRenderPass", reinterpret_cast<PFN_vkVoidFunction>(mockCreateRenderPass)},
+        {"vkDestroyRenderPass", reinterpret_cast<PFN_vkVoidFunction>(mockDestroyRenderPass)},
+        {"vkCreateFramebuffer", reinterpret_cast<PFN_vkVoidFunction>(mockCreateFramebuffer)},
+        {"vkDestroyFramebuffer", reinterpret_cast<PFN_vkVoidFunction>(mockDestroyFramebuffer)},
+        {"vkCreateGraphicsPipelines", reinterpret_cast<PFN_vkVoidFunction>(mockCreateGraphicsPipelines)},
+        {"vkCmdBeginRenderPass", reinterpret_cast<PFN_vkVoidFunction>(mockCmdBeginRenderPass)},
+        {"vkCmdEndRenderPass", reinterpret_cast<PFN_vkVoidFunction>(mockCmdEndRenderPass)},
+        {"vkCmdSetViewport", reinterpret_cast<PFN_vkVoidFunction>(mockCmdSetViewport)},
+        {"vkCmdSetScissor", reinterpret_cast<PFN_vkVoidFunction>(mockCmdSetScissor)},
+        {"vkCmdDraw", reinterpret_cast<PFN_vkVoidFunction>(mockCmdDraw)}
+    };
+    const auto it = table.find(name);
+    return it == table.end() ? renderTargetProc(device, name) : it->second;
 }
 
 AgcDriver::Graphics::Context mockContext() {
@@ -1268,6 +1347,8 @@ struct ModuleShape {
     std::uint32_t perVertexLength = 3;
     bool parameterOutput = false;
     bool rectParameters = false;
+    bool sampledImage = false;
+    std::uint32_t imageBinding = 0;
 };
 
 void emit(std::vector<std::uint32_t>& out, spv::Op op, std::initializer_list<std::uint32_t> operands) {
@@ -1387,6 +1468,20 @@ std::vector<std::uint32_t> makeModule(const ModuleShape& shape) {
         }
         if (shape.plainBuffer) declare(block, 0);
         if (shape.shaderData) declare(block, 5);
+    }
+    if (shape.sampledImage) {
+        const auto image = id();
+        const auto length = id();
+        const auto array = id();
+        const auto pointer = id();
+        const auto variable = id();
+        emit(declarations, spv::OpTypeImage, {image, floatType, spv::Dim2D, 0, 0, 0, 1, spv::ImageFormatUnknown});
+        emit(declarations, spv::OpConstant, {uintType, length, 1});
+        emit(declarations, spv::OpTypeArray, {array, image, length});
+        emit(declarations, spv::OpTypePointer, {pointer, spv::StorageClassUniformConstant, array});
+        emit(declarations, spv::OpVariable, {pointer, variable, spv::StorageClassUniformConstant});
+        emit(annotations, spv::OpDecorate, {variable, spv::DecorationDescriptorSet, 0});
+        emit(annotations, spv::OpDecorate, {variable, spv::DecorationBinding, shape.imageBinding});
     }
     emit(function, spv::OpFunction, {voidType, main, 0, functionType});
     emit(function, spv::OpLabel, {label});
@@ -1961,6 +2056,324 @@ void renderCacheTests() {
     Require(mock.live == 0, "render cache tests leaked Vulkan objects");
 }
 
+std::vector<std::uint32_t> depthTextureDescriptor(std::uint64_t address, std::uint32_t format, std::uint32_t type, std::uint32_t lastArray, std::uint32_t dstSel, std::uint32_t width = 64) {
+    constexpr std::uint32_t height = 32;
+    const auto base = address >> 8u;
+    return {static_cast<std::uint32_t>(base), static_cast<std::uint32_t>((base >> 32u) & 0xffu) | (format << 20u) | (((width - 1u) & 3u) << 30u), ((width - 1u) >> 2u) | ((height - 1u) << 14u), dstSel | (0x18u << 20u) | (type << 28u), lastArray, 0u, 0u, 0u};
+}
+
+AgcDriver::Graphics::Context depthContext() {
+    auto context = mockContext();
+    context.device = makeHandle<VkDevice>();
+    context.deviceProc = drawProc;
+    context.memory.memoryTypes[0].propertyFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    context.formatProperties = [](VkPhysicalDevice, VkFormat format, VkFormatProperties* properties) {
+        *properties = {};
+        const bool depth = format == VK_FORMAT_D16_UNORM || format == VK_FORMAT_D32_SFLOAT || format == VK_FORMAT_D32_SFLOAT_S8_UINT;
+        properties->optimalTilingFeatures = depth ? mock.depthFeatures : VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT | VK_FORMAT_FEATURE_TRANSFER_SRC_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
+    };
+    context.imageFormatProperties = [](VkPhysicalDevice, VkFormat, VkImageType, VkImageTiling, VkImageUsageFlags, VkImageCreateFlags, VkImageFormatProperties* properties) {
+        *properties = {};
+        properties->maxExtent = {16384, 16384, 1};
+        properties->maxMipLevels = 1;
+        properties->maxArrayLayers = 1;
+        properties->sampleCounts = VK_SAMPLE_COUNT_1_BIT;
+        properties->maxResourceSize = VkDeviceSize{1} << 32u;
+        return VK_SUCCESS;
+    };
+    context.limits.maxStorageBufferRange = 1u << 20u;
+    context.limits.maxPerStageDescriptorSampledImages = 16;
+    context.limits.maxDescriptorSetSampledImages = 16;
+    context.limits.maxFramebufferWidth = 16384;
+    context.limits.maxFramebufferHeight = 16384;
+    context.limits.framebufferNoAttachmentsSampleCounts = VK_SAMPLE_COUNT_1_BIT;
+    context.limits.maxViewportDimensions[0] = 16384;
+    context.limits.maxViewportDimensions[1] = 16384;
+    context.limits.viewportBoundsRange[0] = -32768.0f;
+    context.limits.viewportBoundsRange[1] = 32767.0f;
+    return context;
+}
+
+constexpr VkFormatFeatureFlags SampledDepthFeatures = VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT | VK_FORMAT_FEATURE_TRANSFER_SRC_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
+constexpr VkPipelineStageFlags DepthTestStages = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+
+void depthViewTests() {
+    using namespace AgcDriver::Graphics;
+    using Shape = ShaderRecompiler::DescriptorImageShape;
+    constexpr std::uint64_t depthAddress = 0x1468900000ull;
+    constexpr std::uint64_t stencilAddress = 0x1468a00000ull;
+    constexpr std::uint64_t recreatedAddress = 0x1468b00000ull;
+    constexpr std::uint64_t sweptAddress = 0x1468c00000ull;
+    constexpr std::uint64_t unfilteredAddress = 0x1468d00000ull;
+    constexpr std::uint64_t unfilteredStencilAddress = 0x1468e00000ull;
+    constexpr std::uint64_t unsampledAddress = 0x1468f00000ull;
+    constexpr VkPipelineStageFlags shaderStages = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_TESSELLATION_CONTROL_SHADER_BIT | VK_PIPELINE_STAGE_TESSELLATION_EVALUATION_SHADER_BIT | VK_PIPELINE_STAGE_MESH_SHADER_BIT_EXT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+    const VkComponentMapping identity{VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_G, VK_COMPONENT_SWIZZLE_B, VK_COMPONENT_SWIZZLE_A};
+    const VkComponentMapping splat{VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_ONE};
+    const VkComponentMapping red{VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ONE};
+    mock = MockVulkan{};
+    mock.depthFeatures = SampledDepthFeatures;
+    auto context = depthContext();
+    context.tessellationShader = true;
+    context.meshShader = true;
+    {
+        TextureDetiler detiler(context);
+        context.detiler = &detiler;
+        DrawQueue queue;
+        context.drawQueue = &queue;
+        RenderCache targets(context);
+        context.renderCache = &targets;
+        TextureCache cache(context);
+        context.textureCache = &cache;
+        const auto get = [&](const std::vector<std::uint32_t>& words, VkComponentMapping components, bool compare = false, const DepthImage* attached = nullptr) {
+            return cache.Get(words, DecodeTextureResource(words), components, false, compare, attached);
+        };
+        const auto lastTransition = [](const DepthImage& image) {
+            for (auto it = mock.imageBarriers.rbegin(); it != mock.imageBarriers.rend(); ++it) {
+                if (it->barrier.image == image.Image()) return *it;
+            }
+            throw std::runtime_error("a depth image recorded no layout transition");
+        };
+        const auto depth = targets.GetDepth({depthAddress, {64, 32}, VK_FORMAT_D32_SFLOAT_S8_UINT, true, stencilAddress});
+        Require(depth->Sampled() && depth->Filterable() && mock.imageUsages.at(depth->Image()) == (VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT), "a depth image the device can sample was created without sampled usage");
+        depth->Prepare(queue.Begin(context), true);
+        Require(depth->Attached() && depth->Generation() == 1, "a depth pass that writes did not advance the depth generation");
+        const auto depthWords = depthTextureDescriptor(depthAddress, 22, 9, 0, 0xfacu);
+        const auto color = DecodeState(makeState()).color;
+        ShaderRecompiler::RecompileResult vertex;
+        ShaderRecompiler::RecompileResult fragment;
+        fragment.bindings.push_back(imageBinding(0, Shape::Image2D, {depthWords, depthTextureDescriptor(stencilAddress, 5, 9, 0, 0xfacu)}));
+        const std::array<CompiledShader, 2> shaders{{{ShaderRecompiler::ShaderStage::Vertex, &vertex, 0}, {ShaderRecompiler::ShaderStage::Fragment, &fragment, 0}}};
+        const auto submits = mock.submitCount;
+        const auto transitions = mock.imageBarriers.size();
+        std::shared_ptr<Texture> direct;
+        {
+            mock.writes.clear();
+            ShaderResources resources(context, shaders, color, 0, 0, {}, nullptr);
+            const auto& textures = resources.Textures();
+            Require(textures.size() == 2 && textures[0]->IsDirectView() && textures[1]->IsDirectView() && textures[0]->DepthSources().size() == 1 && textures[0]->DepthSources().front() == depth && textures[1]->DepthSources().size() == 1 && textures[1]->DepthSources().front() == depth, "resident depth and stencil were not sampled through direct views of the depth image");
+            const auto& images = findWrite(0).images;
+            Require(images.size() == 2 && images[0].imageLayout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL && images[1].imageLayout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL, "direct depth and stencil views were not written in the read-only depth layout");
+            Require(mock.viewImages.at(images[0].imageView) == depth->Image() && mock.viewAspects.at(images[0].imageView) == VK_IMAGE_ASPECT_DEPTH_BIT && mock.viewFormats.at(images[0].imageView) == VK_FORMAT_D32_SFLOAT_S8_UINT && mock.viewTypes.at(images[0].imageView) == VK_IMAGE_VIEW_TYPE_2D && mock.viewUsages.at(images[0].imageView) == VK_IMAGE_USAGE_SAMPLED_BIT, "the direct depth view does not sample the depth aspect of the depth image");
+            Require(mock.viewImages.at(images[1].imageView) == depth->Image() && mock.viewAspects.at(images[1].imageView) == VK_IMAGE_ASPECT_STENCIL_BIT && mock.viewFormats.at(images[1].imageView) == VK_FORMAT_D32_SFLOAT_S8_UINT, "the direct stencil view does not sample the stencil aspect of the depth image");
+            Require(depth->ReadOnly() && mock.submitCount == submits && mock.imageBarriers.size() == transitions + 1, "sampling resident depth and stencil copied them or transitioned the depth image more than once");
+            const auto& transition = mock.imageBarriers.back();
+            Require(transition.barrier.image == depth->Image() && transition.barrier.oldLayout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL && transition.barrier.newLayout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL && transition.barrier.subresourceRange.aspectMask == (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT), "the depth image did not leave the attachment layout for the read-only layout");
+            Require(transition.sourceStages == DepthTestStages && transition.barrier.srcAccessMask == VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT && transition.destinationStages == shaderStages && transition.barrier.dstAccessMask == VK_ACCESS_SHADER_READ_BIT, "the read-only transition does not order depth writes before every shader stage that samples");
+            direct = textures[0];
+        }
+        const auto views = mock.viewFormats.size();
+        const auto recorded = mock.imageBarriers.size();
+        Require(get(depthWords, identity) == direct && mock.viewFormats.size() == views && mock.imageBarriers.size() == recorded, "a cached direct depth view was rebuilt or transitioned again while the depth image stayed read-only");
+        const auto compared = get(depthWords, identity, true);
+        Require(compared != direct && compared->IsDirectView() && compared->View() == direct->View() && mock.viewFormats.size() == views, "a depth compare descriptor did not sample the same depth aspect view");
+        const auto arrayed = get(depthTextureDescriptor(depthAddress, 22, 13, 0, 0xfacu), identity);
+        Require(arrayed->IsDirectView() && mock.viewTypes.at(arrayed->View()) == VK_IMAGE_VIEW_TYPE_2D_ARRAY && mock.viewAspects.at(arrayed->View()) == VK_IMAGE_ASPECT_DEPTH_BIT && mock.viewImages.at(arrayed->View()) == depth->Image(), "a single-slice array view of resident depth was not a direct 2D array view");
+        Require(get(depthTextureDescriptor(depthAddress, 22, 9, 0, 0x324u), splat)->IsDirectView(), "a fourth sampled view of one depth image was not created");
+        const auto overflow = get(depthTextureDescriptor(depthAddress, 22, 9, 0, 0x204u), red);
+        const auto restored = lastTransition(*depth);
+        Require(!overflow->IsDirectView() && overflow->DepthSources().front() == depth && depth->ReadOnly(), "a fifth sampled view of one depth image did not fall back to a copy");
+        Require(restored.barrier.oldLayout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL && restored.barrier.newLayout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL && restored.sourceStages == VK_PIPELINE_STAGE_TRANSFER_BIT && restored.destinationStages == shaderStages, "a depth copy did not return a read-only depth image to the read-only layout");
+        const auto generation = depth->Generation();
+        const auto pass = queue.Begin(context);
+        depth->Prepare(pass, false);
+        const auto attach = lastTransition(*depth);
+        Require(depth->Attached() && depth->Generation() == generation, "a depth pass that cannot write depth or stencil advanced the depth generation");
+        Require(attach.barrier.oldLayout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL && attach.barrier.newLayout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL && attach.sourceStages == shaderStages && attach.destinationStages == DepthTestStages && attach.barrier.dstAccessMask == (VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT), "a depth pass after sampling did not wait for every shader stage that sampled the depth image");
+        depth->Continue(false);
+        Require(depth->Generation() == generation, "a merged draw that cannot write depth or stencil advanced the depth generation");
+        depth->Continue(true);
+        depth->Prepare(pass, true);
+        Require(depth->Generation() == generation + 2, "draws that write depth or stencil did not advance the depth generation");
+        const auto beforeHit = mock.imageBarriers.size();
+        Require(get(depthWords, identity) == direct && depth->ReadOnly() && mock.imageBarriers.size() == beforeHit + 1 && lastTransition(*depth).barrier.oldLayout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, "a cached direct depth view did not return the depth image to the read-only layout after a depth pass");
+        depth->Prepare(queue.Begin(context), true);
+        const auto feedback = get(depthWords, identity, false, depth.get());
+        Require(!feedback->IsDirectView() && feedback->Image() != VK_NULL_HANDLE && feedback->Image() != depth->Image() && feedback->Layout() == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL && mock.viewFormats.at(feedback->View()) == VK_FORMAT_R32_SFLOAT && !depth->ReadOnly(), "sampling the depth image a draw renders to did not sample a copy");
+        Require(get(depthWords, identity) == direct && depth->ReadOnly(), "a copy for a draw that samples its own depth replaced the direct view of the same descriptor");
+        expectFailure([&] { static_cast<void>(get(depthTextureDescriptor(depthAddress, 7, 9, 0, 0xfacu), identity)); }, "does not match depth target format");
+        expectFailure([&] { static_cast<void>(get(depthTextureDescriptor(depthAddress, 22, 9, 0, 0xfacu, 128), identity)); }, "extent differs from the depth target");
+        auto mipWords = depthWords;
+        mipWords[5] = 1u << 4u;
+        expectFailure([&] { static_cast<void>(get(mipWords, identity)); }, "invalid depth texture view");
+        const auto sliceAddress = depthAddress + DepthSliceBytes(4, 64, 32);
+        const auto slice = targets.GetDepth({sliceAddress, {64, 32}, VK_FORMAT_D32_SFLOAT_S8_UINT, true, stencilAddress + DepthSliceBytes(1, 64, 32)});
+        slice->Prepare(queue.Begin(context), true);
+        const auto arrayWords = depthTextureDescriptor(depthAddress, 22, 13, 1, 0xfacu);
+        for (const bool directFirst : {true, false}) {
+            depth->Prepare(queue.Begin(context), true);
+            mock.writes.clear();
+            const auto directBinding = imageBinding(0, Shape::Image2D, {depthWords});
+            const auto arrayBinding = imageBinding(1, Shape::Image2DArray, {arrayWords});
+            ShaderRecompiler::RecompileResult mixed;
+            mixed.bindings = directFirst ? std::vector{directBinding, arrayBinding} : std::vector{arrayBinding, directBinding};
+            const std::array<CompiledShader, 2> mixedShaders{{{ShaderRecompiler::ShaderStage::Vertex, &vertex, 0}, {ShaderRecompiler::ShaderStage::Fragment, &mixed, 0}}};
+            ShaderResources resources(context, mixedShaders, color, 0, 0, {}, nullptr);
+            const auto& textures = resources.Textures();
+            Require(textures.size() == 2 && textures[directFirst ? 0 : 1] == direct && !textures[directFirst ? 1 : 0]->IsDirectView() && textures[directFirst ? 1 : 0]->DepthSources().size() == 2, "a draw did not sample one depth image directly and an array holding it through a copy");
+            Require(depth->ReadOnly() && findWrite(0).images.at(0).imageLayout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL, "a draw that samples a depth image directly and through a copy left it outside the layout its direct view declares");
+        }
+        auto original = targets.GetDepth({recreatedAddress, {64, 32}, VK_FORMAT_D32_SFLOAT, false});
+        original->Prepare(queue.Begin(context), true);
+        const auto recreatedWords = depthTextureDescriptor(recreatedAddress, 22, 9, 0, 0xfacu);
+        auto previous = get(recreatedWords, identity);
+        Require(previous->IsDirectView() && previous->DepthSources().front() == original, "a depth image without stencil was not sampled through a direct view");
+        const auto replacement = targets.GetDepth({recreatedAddress, {64, 32}, VK_FORMAT_D32_SFLOAT_S8_UINT, true, recreatedAddress + 0x80000u});
+        replacement->Prepare(queue.Begin(context), true);
+        const auto current = get(recreatedWords, identity);
+        Require(replacement != original && current != previous && current->IsDirectView() && current->DepthSources().front() == replacement && mock.viewImages.at(current->View()) == replacement->Image(), "a direct view kept sampling a depth image the render cache recreated");
+        const std::weak_ptr<DepthImage> recreated = original;
+        original.reset();
+        previous.reset();
+        Require(recreated.expired(), "the texture cache kept a recreated depth image alive");
+        auto swept = targets.GetDepth({sweptAddress, {64, 32}, VK_FORMAT_D32_SFLOAT, false});
+        swept->Prepare(queue.Begin(context), true);
+        Require(get(depthTextureDescriptor(sweptAddress, 22, 9, 0, 0xfacu), identity)->IsDirectView(), "a second depth image without stencil was not sampled through a direct view");
+        const std::weak_ptr<DepthImage> stale = swept;
+        swept.reset();
+        static_cast<void>(targets.GetDepth({sweptAddress, {64, 32}, VK_FORMAT_D32_SFLOAT_S8_UINT, true, sweptAddress + 0x80000u}));
+        Require(!stale.expired(), "a direct view no longer held its depth image before the texture cache swept");
+        for (int lookup = 0; lookup < 1024; ++lookup) static_cast<void>(get(depthWords, identity));
+        Require(stale.expired(), "the texture cache kept a depth image the render cache dropped past its periodic sweep");
+        mock.depthFeatures = SampledDepthFeatures & ~static_cast<VkFormatFeatureFlags>(VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT);
+        const auto unfiltered = targets.GetDepth({unfilteredAddress, {64, 32}, VK_FORMAT_D32_SFLOAT_S8_UINT, true, unfilteredStencilAddress});
+        unfiltered->Prepare(queue.Begin(context), true);
+        Require(unfiltered->Sampled() && !unfiltered->Filterable() && !get(depthTextureDescriptor(unfilteredAddress, 22, 9, 0, 0xfacu), identity)->IsDirectView(), "depth of a format the device cannot filter linearly was sampled through a direct view");
+        const auto stencilView = get(depthTextureDescriptor(unfilteredStencilAddress, 5, 9, 0, 0xfacu), identity);
+        Require(stencilView->IsDirectView() && mock.viewAspects.at(stencilView->View()) == VK_IMAGE_ASPECT_STENCIL_BIT, "stencil of a depth format without linear filtering was not sampled through a direct view");
+        mock.depthFeatures = SampledDepthFeatures & ~static_cast<VkFormatFeatureFlags>(VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT);
+        const auto unsampled = targets.GetDepth({unsampledAddress, {64, 32}, VK_FORMAT_D32_SFLOAT, false});
+        unsampled->Prepare(queue.Begin(context), true);
+        Require(!unsampled->Sampled() && (mock.imageUsages.at(unsampled->Image()) & VK_IMAGE_USAGE_SAMPLED_BIT) == 0 && !get(depthTextureDescriptor(unsampledAddress, 22, 9, 0, 0xfacu), identity)->IsDirectView(), "a depth format the device cannot sample was given sampled usage or a direct view");
+        queue.Wait();
+    }
+    Require(mock.live == 0, "direct depth views leaked Vulkan objects");
+}
+
+void depthDrawTests() {
+    using namespace AgcDriver::Graphics;
+    using Shape = ShaderRecompiler::DescriptorImageShape;
+    constexpr std::uint64_t depthAddress = 0x1469000000ull;
+    constexpr std::uint64_t stencilAddress = 0x1469100000ull;
+    constexpr std::uint64_t otherAddress = 0x1469200000ull;
+    constexpr std::uint64_t otherStencilAddress = 0x1469300000ull;
+    mock = MockVulkan{};
+    mock.depthFeatures = SampledDepthFeatures;
+    auto context = depthContext();
+    ShaderRecompiler::RecompileResult vertex;
+    vertex.spirv = makeModule({});
+    ShaderRecompiler::RecompileResult plain;
+    plain.spirv = makeModule({.fragment = true});
+    ShaderRecompiler::RecompileResult sampling;
+    sampling.spirv = makeModule({.fragment = true, .sampledImage = true, .imageBinding = ShaderRecompiler::FirstImageBinding});
+    sampling.bindings.push_back(imageBinding(ShaderRecompiler::FirstImageBinding, Shape::Image2D, {depthTextureDescriptor(depthAddress, 22, 9, 0, 0xfacu)}));
+    const std::array<CompiledShader, 2> writer{{{ShaderRecompiler::ShaderStage::Vertex, &vertex, 0}, {ShaderRecompiler::ShaderStage::Fragment, &plain, 0}}};
+    const std::array<CompiledShader, 2> reader{{{ShaderRecompiler::ShaderStage::Vertex, &vertex, 0}, {ShaderRecompiler::ShaderStage::Fragment, &sampling, 0}}};
+    auto state = DecodeState(makeState());
+    state.hasColorTarget = false;
+    state.extraColors.clear();
+    state.extraBlends.clear();
+    state.hasDepthTarget = true;
+    state.depth = {depthAddress, {64, 32}, VK_FORMAT_D32_SFLOAT_S8_UINT, true, stencilAddress};
+    state.renderExtent = {64, 32};
+    state.viewport = {0.0f, 0.0f, 64.0f, 32.0f, 0.0f, 1.0f};
+    state.scissor = {{0, 0}, {64, 32}};
+    state.negativeOneToOne = false;
+    state.rectList = false;
+    state.depthClamp = false;
+    state.depthState = {};
+    state.depthState.test = true;
+    state.depthState.compare = VK_COMPARE_OP_LESS_OR_EQUAL;
+    auto written = state;
+    written.depthState.write = true;
+    auto quiet = state;
+    quiet.depthState.stencilTest = true;
+    quiet.depthState.front = {VK_STENCIL_OP_REPLACE, VK_STENCIL_OP_REPLACE, VK_STENCIL_OP_REPLACE, VK_COMPARE_OP_ALWAYS, 0xffu, 0u, 1u};
+    quiet.depthState.back = quiet.depthState.front;
+    auto stenciled = quiet;
+    stenciled.depthState.back.writeMask = 0xffu;
+    auto cleared = state;
+    cleared.depthState.clearDepth = true;
+    auto elsewhere = quiet;
+    elsewhere.depth = {otherAddress, {64, 32}, VK_FORMAT_D32_SFLOAT_S8_UINT, true, otherStencilAddress};
+    const AgcDriver::Pm4::DrawParameters draw{0, 3, 0, 1, 0, false};
+    {
+        TextureDetiler detiler(context);
+        context.detiler = &detiler;
+        DrawQueue queue;
+        context.drawQueue = &queue;
+        RenderCache targets(context);
+        context.renderCache = &targets;
+        GraphicsPipelineCache pipelines(context);
+        context.graphicsPipelines = &pipelines;
+        TextureCache cache(context);
+        context.textureCache = &cache;
+        const auto sampled = [] { return findWrite(ShaderRecompiler::FirstImageBinding, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE).images.at(0); };
+        Draw(context, written, draw, writer);
+        const auto depth = targets.FindDepth(depthAddress);
+        Require(depth != nullptr && depth->Attached() && depth->Generation() == 1 && mock.renderPasses == 1 && mock.draws == 1, "a draw that writes depth did not render into a new depth pass");
+        Draw(context, quiet, draw, writer);
+        Require(depth->Generation() == 1 && mock.renderPasses == 1 && mock.draws == 2, "a draw with depth writes off, a stencil write mask of 0 and no clears advanced the depth generation or left the depth pass");
+        Draw(context, stenciled, draw, writer);
+        Require(depth->Generation() == 2 && mock.renderPasses == 1, "a draw that writes stencil through its back face did not advance the depth generation");
+        mock.writes.clear();
+        Draw(context, quiet, draw, reader);
+        const auto feedback = sampled();
+        Require(feedback.imageLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL && mock.viewFormats.at(feedback.imageView) == VK_FORMAT_R32_SFLOAT && mock.viewImages.at(feedback.imageView) != depth->Image(), "a draw that samples its own depth attachment did not sample a copy");
+        Require(depth->Attached() && depth->Generation() == 2 && mock.renderPasses == 2, "a draw that samples its own depth attachment did not render into it again or advanced its generation without writes");
+        mock.writes.clear();
+        Draw(context, elsewhere, draw, reader);
+        const auto view = sampled();
+        Require(view.imageLayout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL && mock.viewImages.at(view.imageView) == depth->Image() && mock.viewAspects.at(view.imageView) == VK_IMAGE_ASPECT_DEPTH_BIT && depth->ReadOnly() && mock.renderPasses == 3, "a draw that samples depth it does not render to did not sample the depth image directly");
+        const auto transition = [&] {
+            for (auto it = mock.imageBarriers.rbegin(); it != mock.imageBarriers.rend(); ++it) {
+                if (it->barrier.image == depth->Image()) return *it;
+            }
+            throw std::runtime_error("the sampled depth image recorded no layout transition");
+        }();
+        Require(transition.barrier.oldLayout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL && transition.barrier.newLayout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL && transition.destinationStages == (VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT), "a device without tessellation or mesh shaders did not make depth writes visible to its shader stages before sampling");
+        const auto barriers = mock.imageBarriers.size();
+        Draw(context, elsewhere, draw, reader);
+        Require(mock.renderPasses == 3 && mock.imageBarriers.size() == barriers && mock.draws == 6, "sampling a read-only depth image again ended the depth pass or transitioned the image again");
+        Draw(context, quiet, draw, writer);
+        Require(depth->Attached() && depth->Generation() == 2 && mock.renderPasses == 4, "a depth pass after sampling did not return the depth image to the attachment layout or advanced its generation without writes");
+        Draw(context, cleared, draw, writer);
+        Require(depth->Generation() == 3 && mock.renderPasses == 5, "a draw that clears depth did not advance the depth generation");
+        queue.Wait();
+    }
+    Require(mock.live == 0, "depth draws leaked Vulkan objects");
+}
+
+void depthWriteTests() {
+    using AgcDriver::Graphics::WritesDepthStencil;
+    AgcDriver::Graphics::DepthState quiet{};
+    quiet.test = true;
+    quiet.stencilTest = true;
+    quiet.front = {VK_STENCIL_OP_REPLACE, VK_STENCIL_OP_INCREMENT_AND_CLAMP, VK_STENCIL_OP_ZERO, VK_COMPARE_OP_EQUAL, 0xffu, 0u, 3u};
+    quiet.back = quiet.front;
+    Require(!WritesDepthStencil(quiet), "a draw with depth writes off, a stencil write mask of 0 and no clears can write depth or stencil");
+    auto kept = quiet;
+    kept.front = {VK_STENCIL_OP_KEEP, VK_STENCIL_OP_KEEP, VK_STENCIL_OP_KEEP, VK_COMPARE_OP_EQUAL, 0xffu, 0xffu, 3u};
+    kept.back = kept.front;
+    Require(!WritesDepthStencil(kept), "stencil operations that keep every value can write stencil");
+    auto untested = quiet;
+    untested.stencilTest = false;
+    untested.front.writeMask = 0xffu;
+    untested.back.writeMask = 0xffu;
+    Require(!WritesDepthStencil(untested), "stencil operations without a stencil test can write stencil");
+    const auto writes = [&](auto change) {
+        auto state = quiet;
+        change(state);
+        return WritesDepthStencil(state);
+    };
+    Require(writes([](auto& state) { state.write = true; }), "a draw with depth writes on cannot write depth");
+    Require(writes([](auto& state) { state.clearDepth = true; }), "a draw that clears depth cannot write depth");
+    Require(writes([](auto& state) { state.clearStencil = true; }), "a draw that clears stencil cannot write stencil");
+    Require(writes([](auto& state) { state.front.writeMask = 1u; }), "a front stencil operation with a write mask cannot write stencil");
+    Require(writes([](auto& state) { state.back.writeMask = 0x80u; }), "a back stencil operation with a write mask cannot write stencil");
+    Require(writes([](auto& state) { state.front = {VK_STENCIL_OP_KEEP, VK_STENCIL_OP_KEEP, VK_STENCIL_OP_INVERT, VK_COMPARE_OP_ALWAYS, 0xffu, 0xffu, 0u}; }), "a depth-fail stencil operation cannot write stencil");
+}
+
 }
 
 int main() {
@@ -2007,6 +2420,9 @@ int main() {
         drawQueueWriterTests();
         drawQueueBarrierTests();
         renderCacheTests();
+        depthWriteTests();
+        depthViewTests();
+        depthDrawTests();
         mock = MockVulkan{};
         auto bdaContext = mockContext();
         bdaContext.bufferDeviceAddress = true;
