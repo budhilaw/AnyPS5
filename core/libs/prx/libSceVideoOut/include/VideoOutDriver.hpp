@@ -148,6 +148,7 @@ struct VideoOutConfig {
     bool vrrPegged = false;
     uint64_t lastFlipVblank = 0;
     std::chrono::steady_clock::time_point lastFlipLatch{};
+    std::chrono::steady_clock::time_point lastLimitSlot{};
     AgcDriver::FrameTiming::Clock::time_point lastTimingFlip{};
     uint64_t outputMode = VIDEO_OUT_OUTPUT_MODE_DEFAULT;
     float gamma = 1.0f;
@@ -226,6 +227,7 @@ public:
 
     void SubmitFlip(int handle, int index, int flipMode, int64_t flipArg);
     void ConfigureOutput(int handle, uint64_t mode);
+    void ToggleUncapped();
 
 private:
     bool close(int handle);
@@ -241,6 +243,8 @@ private:
     std::array<std::shared_ptr<VideoOutConfig>, VIDEO_OUT_NUM_MAX> contexts;
     std::array<std::shared_ptr<AgcDriver::IVideoOutput>, VIDEO_OUT_NUM_MAX> outputs;
     std::shared_ptr<FlipQueue> flipQueue = std::make_shared<FlipQueue>();
+    bool tscCalibrated = false;
+    std::atomic<bool> uncapped{false};
 
     DisplayWindow window;
 

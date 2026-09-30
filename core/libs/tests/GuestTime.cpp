@@ -74,6 +74,7 @@ int main(int argc, char** argv) {
     }
     const bool calibrated = !legacy && HostHasInvariantTsc();
     Require(calibrated || frequency == 1000000000ULL);
+    Require(IsTscCalibrated_nid_postfix() == calibrated);
     const auto begin = Take();
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
     const auto end = Take();

@@ -55,6 +55,20 @@ void DisplayWindow::create(std::uint32_t sourceWidth, std::uint32_t sourceHeight
         SDL_SetWindowMinimumSize(window, static_cast<int>(DisplayWindowMinimumWidth), static_cast<int>(DisplayWindowMinimumHeight));
     });
     installSubclass();
+    updateRefreshRate();
+}
+
+void DisplayWindow::updateRefreshRate() {
+    std::uint32_t rate = 0;
+    MainThread::Run([&] {
+        SDL_DisplayMode mode{};
+        const int display = SDL_GetWindowDisplayIndex(window);
+        if (display >= 0 && SDL_GetCurrentDisplayMode(display, &mode) == 0 && mode.refresh_rate > 1) rate = static_cast<std::uint32_t>(mode.refresh_rate);
+    });
+    if (refreshRate == rate) return;
+    refreshRate = rate;
+    if (rate != 0) APS5_LOG_OUT("display refresh rate: %u Hz", rate);
+    else APS5_LOG_CHARS_OUT("display refresh rate: unknown");
 }
 
 void DisplayWindow::updateAspectRatio(std::uint32_t sourceWidth, std::uint32_t sourceHeight) {
@@ -70,6 +84,7 @@ void DisplayWindow::Destroy() noexcept {
     } catch (...) {
     }
     window = nullptr;
+    refreshRate.reset();
 }
 
 SDL_Window* DisplayWindow::Handle() const {
@@ -82,6 +97,21 @@ void DisplayWindow::ToggleFullscreen() {
         const auto flags = (SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN) != 0 ? 0u : static_cast<Uint32>(SDL_WINDOW_FULLSCREEN_DESKTOP);
         require(SDL_SetWindowFullscreen(window, flags) == 0, SDL_GetError());
     });
+    updateRefreshRate();
+}
+
+void DisplayWindow::HandleEvent(const SDL_Event& event) {
+    if (window == nullptr) return;
+    const bool windowMoved = event.type == SDL_WINDOWEVENT && (event.window.event == SDL_WINDOWEVENT_MOVED || event.window.event == SDL_WINDOWEVENT_DISPLAY_CHANGED) && event.window.windowID == SDL_GetWindowID(window);
+    if (windowMoved || event.type == SDL_DISPLAYEVENT) updateRefreshRate();
+}
+
+bool DisplayWindow::Minimized() const {
+    return window != nullptr && (SDL_GetWindowFlags(window) & SDL_WINDOW_MINIMIZED) != 0;
+}
+
+std::uint32_t DisplayWindow::RefreshRate() const {
+    return refreshRate.value_or(0);
 }
 
 void DisplayWindow::DrawableSize(std::uint32_t& width, std::uint32_t& height) const {
@@ -97,7 +127,7 @@ void DisplayWindow::DrawableSize(std::uint32_t& width, std::uint32_t& height) co
     height = drawableHeight > 0 ? static_cast<std::uint32_t>(drawableHeight) : 0;
 }
 
-void DisplayWindow::UpdateTitle() {
+void DisplayWindow::UpdateTitle(const char* pacing) {
     require(window != nullptr, "window must exist before updating title");
     static const AppTitle title = GetAppTitle_nid_postfix();
     static std::uint64_t fpsStart = sceKernelGetProcessTimeCounter();
@@ -113,14 +143,15 @@ void DisplayWindow::UpdateTitle() {
         fpsStart = now;
         fpsFrames = 0;
         static std::uint64_t windows = 0;
-        if (++windows % 5 == 0) APS5_LOG_OUT("presented %.2f fps at frame %llu", currentFps, static_cast<unsigned long long>(frameNum));
+        if (++windows % 5 == 0) APS5_LOG_OUT("presented %.2f fps at frame %llu (%s)", currentFps, static_cast<unsigned long long>(frameNum), pacing);
     }
     static std::uint64_t lastUpdate = 0;
     if (lastUpdate != 0 && now - lastUpdate < frequency / 2) return;
     lastUpdate = now;
-    char text[160];
-    std::snprintf(text, sizeof(text), "%s | FPS: %.2f (%llu)", title.value, currentFps, static_cast<unsigned long long>(frameNum));
+    char text[224];
+    std::snprintf(text, sizeof(text), "%s | FPS: %.2f (%llu) | %s", title.value, currentFps, static_cast<unsigned long long>(frameNum), pacing);
     MainThread::Run([&] { SDL_SetWindowTitle(window, text); });
+    updateRefreshRate();
 }
 
 void DisplayWindow::installSubclass() {

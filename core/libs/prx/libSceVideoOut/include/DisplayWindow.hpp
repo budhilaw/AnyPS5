@@ -2,6 +2,7 @@
 #define CORE_LIBS_PRX_LIBSCEVIDEOOUT_INCLUDE_DISPLAYWINDOW_HPP
 
 #include <cstdint>
+#include <optional>
 #include "SDL.h"
 
 inline constexpr std::uint32_t DisplayWindowMinimumWidth = 320;
@@ -19,11 +20,15 @@ public:
     void Destroy() noexcept;
     SDL_Window* Handle() const;
     void DrawableSize(std::uint32_t& width, std::uint32_t& height) const;
-    void UpdateTitle();
+    void UpdateTitle(const char* pacing);
     void ToggleFullscreen();
+    void HandleEvent(const SDL_Event& event);
+    bool Minimized() const;
+    std::uint32_t RefreshRate() const;
 
 private:
     void create(std::uint32_t sourceWidth, std::uint32_t sourceHeight);
+    void updateRefreshRate();
     void updateAspectRatio(std::uint32_t sourceWidth, std::uint32_t sourceHeight);
     void installSubclass();
     void removeSubclass() noexcept;
@@ -34,6 +39,7 @@ private:
     SDL_Window* window = nullptr;
     std::uint32_t aspectWidth = 0;
     std::uint32_t aspectHeight = 0;
+    std::optional<std::uint32_t> refreshRate;
 };
 
 #endif

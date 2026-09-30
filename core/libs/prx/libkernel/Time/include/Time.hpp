@@ -18,6 +18,7 @@ extern "C" {
     int APS5_VABI gettimeofday_nid_postfix(KernelTimeval* tv, KernelTimezone* tz);
     std::uint64_t APS5_VABI sceKernelReadTsc();
     std::uint64_t APS5_VABI sceKernelGetTscFrequency();
+    bool IsTscCalibrated_nid_postfix();
 
 }
 

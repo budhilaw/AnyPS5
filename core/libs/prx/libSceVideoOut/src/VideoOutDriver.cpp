@@ -54,6 +54,25 @@ void resolveFlipBuffer(FlipRequest& request, const VideoOutConfig& cfg) {
     request.height = request.group.attribute.height;
 }
 
+constexpr const char* LegacyTscReason = "because the guest TSC runs on the legacy 1 GHz clock (ANYPS5_LEGACY_TSC, or no calibrated invariant host TSC), so the title's RDTSC frame clock does not run in real time";
+
+void reportFrameRate(bool uncapped) {
+    if (!uncapped) {
+        APS5_LOG_CHARS_OUT("frame rate: PS5 pacing");
+        return;
+    }
+    const double limit = GetFramePacing().fpsLimit;
+    if (limit < 0.0) APS5_LOG_OUT("frame rate: uncapped, at most the monitor refresh rate and %g fps, and never below the emulated vblank rate", MaximumTestedFrameRate);
+    else if (limit == 0.0) APS5_LOG_CHARS_OUT("frame rate: uncapped without a limit (ANYPS5_FPS_LIMIT=0)");
+    else APS5_LOG_OUT("frame rate: uncapped, at most %g fps (ANYPS5_FPS_LIMIT)", limit);
+    if (limit == 0.0 || limit > MaximumTestedFrameRate) APS5_LOG_ERR("frame rate: warning: the uncapped limit is above %g fps, the highest frame rate this PS5 build was tested at; physics, animation, rope and cloth, and scripts may misbehave above it", MaximumTestedFrameRate);
+}
+
+const char* pacingLabel(DisplayProfile display, std::uint64_t outputMode, bool uncapped) {
+    static constexpr std::array<const char*, 8> labels{"60 Hz | PS5 pacing", "60 Hz | uncapped", "120 Hz | PS5 pacing", "120 Hz | uncapped", "60 Hz VRR | PS5 pacing", "60 Hz VRR | uncapped", "120 Hz VRR | PS5 pacing", "120 Hz VRR | uncapped"};
+    return labels[(display == DisplayProfile::Vrr ? 4u : 0u) + (outputMode == VIDEO_OUT_OUTPUT_MODE_119_88HZ ? 2u : 0u) + (uncapped ? 1u : 0u)];
+}
+
 class RenderingWait final : public AgcDriver::IRenderingWait {
     std::shared_ptr<VideoOutConfig> _config;
     std::uint32_t _index;
@@ -212,7 +231,11 @@ VideoOutDriver& VideoOutDriver::Get() {
 }
 
 VideoOutDriver::VideoOutDriver() {
-    static_cast<void>(GetFramePacing());
+    const auto& pacing = GetFramePacing();
+    tscCalibrated = IsTscCalibrated_nid_postfix();
+    if (pacing.uncapped && !tscCalibrated) APS5_LOG_ERR("frame rate: ANYPS5_UNCAPPED=1 is ignored and PS5 pacing kept, %s", LegacyTscReason);
+    uncapped = pacing.uncapped && tscCalibrated;
+    if (uncapped) reportFrameRate(true);
     MainThread::Run([] {
         if (SDL_InitSubSystem(SDL_INIT_VIDEO) < 0) {
             throw std::runtime_error(std::string("SDL_InitSubSystem(VIDEO) failed: ") + SDL_GetError());
@@ -361,6 +384,16 @@ void VideoOutDriver::SubmitFlip(int handle, int index, int flipMode, int64_t fli
     require(result == 0, "driver rejected flip submission");
 }
 
+void VideoOutDriver::ToggleUncapped() {
+    if (!tscCalibrated) {
+        APS5_LOG_ERR("frame rate: the frame-rate cap toggle is ignored and PS5 pacing kept, %s", LegacyTscReason);
+        return;
+    }
+    bool previous = uncapped.load();
+    while (!uncapped.compare_exchange_weak(previous, !previous)) {}
+    reportFrameRate(!previous);
+}
+
 void VideoOutDriver::ConfigureOutput(int handle, uint64_t mode) {
     auto cfg = GetConfig(handle);
     std::lock_guard lock(cfg->mutex);
@@ -411,6 +444,12 @@ std::uint64_t VideoOutDriver::vblankEnd(std::uint64_t advance) {
 void VideoOutDriver::processFlip(FlipRequest& req) {
     AgcDriver::PerformanceContext timingContext(req.timing.get());
     AgcDriver::PerformanceTimer timing("VideoOut.Flip");
+    const auto& pacing = GetFramePacing();
+    const bool uncappedPacing = uncapped.load(std::memory_order_relaxed);
+    const bool minimized = window.Minimized();
+    const auto refreshRate = window.RefreshRate();
+    uint64_t outputMode = VIDEO_OUT_OUTPUT_MODE_DEFAULT;
+    std::chrono::steady_clock::time_point limitSlot{};
     {
         std::unique_lock lock(req.cfg->mutex);
         timing.Mark("config_mutex_wait");
@@ -418,7 +457,9 @@ void VideoOutDriver::processFlip(FlipRequest& req) {
         require(req.ready && !req.terminal && req.generation == req.cfg->generation, "stale or incomplete flip request");
         const auto interval = static_cast<uint64_t>(req.flipRate + 1);
         require(req.cfg->lastFlipVblank <= std::numeric_limits<uint64_t>::max() - interval, "flip interval overflow");
-        const auto gate = ComputeFlipGate({.flipMode = req.flipMode, .flipRate = req.flipRate, .vrr = GetFramePacing().display == DisplayProfile::Vrr, .pegged = req.pegged, .lastLatchVblank = req.cfg->lastFlipVblank, .lastLatchTime = req.cfg->lastFlipLatch, .vblankPeriod = VblankPeriod(req.cfg->outputMode)});
+        outputMode = req.cfg->outputMode;
+        const auto vblankPeriod = VblankPeriod(outputMode);
+        const auto gate = ComputeFlipGate({.flipMode = req.flipMode, .flipRate = req.flipRate, .uncapped = uncappedPacing && !minimized, .vrr = pacing.display == DisplayProfile::Vrr, .pegged = req.pegged, .lastLatchVblank = req.cfg->lastFlipVblank, .lastLatchTime = req.cfg->lastFlipLatch, .lastLimitSlot = req.cfg->lastLimitSlot, .now = std::chrono::steady_clock::now(), .vblankPeriod = vblankPeriod, .limitInterval = UncappedLimitInterval(pacing.fpsLimit, refreshRate, vblankPeriod)});
         timing.Mark("validate");
         const auto cancelled = [&] { return req.cfg->failure || req.cfg->closing; };
         if (gate.byVblank) req.cfg->vblankCond.wait(lock, [&] { return req.cfg->vblankStatus.count >= gate.targetVblank || cancelled(); });
@@ -427,6 +468,7 @@ void VideoOutDriver::processFlip(FlipRequest& req) {
         checkConfig(*req.cfg);
         req.latchVblank = req.cfg->vblankStatus.count;
         req.latchTime = std::chrono::steady_clock::now();
+        limitSlot = LimitSlot(gate, req.latchTime);
     }
     require(req.width != 0 && req.height != 0 && req.width <= static_cast<uint32_t>(std::numeric_limits<int>::max()) && req.height <= static_cast<uint32_t>(std::numeric_limits<int>::max()), "invalid window dimensions");
     window.Ensure(req.width, req.height);
@@ -469,7 +511,7 @@ void VideoOutDriver::processFlip(FlipRequest& req) {
         AgcDriverPresentClear_nid_postfix(target, req.index == VIDEO_OUT_BUFFER_INDEX_BLACK, gpuReady, &req);
     }
     timing.Mark("present");
-    window.UpdateTitle();
+    window.UpdateTitle(pacingLabel(pacing.display, outputMode, uncappedPacing));
     timing.Mark("window_title");
     std::lock_guard lock(req.cfg->mutex);
     timing.Mark("completion_mutex_wait");
@@ -481,6 +523,7 @@ void VideoOutDriver::processFlip(FlipRequest& req) {
     ++req.cfg->flipStatus.count;
     req.cfg->lastFlipVblank = req.latchVblank;
     req.cfg->lastFlipLatch = req.latchTime;
+    req.cfg->lastLimitSlot = limitSlot;
     req.cfg->flipStatus.processTime = sceKernelGetProcessTime();
     req.cfg->flipStatus.processTimeCounter = sceKernelGetProcessTimeCounter();
     req.cfg->flipStatus.flipArg = req.flipArg;
@@ -515,6 +558,7 @@ void VideoOutDriver::presentLoop(std::stop_token token) {
             });
             for (const auto& event : events) {
                 require(event.type != SDL_QUIT, "window was closed");
+                window.HandleEvent(event);
                 padInput.HandleEvent(event, window);
             }
             padInput.Update();

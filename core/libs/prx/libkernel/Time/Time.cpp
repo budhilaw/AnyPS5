@@ -395,6 +395,10 @@ uint64_t APS5_VABI sceKernelGetTscFrequency(void) {
     return tscClock.frequency;
 }
 
+bool IsTscCalibrated_nid_postfix() {
+    return tscClock.calibrated;
+}
+
 unsigned int APS5_VABI sceKernelSleep(unsigned int seconds) {
     std::this_thread::sleep_for(std::chrono::seconds(seconds));
     return 0;

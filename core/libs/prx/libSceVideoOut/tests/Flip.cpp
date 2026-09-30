@@ -4,6 +4,7 @@
 #include "prx/libSceVideoOut/include/Output.hpp"
 #include "prx/libSceVideoOut/include/Event.hpp"
 #include "prx/libkernel/Equeue/Equeue.hpp"
+#include "prx/libkernel/Time/include/Time.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver.hpp"
 #include "prx/libSceAgcDriver/Submit/include/Dcb.hpp"
 #include "prx/libc/include/Shutdown.hpp"
@@ -47,10 +48,16 @@ void setEnvironment(const char* name, const char* value) {
 #endif
 }
 
-void usePacingEnvironment(const char* display) {
-    setEnvironment("ANYPS5_DISPLAY", display);
-    setEnvironment("ANYPS5_UNCAPPED", nullptr);
-    setEnvironment("ANYPS5_FPS_LIMIT", nullptr);
+struct PacingEnvironment {
+    const char* display = nullptr;
+    const char* uncapped = nullptr;
+    const char* fpsLimit = nullptr;
+};
+
+void usePacingEnvironment(const PacingEnvironment& environment) {
+    setEnvironment("ANYPS5_DISPLAY", environment.display);
+    setEnvironment("ANYPS5_UNCAPPED", environment.uncapped);
+    setEnvironment("ANYPS5_FPS_LIMIT", environment.fpsLimit);
 }
 
 class Gate final : public AgcDriver::IVideoOutput, public AgcDriver::IFlipRequest, public std::enable_shared_from_this<Gate> {
@@ -218,10 +225,68 @@ void checkFramePacingSettings() {
     }
     check(ParseFramePacing("60hz", nullptr, nullptr).display == DisplayProfile::Hz60 && ParseFramePacing("120hz", nullptr, nullptr).display == DisplayProfile::Hz120 && ParseFramePacing("vrr", nullptr, nullptr).display == DisplayProfile::Vrr, "ANYPS5_DISPLAY was not parsed");
     check(!ParseFramePacing(nullptr, "0", nullptr).uncapped && ParseFramePacing(nullptr, "1", nullptr).uncapped, "ANYPS5_UNCAPPED was not parsed");
-    check(ParseFramePacing(nullptr, nullptr, "0").fpsLimit == 0.0 && ParseFramePacing(nullptr, nullptr, "144").fpsLimit == 144.0 && ParseFramePacing(nullptr, nullptr, "59.94").fpsLimit == 59.94, "ANYPS5_FPS_LIMIT was not parsed");
+    check(ParseFramePacing(nullptr, nullptr, "0").fpsLimit == 0.0 && ParseFramePacing(nullptr, nullptr, "1").fpsLimit == 1.0 && ParseFramePacing(nullptr, nullptr, "144").fpsLimit == 144.0 && ParseFramePacing(nullptr, nullptr, "59.94").fpsLimit == 59.94, "ANYPS5_FPS_LIMIT was not parsed");
     for (const char* value : {"120", "120Hz", "VRR", "144hz", "vrr "}) checkRejected(value, nullptr, nullptr, "ANYPS5_DISPLAY", "60hz, 120hz or vrr");
     for (const char* value : {"2", "true", "yes", "01", "-1"}) checkRejected(nullptr, value, nullptr, "ANYPS5_UNCAPPED", "0 or 1");
-    for (const char* value : {"-1", "-0.5", "fast", "60fps", "nan", "inf", "1e999"}) checkRejected(nullptr, nullptr, value, "ANYPS5_FPS_LIMIT", "at least 0");
+    for (const char* value : {"-1", "-0.5", "0.5", "0.999", "fast", "60fps", "nan", "inf", "1e999"}) checkRejected(nullptr, nullptr, value, "ANYPS5_FPS_LIMIT", "0 for no limit or a frame rate of at least 1");
+}
+
+void checkUncappedLimits() {
+    using Duration = std::chrono::steady_clock::duration;
+    const auto perFrame = [](double rate) { return std::chrono::duration_cast<Duration>(std::chrono::duration<double>(1.0 / rate)); };
+    const auto slow = VblankPeriod(VIDEO_OUT_OUTPUT_MODE_DEFAULT);
+    const auto fast = VblankPeriod(VIDEO_OUT_OUTPUT_MODE_119_88HZ);
+    check(UncappedLimitInterval(-1.0, 255, slow) == perFrame(120.0) && UncappedLimitInterval(-1.0, 144, slow) == perFrame(120.0) && UncappedLimitInterval(-1.0, 144, fast) == perFrame(120.0), "the default uncapped limit rose above 120 fps on a faster monitor");
+    check(UncappedLimitInterval(-1.0, 0, slow) == perFrame(120.0) && UncappedLimitInterval(-1.0, 0, fast) == perFrame(120.0), "an unknown monitor refresh rate did not set the default uncapped limit to 120 fps");
+    check(UncappedLimitInterval(-1.0, 100, slow) == perFrame(100.0) && UncappedLimitInterval(-1.0, 60, slow) == perFrame(60.0), "the default uncapped limit did not follow a monitor refresh rate below 120 Hz");
+    check(UncappedLimitInterval(-1.0, 59, slow) == slow && UncappedLimitInterval(-1.0, 60, fast) == fast && UncappedLimitInterval(-1.0, 100, fast) == fast, "the default uncapped limit fell below the emulated vblank rate");
+    check(UncappedLimitInterval(144.0, 60, slow) == perFrame(144.0) && UncappedLimitInterval(30.0, 255, fast) == perFrame(30.0) && UncappedLimitInterval(1.0, 0, slow) == std::chrono::seconds(1), "an explicit ANYPS5_FPS_LIMIT was not used as the uncapped limit");
+    check(UncappedLimitInterval(0.0, 144, slow) == Duration::zero(), "ANYPS5_FPS_LIMIT=0 did not remove the uncapped limit");
+}
+
+template<typename TFrame>
+std::vector<std::chrono::steady_clock::time_point> uncappedLatches(std::chrono::steady_clock::duration interval, int flips, TFrame frame) {
+    std::vector<std::chrono::steady_clock::time_point> latches;
+    FlipGateInput input{.flipMode = VIDEO_OUT_FLIP_MODE_VSYNC, .uncapped = true, .limitInterval = interval};
+    auto now = std::chrono::steady_clock::time_point{} + std::chrono::seconds(1);
+    for (int flip = 0; flip < flips; ++flip) {
+        const auto [render, present] = frame(flip);
+        now += render;
+        input.now = now;
+        const auto gate = ComputeFlipGate(input);
+        now = std::max(now, gate.notBefore);
+        latches.push_back(now);
+        input.lastLatchTime = now;
+        input.lastLimitSlot = LimitSlot(gate, now);
+        now += present;
+    }
+    return latches;
+}
+
+void checkUncappedTimeline() {
+    using Duration = std::chrono::steady_clock::duration;
+    using Frame = std::pair<Duration, Duration>;
+    const auto interval = std::chrono::duration_cast<Duration>(std::chrono::duration<double>(1.0 / 120.0));
+    const auto spacedBy = [](const std::vector<std::chrono::steady_clock::time_point>& latches, std::size_t from, Duration spacing) {
+        for (std::size_t index = from + 1; index < latches.size(); ++index) {
+            if (latches[index] - latches[index - 1] != spacing) return false;
+        }
+        return true;
+    };
+    const auto steady = uncappedLatches(interval, 121, [](int) { return Frame{Duration{}, std::chrono::milliseconds(3)}; });
+    check(spacedBy(steady, 0, interval), "the uncapped limit added the present time to the frame interval");
+    const auto jittered = uncappedLatches(interval, 121, [](int flip) { return Frame{Duration{}, std::chrono::microseconds(flip % 2 == 0 ? 1900 : 3900)}; });
+    check(spacedBy(jittered, 0, interval), "a present time varying between 1.9 and 3.9 ms moved uncapped flips off the limit timeline");
+    const auto uneven = uncappedLatches(interval, 121, [](int flip) { return Frame{std::chrono::milliseconds(flip % 2 == 0 ? 1 : 9), std::chrono::milliseconds(3)}; });
+    check(uneven.back() - uneven.front() == interval * 120, "uneven frame times that average below the limit did not reach the uncapped limit on average");
+    const auto slow = uncappedLatches(interval, 121, [](int) { return Frame{Duration{}, std::chrono::milliseconds(10)}; });
+    check(spacedBy(slow, 0, std::chrono::milliseconds(10)), "the uncapped limit delayed flips whose present is slower than the limit");
+    const auto stalled = uncappedLatches(interval, 20, [](int flip) { return Frame{Duration{}, std::chrono::milliseconds(flip == 10 ? 100 : 3)}; });
+    const auto resumed = stalled[10] + std::chrono::milliseconds(100);
+    check(stalled[11] == resumed && stalled[12] == resumed + std::chrono::milliseconds(3) && stalled[13] == resumed + interval && spacedBy(stalled, 13, interval), "after a stalled present the uncapped limit released more than one interval of catch-up, or did not resume its timeline");
+    const auto gapped = uncappedLatches(interval, 20, [](int flip) { return Frame{std::chrono::milliseconds(flip == 10 ? 100 : 0), std::chrono::milliseconds(3)}; });
+    const auto submitted = gapped[9] + std::chrono::milliseconds(103);
+    check(gapped[10] == submitted && gapped[11] == submitted + std::chrono::milliseconds(3) && gapped[12] == submitted + interval && spacedBy(gapped, 12, interval), "after a gap between flips the uncapped limit released more than one interval of catch-up, or did not resume its timeline");
 }
 
 void checkFlipGates() {
@@ -230,7 +295,7 @@ void checkFlipGates() {
     const auto period = VblankPeriod(VIDEO_OUT_OUTPUT_MODE_119_88HZ);
     check(VblankPeriod(VIDEO_OUT_OUTPUT_MODE_DEFAULT) == std::chrono::duration_cast<std::chrono::steady_clock::duration>(Period59(1)) && period == std::chrono::duration_cast<std::chrono::steady_clock::duration>(Period119(1)), "the vblank period is not 1001/60000 s at 59.94 Hz and 1001/120000 s at 119.88 Hz");
     const auto latch = std::chrono::steady_clock::time_point{} + std::chrono::seconds(100);
-    const FlipGateInput base{.flipMode = VIDEO_OUT_FLIP_MODE_VSYNC, .flipRate = 2, .lastLatchVblank = 1000, .lastLatchTime = latch, .vblankPeriod = period, .limitInterval = std::chrono::milliseconds(7)};
+    const FlipGateInput base{.flipMode = VIDEO_OUT_FLIP_MODE_VSYNC, .flipRate = 2, .lastLatchVblank = 1000, .lastLatchTime = latch, .lastLimitSlot = latch, .now = latch + std::chrono::milliseconds(3), .vblankPeriod = period, .limitInterval = std::chrono::milliseconds(7)};
     const auto onGrid = [](const FlipGate& gate, std::uint64_t target) { return gate.byVblank && gate.targetVblank == target; };
     const auto notBefore = [](const FlipGate& gate, std::chrono::steady_clock::time_point time) { return !gate.byVblank && gate.notBefore == time; };
     const auto immediate = [](const FlipGate& gate) { return !gate.byVblank && gate.notBefore == std::chrono::steady_clock::time_point{}; };
@@ -262,6 +327,12 @@ void checkFlipGates() {
     input.uncapped = true;
     input.vrr = true;
     check(notBefore(ComputeFlipGate(input), latch + std::chrono::milliseconds(7)), "an uncapped flip did not wait for the frame rate limit alone");
+    input.lastLimitSlot = latch - std::chrono::milliseconds(2);
+    check(notBefore(ComputeFlipGate(input), latch + std::chrono::milliseconds(5)), "an uncapped flip was not scheduled one limit interval after the previous flip's slot on the limit timeline");
+    input.now = latch + std::chrono::milliseconds(30);
+    check(notBefore(ComputeFlipGate(input), latch + std::chrono::milliseconds(23)), "an uncapped flip that reached its gate late was scheduled more than one limit interval before it reached the gate");
+    input.lastLimitSlot = latch;
+    input.now = latch + std::chrono::milliseconds(3);
     input.pegged = true;
     check(onGrid(ComputeFlipGate(input), 1003), "a pegged uncapped flip left the vblank grid");
     input.pegged = false;
@@ -270,6 +341,8 @@ void checkFlipGates() {
     input.limitInterval = std::chrono::milliseconds(7);
     input.lastLatchTime = {};
     check(immediate(ComputeFlipGate(input)), "the first uncapped flip waited");
+    const auto scheduled = latch - std::chrono::milliseconds(4);
+    check(LimitSlot(FlipGate{true, 1003, {}}, latch) == latch && LimitSlot(FlipGate{}, latch) == latch && LimitSlot(FlipGate{false, 0, scheduled}, latch) == scheduled, "a flip's limit slot is not the time its gate scheduled it, or its latch when the gate scheduled no time");
 }
 
 void testPacing() {
@@ -298,6 +371,8 @@ void testPacing() {
     check(pacedFlipVblanks(101, period * 5 / 4) <= 126, "a present longer than a vblank cost the next flip an extra vblank");
     checkFramePacingSettings();
     checkFlipGates();
+    checkUncappedLimits();
+    checkUncappedTimeline();
 }
 
 void checkVblankRate(int handle, const std::shared_ptr<VideoOutConfig>& cfg, double rate, const char* reason) {
@@ -667,23 +742,120 @@ void testVrrFlips() {
     LibcRunShutdown_nid_postfix();
 }
 
-const char* displayProfileFor(int argc, char** argv) {
-    if (argc != 2) return nullptr;
+std::uint64_t vblankCount(const std::shared_ptr<VideoOutConfig>& cfg) {
+    std::lock_guard lock(cfg->mutex);
+    return cfg->vblankStatus.count;
+}
+
+std::uint64_t latchedVblank(const std::shared_ptr<VideoOutConfig>& cfg) {
+    std::lock_guard lock(cfg->mutex);
+    return cfg->lastFlipVblank;
+}
+
+std::chrono::steady_clock::time_point latchedTime(const std::shared_ptr<VideoOutConfig>& cfg) {
+    std::lock_guard lock(cfg->mutex);
+    return cfg->lastFlipLatch;
+}
+
+std::chrono::steady_clock::time_point limitSlot(const std::shared_ptr<VideoOutConfig>& cfg) {
+    std::lock_guard lock(cfg->mutex);
+    return cfg->lastLimitSlot;
+}
+
+void flipBlank(int handle, const std::shared_ptr<VideoOutConfig>& cfg, int64_t argument, const char* reason) {
+    const auto target = completedFlips(cfg) + 1;
+    sceVideoOutSubmitFlip(handle, VIDEO_OUT_BUFFER_INDEX_BLANK, VIDEO_OUT_FLIP_MODE_VSYNC, argument);
+    waitForFlip(cfg, target, std::chrono::seconds(15), reason);
+}
+
+int openAtFlipRate2() {
+    const int handle = sceVideoOutOpen(255, 0, 0, nullptr);
+    check(sceVideoOutSetFlipRate(handle, 2) == 0, "flip rate 2 was refused");
+    return handle;
+}
+
+void testUncapped() {
+    check(IsTscCalibrated_nid_postfix(), "the uncapped test needs the calibrated TSC; run it without ANYPS5_LEGACY_TSC");
+    const int handle = openAtFlipRate2();
+    const auto cfg = VideoOutDriver::Get().GetConfig(handle);
+    flipBlank(handle, cfg, 0, "the warm-up flip did not complete");
+    const auto start = vblankCount(cfg);
+    for (int64_t argument = 1; argument <= 10; ++argument) flipBlank(handle, cfg, argument, "an uncapped flip did not complete");
+    check(vblankCount(cfg) - start < 20, "ten uncapped flips at flip rate 2 took 20 vblanks or more, close to the 27 that PS5 pacing needs");
+    VideoOutDriver::Get().ToggleUncapped();
+    const auto uncappedLatch = latchedVblank(cfg);
+    flipBlank(handle, cfg, 11, "a flip after switching to PS5 pacing did not complete");
+    check(latchedVblank(cfg) >= uncappedLatch + 3, "a flip after switching to PS5 pacing did not wait for flip rate 2");
+    VideoOutDriver::Get().ToggleUncapped();
+    std::uint64_t unreachable = 0;
+    {
+        std::lock_guard lock(cfg->mutex);
+        unreachable = cfg->vblankStatus.count + 1000000;
+        cfg->lastFlipVblank = unreachable;
+    }
+    flipBlank(handle, cfg, 12, "a flip after switching back to uncapped waited for the vblank grid");
+    check(latchedVblank(cfg) < unreachable, "a flip after switching back to uncapped waited for the vblank grid");
+    sceVideoOutClose(handle);
+    LibcRunShutdown_nid_postfix();
+}
+
+void testUncappedLimit() {
+    check(IsTscCalibrated_nid_postfix(), "the uncapped limit test needs the calibrated TSC; run it without ANYPS5_LEGACY_TSC");
+    const int handle = openAtFlipRate2();
+    const auto cfg = VideoOutDriver::Get().GetConfig(handle);
+    for (int64_t argument = 0; argument < 4; ++argument) flipBlank(handle, cfg, argument, "a warm-up flip did not complete");
+    const auto submitted = std::chrono::steady_clock::now();
+    flipBlank(handle, cfg, 4, "a warm-up flip did not complete");
+    const auto firstSlot = limitSlot(cfg);
+    const auto firstLatch = latchedTime(cfg);
+    for (int64_t argument = 5; argument < 14; ++argument) flipBlank(handle, cfg, argument, "a flip limited to 30 fps did not complete");
+    const auto lastLatch = latchedTime(cfg);
+    const auto interval = std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double>(1.0 / 30.0));
+    check(firstSlot + interval >= submitted, "a flip limited to 30 fps was scheduled on a limit timeline more than one interval behind its submission");
+    check(lastLatch - firstSlot >= interval * 9, "nine uncapped flips limited to 30 fps were shown sooner than nine 30 fps intervals after the limit slot of the flip before them");
+    check(lastLatch - firstLatch < std::chrono::milliseconds(400), "nine uncapped flips limited to 30 fps took as long as flip rate 2 at 59.94 Hz, 450 ms");
+    sceVideoOutClose(handle);
+    LibcRunShutdown_nid_postfix();
+}
+
+void testUncappedLegacy() {
+    check(!IsTscCalibrated_nid_postfix(), "the legacy uncapped test needs ANYPS5_LEGACY_TSC=1 in its environment");
+    const int handle = openAtFlipRate2();
+    const auto cfg = VideoOutDriver::Get().GetConfig(handle);
+    flipBlank(handle, cfg, 0, "the first warm-up flip did not complete");
+    flipBlank(handle, cfg, 1, "the second warm-up flip did not complete");
+    for (int64_t argument = 2; argument < 4; ++argument) {
+        const auto previous = latchedVblank(cfg);
+        flipBlank(handle, cfg, argument, "a flip with the legacy TSC did not complete");
+        check(latchedVblank(cfg) >= previous + 3, "ANYPS5_UNCAPPED or the frame-rate cap toggle took effect while the guest TSC runs on the legacy clock");
+        VideoOutDriver::Get().ToggleUncapped();
+    }
+    sceVideoOutClose(handle);
+    LibcRunShutdown_nid_postfix();
+}
+
+PacingEnvironment pacingEnvironmentFor(int argc, char** argv) {
+    if (argc != 2) return {};
     const std::string command = argv[1];
-    if (command == "display" || command == "vrr") return "vrr";
-    if (command == "display120") return "120hz";
-    return nullptr;
+    if (command == "display" || command == "vrr") return {"vrr"};
+    if (command == "display120") return {"120hz"};
+    if (command == "uncapped" || command == "uncappedlegacy") return {nullptr, "1", "0"};
+    if (command == "uncappedlimit") return {nullptr, "1", "30"};
+    return {};
 }
 
 int run(int argc, char** argv) {
     try {
-        usePacingEnvironment(displayProfileFor(argc, argv));
+        usePacingEnvironment(pacingEnvironmentFor(argc, argv));
         if (argc == 2 && std::string(argv[1]) == "decode") testDecode();
         else if (argc == 2 && std::string(argv[1]) == "pacing") testPacing();
         else if (argc == 2 && std::string(argv[1]) == "controls") testControls();
         else if (argc == 2 && std::string(argv[1]) == "display") testDisplay(true);
         else if (argc == 2 && std::string(argv[1]) == "display120") testDisplay(false);
         else if (argc == 2 && std::string(argv[1]) == "vrr") testVrrFlips();
+        else if (argc == 2 && std::string(argv[1]) == "uncapped") testUncapped();
+        else if (argc == 2 && std::string(argv[1]) == "uncappedlimit") testUncappedLimit();
+        else if (argc == 2 && std::string(argv[1]) == "uncappedlegacy") testUncappedLegacy();
         else if (argc == 2 && std::string(argv[1]) == "present") testPresentation(false);
         else if (argc == 2 && std::string(argv[1]) == "unavailable") testPresentation(true);
         else testLifetime(argc == 2 && std::string(argv[1]) == "reopen");

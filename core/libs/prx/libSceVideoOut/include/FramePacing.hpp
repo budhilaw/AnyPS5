@@ -6,6 +6,8 @@
 
 enum class DisplayProfile { Hz60, Hz120, Vrr };
 
+inline constexpr double MaximumTestedFrameRate = 120.0;
+
 struct FramePacingSettings {
     DisplayProfile display = DisplayProfile::Hz60;
     bool uncapped = false;
@@ -20,6 +22,8 @@ struct FlipGateInput {
     bool pegged = false;
     std::uint64_t lastLatchVblank = 0;
     std::chrono::steady_clock::time_point lastLatchTime{};
+    std::chrono::steady_clock::time_point lastLimitSlot{};
+    std::chrono::steady_clock::time_point now{};
     std::chrono::steady_clock::duration vblankPeriod{};
     std::chrono::steady_clock::duration limitInterval{};
 };
@@ -33,6 +37,8 @@ struct FlipGate {
 FramePacingSettings ParseFramePacing(const char* display, const char* uncapped, const char* fpsLimit);
 const FramePacingSettings& GetFramePacing();
 std::chrono::steady_clock::duration VblankPeriod(std::uint64_t outputMode);
+std::chrono::steady_clock::duration UncappedLimitInterval(double fpsLimit, std::uint32_t refreshRate, std::chrono::steady_clock::duration vblankPeriod);
 FlipGate ComputeFlipGate(const FlipGateInput& input);
+std::chrono::steady_clock::time_point LimitSlot(const FlipGate& gate, std::chrono::steady_clock::time_point latch);
 
 #endif
