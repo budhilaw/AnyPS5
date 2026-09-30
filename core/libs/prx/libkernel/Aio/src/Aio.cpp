@@ -3,10 +3,10 @@
 #include <cstddef>
 #include <mutex>
 #include <unordered_set>
-#include <unistd.h>
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 #include "prx/libkernel/File/include/GuestBufferAccess.hpp"
+#include "prx/libkernel/File/include/NativeFile.hpp"
 
 namespace {
 
@@ -27,8 +27,8 @@ void execute(KernelAioRwRequest& request, bool write) {
     PrepareGuestBuffer(request.buf, request.nbyte, !write);
     while (done < static_cast<std::int64_t>(request.nbyte)) {
         const auto remaining = request.nbyte - static_cast<std::size_t>(done);
-        const auto offset = static_cast<off_t>(request.offset + done);
-        const auto result = write ? ::pwrite(request.fd, cursor + done, remaining, offset) : ::pread(request.fd, cursor + done, remaining, offset);
+        const auto offset = static_cast<std::int64_t>(request.offset + done);
+        const auto result = write ? File::NativePwrite(request.fd, cursor + done, remaining, offset) : File::NativePread(request.fd, cursor + done, remaining, offset);
         if (result < 0) {
             if (errno == EINTR) continue;
             done = hostError();

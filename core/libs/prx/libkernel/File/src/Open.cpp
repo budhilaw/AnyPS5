@@ -17,11 +17,28 @@ static constexpr int SCE_KERNEL_ERROR_ENOTEMPTY = -2147352510;
 static constexpr int SCE_KERNEL_ERROR_EEXIST = -2147352559;
 
 #ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
 #include <fcntl.h>
 #include <io.h>
 #include <sys/stat.h>
 static int NativeOpen(const std::filesystem::path& p, int nativeFlags, std::uint16_t mode) {
-    return ::_wopen(p.wstring().c_str(), nativeFlags, static_cast<int>(mode));
+    std::error_code error;
+    if (!std::filesystem::is_directory(p, error)) return ::_wopen(p.wstring().c_str(), nativeFlags, static_cast<int>(mode));
+    if ((nativeFlags & (_O_WRONLY | _O_RDWR | _O_CREAT | _O_TRUNC)) != 0) {
+        errno = EISDIR;
+        return -1;
+    }
+    const HANDLE handle = CreateFileW(p.wstring().c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    if (handle == INVALID_HANDLE_VALUE) {
+        errno = GetLastError() == ERROR_FILE_NOT_FOUND || GetLastError() == ERROR_PATH_NOT_FOUND ? ENOENT : EACCES;
+        return -1;
+    }
+    const int descriptor = ::_open_osfhandle(reinterpret_cast<std::intptr_t>(handle), _O_RDONLY);
+    if (descriptor < 0) CloseHandle(handle);
+    return descriptor;
 }
 static std::int64_t NativeLseek(int fd, std::int64_t offset, int whence) {
     return ::_lseeki64(fd, offset, whence);

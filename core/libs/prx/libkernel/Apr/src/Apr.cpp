@@ -2,18 +2,17 @@
 
 #include <cerrno>
 #include <cstring>
-#include <fcntl.h>
 #include <filesystem>
 #include <mutex>
 #include <string>
-#include <sys/stat.h>
+#include <system_error>
 #include <unordered_map>
 #include <unordered_set>
-#include <unistd.h>
 #include <vector>
 
 #include "prx/libc/include/General.hpp"
 #include "prx/libkernel/File/include/GuestBufferAccess.hpp"
+#include "prx/libkernel/File/include/NativeFile.hpp"
 #include <atomic>
 #include <cstdlib>
 
@@ -91,7 +90,7 @@ int syscallFailure(int kernelError) {
 
 int readIntoGuest(ResolvedFile& file, const ReadCommand& command) {
     if (file.descriptor < 0) {
-        file.descriptor = ::open(file.path.c_str(), O_RDONLY);
+        file.descriptor = File::NativeOpenRead(file.path);
         if (file.descriptor < 0) return errno == ENOENT ? SCE_KERNEL_ERROR_ENOENT : SCE_KERNEL_ERROR_EIO;
     }
     auto* cursor = static_cast<std::byte*>(command.destination);
@@ -100,10 +99,10 @@ int readIntoGuest(ResolvedFile& file, const ReadCommand& command) {
     std::uint64_t offset = command.fileOffset;
     while (remaining > 0) {
         const auto chunk = remaining > (1u << 30) ? static_cast<std::size_t>(1u << 30) : static_cast<std::size_t>(remaining);
-        const auto got = ::pread(file.descriptor, cursor, chunk, static_cast<off_t>(offset));
+        const auto got = File::NativePread(file.descriptor, cursor, chunk, static_cast<std::int64_t>(offset));
         if (got < 0) {
             if (errno == EINTR) continue;
-            APS5_LOG_OUT("APR read of %s (%llu bytes at %llu into %p) failed: errno %d", file.path.c_str(), static_cast<unsigned long long>(command.size), static_cast<unsigned long long>(command.fileOffset), command.destination, errno);
+            APS5_LOG_OUT("APR read of %s (%llu bytes at %llu into %p) failed: errno %d", file.path.string().c_str(), static_cast<unsigned long long>(command.size), static_cast<unsigned long long>(command.fileOffset), command.destination, errno);
             return SCE_KERNEL_ERROR_EIO;
         }
         if (got == 0) break;
@@ -206,24 +205,28 @@ int APS5_VABI sceKernelAprResolveFilepathsToIdsAndFileSizes(const char* const* p
         }
         const std::string guestPath(path_list[i]);
         const auto native = ResolvePath_nid_no_patch(path_list[i]);
-        struct stat st{};
-        if (::stat(native.c_str(), &st) != 0) {
+        std::error_code error;
+        const auto status = std::filesystem::status(native, error);
+        if (error || !std::filesystem::exists(status)) {
             if (ids != nullptr) ids[i] = InvalidFileId;
             if (sizes != nullptr) sizes[i] = 0;
             if (error_index != nullptr) *error_index = i;
             return syscallFailure(SCE_KERNEL_ERROR_ENOENT);
         }
+        const bool directory = std::filesystem::is_directory(status);
+        const auto size = directory ? std::uintmax_t{0} : std::filesystem::file_size(native, error);
+        if (error) throw std::runtime_error("sceKernelAprResolveFilepathsToIdsAndFileSizes: cannot size " + native.string() + ": " + error.message());
         std::lock_guard lock(fileMutex);
         auto idIt = fileIds.find(guestPath);
         if (idIt == fileIds.end()) {
             const auto id = nextFileId++;
-            files[id] = ResolvedFile{native, static_cast<std::uint64_t>(st.st_size), -1};
+            files[id] = ResolvedFile{native, static_cast<std::uint64_t>(size), -1};
             idIt = fileIds.emplace(guestPath, id).first;
         } else {
-            files[idIt->second].size = static_cast<std::uint64_t>(st.st_size);
+            files[idIt->second].size = static_cast<std::uint64_t>(size);
         }
         if (ids != nullptr) ids[i] = idIt->second;
-        if (sizes != nullptr) sizes[i] = S_ISDIR(st.st_mode) ? 0 : static_cast<std::uint64_t>(st.st_size);
+        if (sizes != nullptr) sizes[i] = static_cast<std::uint64_t>(size);
     }
     return 0;
 }

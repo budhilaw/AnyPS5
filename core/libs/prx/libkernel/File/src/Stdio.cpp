@@ -1,12 +1,11 @@
+#include <algorithm>
 #include <cstdint>
 #include <string>
 #include <stdexcept>
 #include <cstring>
 #include <mutex>
 #include <map>
-#include <dirent.h>
-#include <sys/stat.h>
-#include <sys/file.h>
+#include <vector>
 #include <filesystem>
 #include <cerrno>
 #include <atomic>
@@ -17,6 +16,7 @@
 #include "prx/libkernel/File/include/GuestBufferAccess.hpp"
 #include "prx/libkernel/Socket/include/SocketRuntime.hpp"
 #include "prx/libkernel/File/include/NativeStat.hpp"
+#include "prx/libkernel/File/include/NativeFile.hpp"
 #ifdef _WIN32
 #include <io.h>
 #else
@@ -42,8 +42,12 @@ constexpr int SCE_KERNEL_ERROR_ENOENT_ = static_cast<int>(0x80020002);
 constexpr int SCE_KERNEL_ERROR_EEXIST_ = static_cast<int>(0x80020011);
 constexpr int SCE_KERNEL_ERROR_ENOTEMPTY_ = static_cast<int>(0x80020042);
 constexpr int SCE_KERNEL_ERROR_EINVAL_ = static_cast<int>(0x80020016);
+struct DirectoryStream {
+    std::vector<File::NativeDirectoryEntry> entries;
+    std::size_t next = 0;
+};
 std::mutex directoriesMutex;
-std::map<int, DIR*> directories;
+std::map<int, DirectoryStream> directories;
 struct GuestDirent { std::uint32_t fileno; std::uint16_t reclen; std::uint8_t type; std::uint8_t namlen; char name[256]; };
 int MapPathError(int error, const char* what, const std::filesystem::path& native) {
     if (error == ENOENT || error == ENOTDIR) return SCE_KERNEL_ERROR_ENOENT_;
@@ -53,36 +57,27 @@ int MapPathError(int error, const char* what, const std::filesystem::path& nativ
 }
 int ReadDirectory(int fd, char* buf, int nbytes, std::int64_t* basep) {
     if (buf == nullptr || nbytes < static_cast<int>(sizeof(GuestDirent))) return SCE_KERNEL_ERROR_EINVAL_;
-    DIR* stream = nullptr;
-    {
-        std::lock_guard lock(directoriesMutex);
-        auto found = directories.find(fd);
-        if (found == directories.end()) {
-            const int duplicate = ::dup(fd);
-            if (duplicate < 0) return SCE_KERNEL_ERROR_EBADF_;
-            stream = ::fdopendir(duplicate);
-            if (stream == nullptr) { ::close(duplicate); return SCE_KERNEL_ERROR_EBADF_; }
-            directories.emplace(fd, stream);
-        } else {
-            stream = found->second;
-        }
+    std::lock_guard lock(directoriesMutex);
+    auto found = directories.find(fd);
+    if (found == directories.end()) {
+        DirectoryStream stream;
+        if (!File::NativeListDirectory(fd, stream.entries)) return SCE_KERNEL_ERROR_EBADF_;
+        found = directories.emplace(fd, std::move(stream)).first;
     }
-    if (basep != nullptr) *basep = static_cast<std::int64_t>(::telldir(stream));
+    auto& stream = found->second;
+    if (basep != nullptr) *basep = static_cast<std::int64_t>(stream.next);
     int written = 0;
-    for (;;) {
-        const long position = ::telldir(stream);
-        errno = 0;
-        const dirent* entry = ::readdir(stream);
-        if (entry == nullptr) break;
-        const auto length = std::strlen(entry->d_name);
+    for (; stream.next < stream.entries.size(); ++stream.next) {
+        const auto& entry = stream.entries[stream.next];
+        const auto length = std::min<std::size_t>(entry.name.size(), sizeof(GuestDirent::name) - 1);
         const auto record = static_cast<std::uint16_t>((offsetof(GuestDirent, name) + length + 1 + 3) & ~std::size_t{3});
-        if (written + record > nbytes) { ::seekdir(stream, position); break; }
+        if (written + record > nbytes) break;
         GuestDirent guest{};
-        guest.fileno = static_cast<std::uint32_t>(entry->d_ino);
+        guest.fileno = entry.fileno;
         guest.reclen = record;
-        guest.type = entry->d_type;
+        guest.type = entry.type;
         guest.namlen = static_cast<std::uint8_t>(length);
-        std::memcpy(guest.name, entry->d_name, length + 1);
+        std::memcpy(guest.name, entry.name.data(), length);
         std::memcpy(buf + written, &guest, record);
         written += record;
     }
@@ -92,17 +87,14 @@ int ReadDirectory(int fd, char* buf, int nbytes, std::int64_t* basep) {
 
 void ReleaseDirectoryStream(int fd) {
     std::lock_guard lock(directoriesMutex);
-    auto found = directories.find(fd);
-    if (found == directories.end()) return;
-    ::closedir(found->second);
-    directories.erase(found);
+    directories.erase(fd);
 }
 
 extern "C" {
 
 int APS5_VABI chmod_nid_postfix(const char* path, int mode) {
     if (path == nullptr) return PosixFailure(14);
-    return PosixFromHost(::chmod(ResolvePath_nid_no_patch(path).c_str(), static_cast<mode_t>(mode)));
+    return PosixFromHost(File::NativeChmod(ResolvePath_nid_no_patch(path), mode));
 }
 
 int APS5_VABI close_nid_postfix(int d) {
@@ -116,7 +108,7 @@ int APS5_VABI close_nid_postfix(int d) {
 }
 
 int APS5_VABI flock_nid_postfix(int d, int operation) {
-    return PosixFromHost(::flock(d, operation));
+    return PosixFromHost(File::NativeFlock(d, operation));
 }
 
 int64_t APS5_VABI fstat_nid_disambig1_nid_postfix(int d, FileStat* sb) {
@@ -125,11 +117,11 @@ int64_t APS5_VABI fstat_nid_disambig1_nid_postfix(int d, FileStat* sb) {
 }
 
 int APS5_VABI ftruncate_nid_postfix(int d, int64_t length) {
-    return PosixFromHost(::ftruncate(d, static_cast<off_t>(length)));
+    return PosixFromHost(File::NativeFtruncate(d, length));
 }
 
 int64_t APS5_VABI lseek_nid_postfix(int d, int64_t offset, int whence) {
-    const auto result = ::lseek(d, static_cast<off_t>(offset), whence);
+    const auto result = File::NativeLseek(d, offset, whence);
     if (result < 0) { PosixFailure(errno); return -1; }
     return result;
 }
@@ -146,7 +138,7 @@ int APS5_VABI open_nid_postfix(const char* path, int flags, int mode) {
 
 int64_t APS5_VABI pread_nid_postfix(int d, void* buf, size_t nbytes, int64_t offset) {
     if (buf == nullptr && nbytes != 0) return PosixFailure(14);
-    const auto result = ReadIntoGuest(buf, nbytes, [&](void* target, std::size_t count) { return ::pread(d, target, count, static_cast<off_t>(offset)); });
+    const auto result = ReadIntoGuest(buf, nbytes, [&](void* target, std::size_t count) { return File::NativePread(d, target, count, offset); });
     if (result < 0) { PosixFailure(errno); return -1; }
     return result;
 }
@@ -154,7 +146,7 @@ int64_t APS5_VABI pread_nid_postfix(int d, void* buf, size_t nbytes, int64_t off
 int64_t APS5_VABI pwrite_nid_disambig1_nid_postfix(int d, const void* buf, size_t nbytes, int64_t offset) {
     if (buf == nullptr && nbytes != 0) return PosixFailure(14);
     PrepareGuestBuffer(buf, nbytes, false);
-    const auto result = ::pwrite(d, buf, nbytes, static_cast<off_t>(offset));
+    const auto result = File::NativePwrite(d, buf, nbytes, offset);
     if (result < 0) { PosixFailure(errno); return -1; }
     return result;
 }
@@ -194,7 +186,7 @@ int APS5_VABI sceKernelFstat(int d, FileStat* sb) {
 }
 
 int APS5_VABI sceKernelFsync(int fd) {
-    if (::fsync(fd) != 0) return errno == EBADF ? SCE_KERNEL_ERROR_EBADF_ : static_cast<int>(0x80020000u | static_cast<unsigned>(errno & 0xff));
+    if (File::NativeFsync(fd) != 0) return errno == EBADF ? SCE_KERNEL_ERROR_EBADF_ : static_cast<int>(0x80020000u | static_cast<unsigned>(errno & 0xff));
     return 0;
 }
 
@@ -209,13 +201,13 @@ int APS5_VABI sceKernelGetdirentries(int fd, char* buf, int nbytes, int64_t* bas
 int APS5_VABI sceKernelMkdir(const char* path, uint16_t mode) {
     if (path == nullptr) throw std::invalid_argument(std::string(__func__) + ": path is null");
     const auto native = ResolvePath_nid_no_patch(path);
-    if (::mkdir(native.c_str(), static_cast<mode_t>(mode)) != 0) return MapPathError(errno, "mkdir", native);
+    if (File::NativeMkdir(native, mode) != 0) return MapPathError(errno, "mkdir", native);
     return 0;
 }
 
 int64_t APS5_VABI sceKernelPread(int d, void* buf, size_t nbytes, int64_t offset) {
     if (buf == nullptr && nbytes != 0) throw std::invalid_argument(std::string(__func__) + ": buf is null");
-    const auto result = ReadIntoGuest(buf, nbytes, [&](void* target, std::size_t count) { return ::pread(d, target, count, static_cast<off_t>(offset)); });
+    const auto result = ReadIntoGuest(buf, nbytes, [&](void* target, std::size_t count) { return File::NativePread(d, target, count, offset); });
     {
         static const bool trace = std::getenv("ANYPS5_TRACE_IO") != nullptr;
         static std::atomic<std::uint64_t> preads{0};
@@ -229,7 +221,7 @@ int64_t APS5_VABI sceKernelPread(int d, void* buf, size_t nbytes, int64_t offset
 int64_t APS5_VABI sceKernelPwrite(int d, const void* buf, size_t nbytes, int64_t offset) {
     if (buf == nullptr && nbytes != 0) throw std::invalid_argument(std::string(__func__) + ": buf is null");
     PrepareGuestBuffer(buf, nbytes, false);
-    const auto result = ::pwrite(d, buf, nbytes, static_cast<off_t>(offset));
+    const auto result = File::NativePwrite(d, buf, nbytes, offset);
     if (result < 0) { if (errno == EBADF) return SCE_KERNEL_ERROR_EBADF_; throw std::runtime_error(std::string(__func__) + ": pwrite failed, errno=" + std::to_string(errno)); }
     return result;
 }
@@ -238,14 +230,14 @@ int APS5_VABI sceKernelRename(const char* from, const char* to) {
     if (from == nullptr || to == nullptr) throw std::invalid_argument(std::string(__func__) + ": path is null");
     const auto source = ResolvePath_nid_no_patch(from);
     const auto destination = ResolvePath_nid_no_patch(to);
-    if (::rename(source.c_str(), destination.c_str()) != 0) return MapPathError(errno, "rename", source);
+    if (File::NativeRename(source, destination) != 0) return MapPathError(errno, "rename", source);
     return 0;
 }
 
 int APS5_VABI sceKernelRmdir(const char* path) {
     if (path == nullptr) throw std::invalid_argument(std::string(__func__) + ": path is null");
     const auto native = ResolvePath_nid_no_patch(path);
-    if (::rmdir(native.c_str()) != 0) return MapPathError(errno, "rmdir", native);
+    if (File::NativeRmdir(native) != 0) return MapPathError(errno, "rmdir", native);
     return 0;
 }
 

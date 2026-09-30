@@ -9,6 +9,7 @@
 #include "prx/libc/include/General.hpp"
 #include "prx/libc/include/ApplicationHeap.hpp"
 #include "prx/libkernel/DirectMemory/DirectMemory.hpp"
+#include "prx/libkernel/File/include/NativeFile.hpp"
 
 
 extern "C" {
@@ -73,7 +74,7 @@ int APS5_VABI sceKernelUuidCreate(uint32_t* uuid) {
 }
 
 void APS5_VABI sceKernelSync(void) {
-    ::sync();
+    File::NativeSync();
 }
 
 int APS5_VABI sched_get_priority_max_nid_postfix(int policy) {
