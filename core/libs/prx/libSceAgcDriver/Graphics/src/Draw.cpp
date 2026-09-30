@@ -37,6 +37,17 @@ struct DrawStorage {
     std::shared_ptr<Pipeline> pipeline;
 };
 
+bool samplesAttachment(const std::vector<std::shared_ptr<Texture>>& textures, DrawStorage& storage) {
+    for (const auto& texture : textures) {
+        const auto image = texture->Image();
+        if (image == VK_NULL_HANDLE) continue;
+        if (storage.color && storage.color->Target().Image() == image) return true;
+        if (std::any_of(storage.extraColors.begin(), storage.extraColors.end(), [&](const auto& extra) { return extra->Target().Image() == image; })) return true;
+        if (storage.depth && (storage.depth->Image() == image || std::find(texture->DepthSources().begin(), texture->DepthSources().end(), storage.depth) != texture->DepthSources().end())) return true;
+    }
+    return false;
+}
+
 }
 
 void Draw(const Context& context, const State& state, const Pm4::DrawParameters& draw, std::span<const CompiledShader> shaders, std::span<const GuestMemorySnapshot> snapshots) {
@@ -474,6 +485,7 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
     }
     if (state.hasDepthTarget) storage->depth = context.renderCache->GetDepth(state.depth);
     timing.Mark("render_target_cache");
+    if (FrameTiming::Enabled() && samplesAttachment(resources->Textures(), *storage)) timing.Mark("feedback");
     RequireValidViewport(context, state);
     std::optional<State> preservedStencil;
     if (storage->depth && storage->depth->Description().stencil && !state.depth.stencil) {
