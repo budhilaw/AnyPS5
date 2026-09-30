@@ -4,6 +4,7 @@
 #include "prx/libSceAgcDriver/Execution/include/VulkanLibrary.hpp"
 #include "prx/libkernel/AppMetadata/include/AppMetadata.hpp"
 #include "prx/libkernel/Time/include/Time.hpp"
+#include "prx/libc/include/General.hpp"
 #include "SDL_vulkan.h"
 #include <cstdio>
 #include <stdexcept>
@@ -111,6 +112,8 @@ void DisplayWindow::UpdateTitle() {
         currentFps = static_cast<double>(fpsFrames) * static_cast<double>(frequency) / static_cast<double>(now - fpsStart);
         fpsStart = now;
         fpsFrames = 0;
+        static std::uint64_t windows = 0;
+        if (++windows % 5 == 0) APS5_LOG_OUT("presented %.2f fps at frame %llu", currentFps, static_cast<unsigned long long>(frameNum));
     }
     static std::uint64_t lastUpdate = 0;
     if (lastUpdate != 0 && now - lastUpdate < frequency / 2) return;
