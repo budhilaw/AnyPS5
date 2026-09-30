@@ -56,6 +56,11 @@ public:
         return {inserted, true};
     }
 
+    void Erase(Handle entry) {
+        lookup.erase(entry->key);
+        entries.erase(entry);
+    }
+
     template<typename TPredicate>
     void EraseIf(TPredicate&& predicate) {
         for (auto entry = entries.begin(); entry != entries.end();) {
