@@ -1,12 +1,19 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver.hpp"
+#include "prx/libSceAgcDriver/Execution/include/Presentation.hpp"
+#include "prx/libSceAgcDriver/Execution/include/PublishedPointer.hpp"
 #include "prx/libSceAgcDriver/Execution/include/QueueState.hpp"
 #include "prx/libc/include/Shutdown.hpp"
 #include "prx/libSceAgcDriver/Submit/include/Dcb.hpp"
 #include "prx/libSceAgcDriver/Submit/include/Acb.hpp"
 #include "prx/libSceAgcDriver/Eq/include/Query.hpp"
 #include <array>
+#include <atomic>
+#include <chrono>
 #include <cstdio>
+#include <exception>
+#include <future>
 #include <limits>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -84,7 +91,7 @@ void testValidation() {
 }
 
 void testClearState() {
-    AgcDriver::QueueState graphics{{{0x20c, 1}}, {{0x10, 17}, {0x11, 23}}, {{0x242, 5}}};
+    AgcDriver::QueueState graphics{0, {{0x20c, 1}}, {{0x10, 17}, {0x11, 23}}, {{0x242, 5}}};
     const auto shader = graphics.shader;
     const auto userConfig = graphics.userConfig;
     graphics.ClearContext();
@@ -160,16 +167,146 @@ void testWorkerFailure() {
     check(expectFailure([&] { sceAgcDriverSubmitAcb(0x20, &packet); }) == messages[0], "subsequent ACB lost worker failure");
 }
 
+void testPublishedPointer() {
+    AgcDriver::PublishedPointer<int> device;
+    AgcDriver::PublishedPointer<int>::Cache worker;
+    AgcDriver::PublishedPointer<int>::Cache observer;
+    check(device.Get(worker) == nullptr && device.Get(observer) == nullptr, "an empty published pointer was cached as a value");
+    const auto created = device.GetOrCreate(worker, [] { return std::make_shared<int>(1); });
+    check(created != nullptr && device.Get() == created && device.Get(worker) == created, "a lazily created value was not published to its creator");
+    check(device.Get(observer) == created, "a value created lazily stayed invisible to a cache that had seen no value");
+    check(device.GetOrCreate(worker, [] { return std::make_shared<int>(2); }) == created && device.Get() == created, "a lazy creation replaced an existing value");
+    const auto replacement = std::make_shared<int>(3);
+    std::thread presenter([&] { device.Publish(replacement); });
+    presenter.join();
+    check(device.Get(worker) == replacement && device.Get(observer) == replacement, "a value published on another thread stayed invisible to a cache");
+    device.Publish(nullptr);
+    check(device.Get(worker) == nullptr && device.Get(observer) == nullptr && device.Get() == nullptr, "a released value stayed cached");
+    check(created.use_count() == 1 && replacement.use_count() == 1, "a cache retained a released value");
+    std::future<std::shared_ptr<int>> reader;
+    const auto presented = std::make_shared<int>(4);
+    std::weak_ptr<int> discarded;
+    const auto adopted = device.GetOrCreate(worker, [&] {
+        reader = std::async(std::launch::async, [&] { return device.Get(); });
+        check(reader.wait_for(std::chrono::seconds(10)) == std::future_status::ready, "a lazy creation held the lock of the published pointer, so a reader on another thread waited for it");
+        std::thread publisher([&] { device.Publish(presented); });
+        publisher.join();
+        auto value = std::make_shared<int>(5);
+        discarded = value;
+        return value;
+    });
+    check(adopted == presented && device.Get() == presented && device.Get(observer) == presented, "a lazy creation replaced a value published while it ran");
+    check(discarded.expired(), "a value created while another was published was retained");
+    device.Publish(nullptr);
+    const auto stored = device.GetOrCreate(worker, [&] {
+        std::thread window([&] {
+            device.Publish(std::make_shared<int>(6));
+            device.Publish(nullptr);
+        });
+        window.join();
+        return std::make_shared<int>(7);
+    });
+    check(stored != nullptr && *stored == 7 && device.Get() == stored && device.Get(observer) == stored, "a lazy creation returned no value after a value was published and released while it ran");
+    device.Publish(nullptr);
+    std::atomic<bool> observed = false;
+    std::thread polling([&] {
+        AgcDriver::PublishedPointer<int>::Cache cache;
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (device.Get(cache) == nullptr && std::chrono::steady_clock::now() < deadline) std::this_thread::yield();
+        observed = device.Get(cache) != nullptr;
+    });
+    AgcDriver::PublishedPointer<int>::Cache creator;
+    device.GetOrCreate(creator, [] { return std::make_shared<int>(8); });
+    polling.join();
+    check(observed, "a polling cache never observed a value created on another thread");
 }
 
-int main() {
+alignas(256) std::array<std::uint32_t, 64> programCode{};
+Shader programHeader{};
+volatile std::uint32_t label = 0;
+volatile std::uint32_t marker = 0;
+
+void registerProgram(std::uint8_t type) {
+    programCode.fill(0xbf810000u);
+    programHeader = Shader{};
+    programHeader.file_header = 0x34333231u;
+    programHeader.version = 0x18u;
+    programHeader.code = programCode.data();
+    programHeader.header_size = sizeof(Shader);
+    programHeader.shader_size = sizeof(programCode);
+    programHeader.type = type;
+    AgcDriverRegisterShader_nid_postfix(&programHeader);
+}
+
+void submitCompute(std::vector<std::uint32_t> commands) {
+    Packet packet{commands.data(), static_cast<std::uint32_t>(commands.size()), 0, {}};
+    check(sceAgcDriverSubmitAcb(0x20, &packet) == 0, "compute submission was not accepted");
+}
+
+std::vector<std::uint32_t> labelWait() {
+    const auto address = reinterpret_cast<std::uintptr_t>(&label);
+    return {0xc0053c00u, 0x13u, static_cast<std::uint32_t>(address), static_cast<std::uint32_t>(address >> 32u), 1, 0xffffffffu, 10};
+}
+
+std::vector<std::uint32_t> programDispatch() {
+    const auto address = reinterpret_cast<std::uintptr_t>(programCode.data());
+    return {0xc0027600u, 0x20c, static_cast<std::uint32_t>(address >> 8u), static_cast<std::uint32_t>(address >> 40u), 0xc0031500u, 1, 1, 1, 0x41};
+}
+
+std::string testShaderRegisteredAfterSubmit() {
+    auto commands = labelWait();
+    const auto dispatch = programDispatch();
+    commands.insert(commands.end(), dispatch.begin(), dispatch.end());
+    submitCompute(commands);
+    registerProgram(1);
+    label = 1;
+    const auto message = expectFailure([] { AgcDriverWaitIdle_nid_postfix(); });
+    check(message.find("compute program does not belong to a registered shader") != std::string::npos, "a submission saw a shader registered after it");
+    return message;
+}
+
+std::string testShaderRegisteredBeforeSubmit() {
+    submitCompute({0xc0017600u, 0x240, 0});
+    AgcDriverWaitIdle_nid_postfix();
+    registerProgram(1);
+    submitCompute(programDispatch());
+    const auto message = expectFailure([] { AgcDriverWaitIdle_nid_postfix(); });
+    check(message.find("compute program refers to a non-compute shader") != std::string::npos, "a submission missed a shader registered before it");
+    return message;
+}
+
+std::string testGraphicsFailure() {
+    const auto markerAddress = reinterpret_cast<std::uintptr_t>(&marker);
+    auto commands = labelWait();
+    commands.insert(commands.end(), {0xc0033700u, 0x100, static_cast<std::uint32_t>(markerAddress), static_cast<std::uint32_t>(markerAddress >> 32u), 1});
+    submitCompute(commands);
+    std::thread graphics([] { AgcDriverReportFailure_nid_postfix(std::make_exception_ptr(std::runtime_error("intentional graphics failure"))); });
+    graphics.join();
+    label = 1;
+    check(expectFailure([] { submitCompute({0xc0017600u, 0x240, 0}); }) == "intentional graphics failure", "the next submission lost a failure reported on the graphics thread");
+    check(expectFailure([] { AgcDriverWaitIdle_nid_postfix(); }) == "intentional graphics failure", "a suspend point lost a failure reported on the graphics thread");
+    check(marker == 0, "the worker executed a packet after a failure reported on the graphics thread");
+    return "intentional graphics failure";
+}
+
+}
+
+int main(int argc, char** argv) {
     try {
-        testEvents();
-        testValidation();
-        testClearState();
-        testSubmissions();
-        testWorkerFailure();
-        check(expectFailure([] { LibcRunShutdown_nid_postfix(); }).find("required shader register") != std::string::npos, "shutdown lost worker failure");
+        const std::string mode = argc == 2 ? argv[1] : "";
+        std::string expected = "required shader register";
+        if (mode == "shader-after-submit") expected = testShaderRegisteredAfterSubmit();
+        else if (mode == "shader-before-submit") expected = testShaderRegisteredBeforeSubmit();
+        else if (mode == "graphics-failure") expected = testGraphicsFailure();
+        else {
+            testEvents();
+            testValidation();
+            testClearState();
+            testSubmissions();
+            testPublishedPointer();
+            testWorkerFailure();
+        }
+        check(expectFailure([] { LibcRunShutdown_nid_postfix(); }).find(expected) != std::string::npos, "shutdown lost worker failure");
         std::puts("AGC driver submit tests passed");
         return 0;
     } catch (const std::exception& error) {

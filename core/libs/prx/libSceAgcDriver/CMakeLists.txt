@@ -128,6 +128,7 @@ add_executable(agc_driver_tests EXCLUDE_FROM_ALL
 
 target_include_directories(agc_driver_tests PRIVATE
         ${LIBS_INCLUDE_DIR}
+        ${CMAKE_SOURCE_DIR}/3rdparty/Vulkan-Headers/include
 )
 
 target_link_libraries(agc_driver_tests PRIVATE
