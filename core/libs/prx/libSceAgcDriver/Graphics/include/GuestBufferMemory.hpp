@@ -31,6 +31,7 @@ public:
     std::vector<ShaderRecompiler::BdaAbi::Range> AddressRanges() const;
     void WriteBack(std::uint64_t sequence = std::numeric_limits<std::uint64_t>::max());
     bool WritesOverlapCopied(std::uint64_t address, std::size_t bytes) const;
+    bool WriteCopied(std::uint64_t address) const;
     bool WritesOverlap(std::uint64_t address, std::size_t bytes) const;
     bool HasWrites() const { return !writes.empty(); }
     const std::vector<std::pair<std::uint64_t, std::uint64_t>>& WriteRanges() const { return writes; }

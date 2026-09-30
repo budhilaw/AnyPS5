@@ -18,14 +18,14 @@ bool GuestBufferMemory::WritesOverlap(std::uint64_t address, std::size_t bytes) 
 }
 
 bool GuestBufferMemory::WritesOverlapCopied(std::uint64_t address, std::size_t bytes) const {
-    return std::any_of(writes.begin(), writes.end(), [&](const auto& range) {
-        if (!(address < range.second && range.first < address + bytes)) return false;
-        if (!uploaded) return true;
-        const auto found = std::upper_bound(regions.begin(), regions.end(), range.first, [](auto value, const auto& region) { return value < region.begin; });
-        if (found == regions.begin()) return true;
-        const auto& region = *std::prev(found);
-        return !region.inPlace;
-    });
+    return std::any_of(writes.begin(), writes.end(), [&](const auto& range) { return address < range.second && range.first < address + bytes && WriteCopied(range.first); });
+}
+
+bool GuestBufferMemory::WriteCopied(std::uint64_t address) const {
+    if (!uploaded) return true;
+    const auto found = std::upper_bound(regions.begin(), regions.end(), address, [](auto value, const auto& region) { return value < region.begin; });
+    if (found == regions.begin()) return true;
+    return !std::prev(found)->inPlace;
 }
 
 void GuestBufferMemory::validate(std::uint64_t address, std::size_t bytes) const {

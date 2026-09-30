@@ -31,6 +31,7 @@ public:
     void Bind(VkCommandBuffer commands, VkPipelineBindPoint bindPoint, VkPipelineLayout layout) const;
     void WriteBack(std::uint64_t sequence = std::numeric_limits<std::uint64_t>::max());
     bool WritesOverlapCopied(std::uint64_t address, std::size_t bytes) const { return guestMemory.WritesOverlapCopied(address, bytes); }
+    bool WriteCopied(std::uint64_t address) const { return guestMemory.WriteCopied(address); }
     bool WritesOverlap(std::uint64_t address, std::size_t bytes) const { return guestMemory.WritesOverlap(address, bytes); }
     const std::vector<std::pair<std::uint64_t, std::uint64_t>>& WriteRanges() const { return guestMemory.WriteRanges(); }
     bool HasGuestWrites() const { return guestMemory.HasWrites(); }
@@ -74,7 +75,7 @@ private:
     bool storesImages = false;
     VkDescriptorSetLayout _layout = VK_NULL_HANDLE;
     VkDescriptorSet _set = VK_NULL_HANDLE;
-    std::unique_ptr<DescriptorAllocation> descriptors;
+    DescriptorCache::Allocation descriptors;
     std::vector<Allocation> allocations;
     std::vector<std::shared_ptr<Texture>> textures;
     std::vector<std::pair<std::uint32_t, std::uint32_t>> textureBindings;

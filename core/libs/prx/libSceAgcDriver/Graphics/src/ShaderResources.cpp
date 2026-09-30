@@ -237,10 +237,9 @@ void ShaderResources::build(std::span<const CompiledShader> shaders, const Color
         if (storageImages != 0) sizes.push_back({VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, storageImages});
         if (!samplers.empty()) sizes.push_back({VK_DESCRIPTOR_TYPE_SAMPLER, static_cast<std::uint32_t>(samplers.size())});
         if (!context.descriptorCache) context.descriptorCache = std::make_shared<DescriptorCache>();
-        descriptors = context.descriptorCache->Take(layoutKey);
-        if (!descriptors) descriptors = std::make_unique<DescriptorAllocation>(context, layoutKey, description, sizes);
-        _layout = descriptors->Layout();
-        _set = descriptors->Set();
+        descriptors = context.descriptorCache->Take(context, layoutKey, description, sizes);
+        _layout = descriptors.layout;
+        _set = descriptors.set;
         timing.Mark("descriptor_acquire");
         std::vector<VkDescriptorBufferInfo> buffers;
         std::vector<VkDescriptorImageInfo> images;
@@ -432,7 +431,8 @@ ShaderResources::~ShaderResources() {
 }
 
 void ShaderResources::release() noexcept {
-    if (descriptors) context.descriptorCache->Put(std::move(descriptors));
+    if (descriptors.entry != nullptr) context.descriptorCache->Put(descriptors);
+    descriptors = {};
     _layout = VK_NULL_HANDLE;
     _set = VK_NULL_HANDLE;
 }
