@@ -30,6 +30,7 @@ struct Module {
     std::uintptr_t base;
     std::uintptr_t end;
     std::string name;
+    std::uintptr_t imageBase;
 };
 
 struct Target {
@@ -63,7 +64,16 @@ std::vector<Module> loadedModules() {
         if (!K32GetModuleInformation(GetCurrentProcess(), handle, &info, sizeof(info))) continue;
         K32GetModuleBaseNameA(GetCurrentProcess(), handle, name, sizeof(name));
         const auto base = reinterpret_cast<std::uintptr_t>(info.lpBaseOfDll);
-        result.push_back({base, base + info.SizeOfImage, name});
+        const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+        if (dos->e_magic != IMAGE_DOS_SIGNATURE) continue;
+        const auto* headers = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
+        if (headers->Signature != IMAGE_NT_SIGNATURE) continue;
+        const auto* section = IMAGE_FIRST_SECTION(headers);
+        for (WORD index = 0; index < headers->FileHeader.NumberOfSections; ++index, ++section) {
+            if ((section->Characteristics & IMAGE_SCN_MEM_EXECUTE) == 0 || section->Misc.VirtualSize == 0) continue;
+            const auto first = base + section->VirtualAddress;
+            result.push_back({first, first + section->Misc.VirtualSize, name, base});
+        }
     }
     std::sort(result.begin(), result.end(), [](const Module& left, const Module& right) { return left.base < right.base; });
     return result;
@@ -78,7 +88,7 @@ const Module* moduleOf(const std::vector<Module>& modules, std::uintptr_t addres
 
 bool followsCall(const std::vector<Module>& modules, std::uintptr_t address) {
     const auto* module = moduleOf(modules, address);
-    if (module == nullptr || address < module->base + 0x1000 + 7) return false;
+    if (module == nullptr || address < module->base + 7) return false;
     const auto* code = reinterpret_cast<const unsigned char*>(address);
     return code[-5] == 0xe8 || (code[-2] == 0xff && (code[-1] & 0x38) == 0x10) || (code[-3] == 0xff && (code[-2] & 0x38) == 0x10) || (code[-6] == 0xff && (code[-5] & 0x38) == 0x10) || (code[-7] == 0xff && (code[-6] & 0x38) == 0x10);
 }
@@ -86,7 +96,7 @@ bool followsCall(const std::vector<Module>& modules, std::uintptr_t address) {
 void describe(const std::vector<Module>& modules, std::uintptr_t address, char* text, std::size_t size) {
     const auto* module = moduleOf(modules, address);
     if (module == nullptr) std::snprintf(text, size, "?+0x%llx", static_cast<unsigned long long>(address));
-    else std::snprintf(text, size, "%s+0x%llx", module->name.c_str(), static_cast<unsigned long long>(address - module->base));
+    else std::snprintf(text, size, "%s+0x%llx", module->name.c_str(), static_cast<unsigned long long>(address - module->imageBase));
 }
 
 void report(Target& target, const std::vector<Module>& modules) {
