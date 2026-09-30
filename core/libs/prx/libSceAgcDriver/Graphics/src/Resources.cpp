@@ -145,9 +145,14 @@ RenderTarget::RenderTarget(const Context& context, const ColorTarget& target, bo
     VkFormatProperties linearProperties{};
     context.formatProperties(context.physical, StorageFormat(target.format), &linearProperties);
     storageCapable = (linearProperties.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) != 0;
-    const VkImageUsageFlags usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | (storageCapable ? VK_IMAGE_USAGE_STORAGE_BIT : 0u);
-    const VkImageCreateFlags flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+    VkImageUsageFlags usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | (storageCapable ? VK_IMAGE_USAGE_STORAGE_BIT : 0u);
+    VkImageCreateFlags flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
     VkImageFormatProperties supported{};
+    if (!storageCapable && context.storageImages && context.imageFormatProperties(context.physical, target.format, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL, usage | VK_IMAGE_USAGE_STORAGE_BIT, flags | VK_IMAGE_CREATE_EXTENDED_USAGE_BIT, &supported) == VK_SUCCESS) {
+        storageCapable = true;
+        usage |= VK_IMAGE_USAGE_STORAGE_BIT;
+        flags |= VK_IMAGE_CREATE_EXTENDED_USAGE_BIT;
+    }
     Check(context.imageFormatProperties(context.physical, target.format, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL, usage, flags, &supported), "vkGetPhysicalDeviceImageFormatProperties");
     Require(target.extent.width <= supported.maxExtent.width && target.extent.height <= supported.maxExtent.height && (supported.sampleCounts & VK_SAMPLE_COUNT_1_BIT) != 0 && target.bytes <= supported.maxResourceSize, "render target exceeds device image limits");
     Require(target.extent.width <= context.limits.maxFramebufferWidth && target.extent.height <= context.limits.maxFramebufferHeight, "render target exceeds framebuffer limits");
@@ -172,7 +177,10 @@ RenderTarget::RenderTarget(const Context& context, const ColorTarget& target, bo
         allocation.memoryTypeIndex = context.MemoryType(requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
         Check(context.Function<PFN_vkAllocateMemory>("vkAllocateMemory")(context.device, &allocation, nullptr, &memory), "vkAllocateMemory render target");
         Check(context.Function<PFN_vkBindImageMemory>("vkBindImageMemory")(context.device, image, memory, 0), "vkBindImageMemory");
+        VkImageViewUsageCreateInfo viewUsage{VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO};
+        viewUsage.usage = usage & ~VK_IMAGE_USAGE_STORAGE_BIT;
         VkImageViewCreateInfo viewInfo{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+        if ((flags & VK_IMAGE_CREATE_EXTENDED_USAGE_BIT) != 0) viewInfo.pNext = &viewUsage;
         viewInfo.image = image;
         viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
         viewInfo.format = target.format;

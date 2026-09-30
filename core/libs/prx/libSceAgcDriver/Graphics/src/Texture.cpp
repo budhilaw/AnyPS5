@@ -296,7 +296,10 @@ Texture::~Texture() {
 VkImageView Texture::StorageView() {
     if (storageFormat == VK_FORMAT_UNDEFINED) return VK_NULL_HANDLE;
     if (storageView == VK_NULL_HANDLE) {
+        VkImageViewUsageCreateInfo viewUsage{VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO};
+        viewUsage.usage = VK_IMAGE_USAGE_STORAGE_BIT;
         VkImageViewCreateInfo viewInfo{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+        viewInfo.pNext = &viewUsage;
         viewInfo.image = image;
         viewInfo.viewType = storageViewType;
         viewInfo.format = storageFormat;

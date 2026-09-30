@@ -130,14 +130,19 @@ Texture::Texture(const Context& context, const std::shared_ptr<ResidentColor>& s
         guestMipCount = 1;
         guestLayers = 1;
         guestDimension = static_cast<std::uint32_t>(descriptor.dimension);
+        VkImageViewUsageCreateInfo viewUsage{VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO};
+        viewUsage.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
         VkImageViewCreateInfo viewInfo{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+        viewInfo.pNext = &viewUsage;
         viewInfo.image = image;
         viewInfo.viewType = descriptor.viewDimension == TextureDimension::k2DArray ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
         viewInfo.format = format;
         viewInfo.components = components;
         viewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
         Check(context.Function<PFN_vkCreateImageView>("vkCreateImageView")(context.device, &viewInfo, nullptr, &view), "vkCreateImageView resident view");
-        if (target.StorageCapable()) {
+        VkFormatProperties storageProperties{};
+        context.formatProperties(context.physical, StorageFormat(format), &storageProperties);
+        if (target.StorageCapable() && (storageProperties.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) != 0) {
             storageFormat = StorageFormat(format);
             storageViewType = viewInfo.viewType;
             storageRange = viewInfo.subresourceRange;
