@@ -8,6 +8,15 @@
 #include <cstdint>
 #include <thread>
 
+#ifdef _WIN32
+extern "C" {
+
+void GuestLockWait_nid_no_patch(std::atomic<std::uint32_t>* word, std::uint32_t value);
+void GuestLockWake_nid_no_patch(std::atomic<std::uint32_t>* word);
+
+}
+#endif
+
 class GuestLock {
 public:
     bool try_lock() noexcept {
@@ -16,10 +25,10 @@ public:
     }
     void lock() noexcept {
         if (try_lock()) return;
-        while (word.exchange(2, std::memory_order_acquire) != 0) word.wait(2, std::memory_order_relaxed);
+        while (word.exchange(2, std::memory_order_acquire) != 0) waitWhileContended();
     }
     void unlock() noexcept {
-        if (word.exchange(0, std::memory_order_release) == 2) word.notify_one();
+        if (word.exchange(0, std::memory_order_release) == 2) wakeOne();
     }
 
     template <typename Rep, typename Period>
@@ -28,7 +37,7 @@ public:
         auto pause = std::chrono::microseconds(1);
         while (!try_lock()) {
             if (std::chrono::steady_clock::now() >= deadline) return false;
-            PreciseSleepNanos_nid_no_patch(static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(pause).count()));
+            GuestSleepNanos_nid_no_patch(static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(pause).count()));
             pause = std::min(pause * 2, std::chrono::microseconds(500));
         }
         return true;
@@ -40,6 +49,21 @@ public:
     }
 
 private:
+    void waitWhileContended() noexcept {
+#ifdef _WIN32
+        GuestLockWait_nid_no_patch(&word, 2);
+#else
+        word.wait(2, std::memory_order_relaxed);
+#endif
+    }
+    void wakeOne() noexcept {
+#ifdef _WIN32
+        GuestLockWake_nid_no_patch(&word);
+#else
+        word.notify_one();
+#endif
+    }
+
     std::atomic<std::uint32_t> word{0};
 };
 
