@@ -23,6 +23,7 @@
 #include "prx/libSceAgcDriver/Eq/include/Event.hpp"
 #include "prx/libc/include/GuestMemoryTracking.hpp"
 #include "prx/libc/include/PreciseSleep.hpp"
+#include "prx/libc/include/SlowOperation.hpp"
 #include "prx/libSceAgcDriver/Execution/include/ThreadSampler.hpp"
 #include <bit>
 #include <algorithm>
@@ -283,7 +284,8 @@ private:
         graphicsChanged.notify_all();
     }
 
-    void drainGraphics() {
+    void drainGraphics(const char* reason) {
+        SlowOperationTimer slowTimer(reason);
         PerformanceTimer timing("Driver.GraphicsDrain");
         std::unique_lock lock(graphicsMutex);
         graphicsChanged.wait(lock, [&] { return graphicsJobs.empty(); });
@@ -327,7 +329,7 @@ private:
                 std::fprintf(stderr, "[drain] 0x%llx+0x%zx %s queued %d recorded %d:%s\n", static_cast<unsigned long long>(address), bytes, writable ? "write" : "read", queuedWrite ? 1 : 0, recorded ? 1 : 0, ranges.c_str());
             }
         }
-        self.drainGraphics();
+        self.drainGraphics("drain host resolve");
         timing.Mark("drain");
         current->ResolveMemory(address, bytes, writable);
         timing.Mark("resolve");
@@ -476,7 +478,7 @@ public:
         timing.Mark("validate");
         try {
             {
-                if (const auto existing = currentDevice(); existing == nullptr || existing->Window() == nullptr) drainGraphics();
+                if (const auto existing = currentDevice(); existing == nullptr || existing->Window() == nullptr) drainGraphics("drain present");
                 std::unique_lock lock(gpuMutex);
                 timing.Mark("gpu_mutex_wait");
                 if (device == nullptr || device->Window() == nullptr) {
@@ -523,7 +525,7 @@ public:
     }
 
     void ReleaseWindow(void* window) {
-        drainGraphics();
+        drainGraphics("drain release window");
         std::lock_guard lock(gpuMutex);
         std::lock_guard deviceLock(deviceMutex);
         if (device && device->Window() == window) device.reset();
@@ -1160,7 +1162,7 @@ private:
         if (submission.suspend) {
             PerformanceContext timingContext(frameTiming.get());
             PerformanceTimer timing("Driver.Suspend");
-            drainGraphics();
+            drainGraphics("drain suspend");
             std::lock_guard gpuLock(gpuMutex);
             timing.Mark("gpu_mutex_wait");
             if (device != nullptr) device->WaitIdle();
@@ -1250,7 +1252,7 @@ private:
                             execution.cursor += count;
                             return execution.cursor >= submission.commands.size() ? Step::Finished : Step::Progressed;
                         } else if (memoryTransfer) {
-                            drainGraphics();
+                            drainGraphics("drain gds dma");
                             std::lock_guard gpuLock(gpuMutex);
                             std::uint64_t destination = 0, source = 0;
                             std::size_t destinationBytes = 0, sourceBytes = 0;
@@ -1262,7 +1264,7 @@ private:
                         } else {
                             const auto scope = header == FlipPacketHeader ? "Driver.FlipWait" : "Driver.ReleaseWait";
                             PerformanceTimer waitTiming(scope);
-                            drainGraphics();
+                            drainGraphics("drain release wait");
                             std::lock_guard gpuLock(gpuMutex);
                             current->WaitIdle();
                             timing.Mark("device_idle_wait");
@@ -1288,7 +1290,7 @@ private:
                 } else if (opcode == 0x16) {
                     std::array<std::uint32_t, 5> direct;
                     {
-                        drainGraphics();
+                        drainGraphics("drain indirect dispatch");
                         std::lock_guard gpuLock(gpuMutex);
                         const GuestMemory::MemoryAccessScope memoryScope(device.get(), [](void* context, std::uint64_t address, std::size_t bytes, bool writable) {
                             if (context) static_cast<VulkanDevice*>(context)->ResolveMemory(address, bytes, writable);
@@ -1301,7 +1303,7 @@ private:
                 } else if (opcode == 0x35 || opcode == 0x2d || opcode == 0x27 || opcode == 0x24 || opcode == 0x25) {
                     SkippingFailedPrograms([&] { draw(queue, packet, submission); });
                 } else if (opcode == 0x50 && (Pm4::DmaGdsDestination(packet) || Pm4::DmaGdsSource(packet))) {
-                    drainGraphics();
+                    drainGraphics("drain gds transfer");
                     std::lock_guard gpuLock(gpuMutex);
                     require(device != nullptr, "GDS transfer without a device");
                     const GuestMemory::MemoryAccessScope memoryScope(device.get(), [](void* context, std::uint64_t address, std::size_t bytes, bool writable) {
@@ -1434,7 +1436,7 @@ private:
                     PreciseSleepNanos_nid_no_patch(20000);
                 }
             }
-            drainGraphics();
+            drainGraphics("drain shutdown");
             std::lock_guard gpuLock(gpuMutex);
             std::lock_guard deviceLock(deviceMutex);
             device.reset();
@@ -1444,7 +1446,7 @@ private:
             for (auto& [id, fifo] : queued) for (auto& execution : fifo) for (const auto& [offset, flip] : execution.submission.flips) flip->Fail(error);
             ReportFailure(error);
             {
-                drainGraphics();
+                drainGraphics("drain shutdown");
                 std::lock_guard gpuLock(gpuMutex);
                 std::lock_guard deviceLock(deviceMutex);
                 device.reset();
