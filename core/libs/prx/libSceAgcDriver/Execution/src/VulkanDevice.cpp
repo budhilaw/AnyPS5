@@ -246,6 +246,7 @@ struct VulkanDevice::State {
             destroyComputePipelines();
             guestBufferCache.reset();
             gds.reset();
+            presentedTarget.reset();
             renderCache.reset();
             textureCache.reset();
             detiler.reset();
