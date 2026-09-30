@@ -11,9 +11,12 @@ struct Mapping {
     std::size_t bytes;
     void* alias;
     std::uintptr_t handle;
+    bool physical = false;
 };
 
 Mapping Map(void* address, std::size_t bytes, std::size_t alignment, int protection);
+Mapping MapPhysical(void* address, std::size_t bytes, std::size_t alignment, int protection, std::uint64_t offset);
+void UnmapViewRange(std::uint64_t address, std::size_t bytes);
 void Unmap(const Mapping& mapping);
 void UnmapView(const Mapping& mapping);
 void UnmapAlias(const Mapping& mapping);

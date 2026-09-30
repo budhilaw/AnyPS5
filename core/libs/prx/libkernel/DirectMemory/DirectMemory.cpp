@@ -5,10 +5,13 @@
 #include "prx/libc/include/GuestAllocations.hpp"
 #include "prx/libc/include/GuestMemoryBacking.hpp"
 #include "prx/libc/include/General.hpp"
+#include <algorithm>
 #include <cerrno>
 #include <cstdio>
 #include <string>
 #include <limits>
+#include <map>
+#include <mutex>
 #include <stdexcept>
 #include <system_error>
 
@@ -40,6 +43,35 @@ static int mprotect(void* addr, size_t len, int prot) {
 #endif
 
 namespace {
+
+struct DirectMapping {
+    std::uintptr_t end;
+    int64_t physical;
+};
+
+std::mutex directMappingMutex;
+std::map<std::uintptr_t, DirectMapping> directMappings;
+
+void ForgetDirectMappings(std::uintptr_t start, std::size_t len) {
+    const auto end = start + len;
+    std::lock_guard lock(directMappingMutex);
+    auto it = directMappings.lower_bound(start);
+    if (it != directMappings.begin() && std::prev(it)->second.end > start) --it;
+    while (it != directMappings.end() && it->first < end) {
+        const auto mappingStart = it->first;
+        const auto mapping = it->second;
+        it = directMappings.erase(it);
+        if (mappingStart < start) directMappings.emplace(mappingStart, DirectMapping{start, mapping.physical});
+        if (mapping.end > end) directMappings.emplace(end, DirectMapping{mapping.end, mapping.physical + static_cast<int64_t>(end - mappingStart)});
+    }
+}
+
+void RecordDirectMapping(const void* address, std::size_t len, int64_t physical) {
+    const auto start = reinterpret_cast<std::uintptr_t>(address);
+    ForgetDirectMappings(start, len);
+    std::lock_guard lock(directMappingMutex);
+    directMappings.emplace(start, DirectMapping{start + len, physical});
+}
 
 void ValidateLength(size_t len) {
     if (len == 0 || (len & (PS5_PAGE_SIZE - 1)) != 0) {
@@ -82,7 +114,7 @@ void Unmap(void* addr, size_t len) {
     GuestMemoryBacking::GuestMemoryBackingUnmap_nid_postfix(addr, len);
 }
 
-void* MapAligned(void* addr, size_t len, int prot, int flags, size_t alignment) {
+void* MapAligned(void* addr, size_t len, int prot, int flags, size_t alignment, int64_t physical = -1) {
     ValidateLength(len);
     alignment = ValidateAlignment(alignment);
     constexpr int guestMapFixed = 0x10;
@@ -91,6 +123,7 @@ void* MapAligned(void* addr, size_t len, int prot, int flags, size_t alignment) 
     if ((flags & ~(guestMapFixed | guestMapNoOverwrite | guestMapNoCoalesce)) != 0) throw std::invalid_argument("Unsupported memory mapping flags " + std::to_string(flags));
     if ((flags & guestMapFixed) != 0) ValidateRange(addr, len, alignment);
     else if (addr != nullptr) throw std::invalid_argument("Non-fixed mapping address hints are not implemented");
+    if (physical >= 0) return GuestMemoryBacking::GuestMemoryBackingMapPhysical_nid_postfix(addr, len, alignment, prot, static_cast<std::uint64_t>(physical));
     return GuestMemoryBacking::GuestMemoryBackingMap_nid_postfix(addr, len, alignment, prot);
 }
 
@@ -114,6 +147,8 @@ void ValidateOutput(void** addr) {
 
 }
 
+static_assert(DIRECT_MEMORY_SIZE == GuestMemoryBacking::GuestPhysicalMemoryBytes);
+
 int DoMapDirect(void** addr, size_t len, int prot, int flags, int64_t physStart, size_t alignment) {
     ValidateOutput(addr);
     if (len == 0 || (len & (PS5_PAGE_SIZE - 1)) != 0) return SCE_KERNEL_ERROR_EINVAL;
@@ -121,11 +156,14 @@ int DoMapDirect(void** addr, size_t len, int prot, int flags, int64_t physStart,
         return SCE_KERNEL_ERROR_EINVAL;
     }
     GuestAllocations::Mutation mutation;
-    if (*addr != nullptr && CommitReserved(mutation, *addr, len, prot, flags, alignment)) return 0;
+    if (*addr != nullptr && CommitReserved(mutation, *addr, len, prot, flags, alignment)) {
+        RecordDirectMapping(*addr, len, physStart);
+        return 0;
+    }
     if (*addr != nullptr) mutation.RequireAvailable(*addr, len);
     void* mapped = nullptr;
     try {
-        mapped = MapAligned(*addr, len, LinuxProtFromSce(prot), flags, alignment);
+        mapped = MapAligned(*addr, len, LinuxProtFromSce(prot), flags, alignment, physStart);
     } catch (const std::runtime_error& error) {
         constexpr int guestMapNoOverwrite = 0x80;
         if (*addr == nullptr || (flags & guestMapNoOverwrite) == 0) throw;
@@ -138,6 +176,7 @@ int DoMapDirect(void** addr, size_t len, int prot, int flags, int64_t physStart,
         Unmap(mapped, len);
         throw;
     }
+    RecordDirectMapping(mapped, len, physStart);
     *addr = mapped;
     return 0;
 }
@@ -193,10 +232,47 @@ int DoMprotect(const void* addr, size_t len, int prot) {
 int DoMunmap(void* addr, size_t len) {
     if (len == 0 || (len & (PS5_PAGE_SIZE - 1)) != 0 || !addr) return SCE_KERNEL_ERROR_EINVAL;
     GuestAllocations::Mutation mutation;
-    mutation.Unmap(addr, len, [&](const void*, bool) {
-        Unmap(addr, len);
-    });
+    const auto end = reinterpret_cast<std::uintptr_t>(addr) + len;
+    auto cursor = reinterpret_cast<std::uintptr_t>(addr);
+    while (cursor < end) {
+        GuestAllocations::Range range{};
+        if (!mutation.Query(cursor, true, range) || range.address >= end) break;
+        const auto first = std::max<std::uintptr_t>(cursor, range.address);
+        const auto last = std::min<std::uintptr_t>(end, range.address + range.bytes);
+        auto* piece = reinterpret_cast<void*>(first);
+        mutation.Unmap(piece, last - first, [&](const void*, bool) {
+            Unmap(piece, last - first);
+        });
+        ForgetDirectMappings(first, last - first);
+        cursor = last;
+    }
     return 0;
+}
+
+bool FindDirectMapping(uintptr_t address, uintptr_t* start, uintptr_t* end, int64_t* physical) {
+    std::lock_guard lock(directMappingMutex);
+    auto it = directMappings.upper_bound(address);
+    if (it == directMappings.begin()) return false;
+    --it;
+    if (address >= it->second.end) return false;
+    *start = it->first;
+    *end = it->second.end;
+    *physical = it->second.physical;
+    return true;
+}
+
+uintptr_t NextDirectMapping(uintptr_t from) {
+    std::lock_guard lock(directMappingMutex);
+    const auto it = directMappings.upper_bound(from);
+    return it == directMappings.end() ? std::numeric_limits<uintptr_t>::max() : it->first;
+}
+
+uintptr_t PreviousDirectMappingEnd(uintptr_t before) {
+    std::lock_guard lock(directMappingMutex);
+    auto it = directMappings.upper_bound(before);
+    if (it == directMappings.begin()) return 0;
+    --it;
+    return it->second.end <= before ? it->second.end : 0;
 }
 
 int DoReserveVirtual(void** addr, size_t len, size_t alignment) {

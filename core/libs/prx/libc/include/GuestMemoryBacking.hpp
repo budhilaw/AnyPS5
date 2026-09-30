@@ -6,6 +6,8 @@
 
 namespace GuestMemoryBacking {
 
+constexpr std::uint64_t GuestPhysicalMemoryBytes = 13824ull * 1024 * 1024;
+
 struct GuestMemoryBackingExtentInfo {
     std::uint64_t address;
     std::uint64_t bytes;
@@ -15,6 +17,7 @@ struct GuestMemoryBackingExtentInfo {
 
 extern "C" {
 void* GuestMemoryBackingMap_nid_postfix(void* address, std::size_t bytes, std::size_t alignment, int protection);
+void* GuestMemoryBackingMapPhysical_nid_postfix(void* address, std::size_t bytes, std::size_t alignment, int protection, std::uint64_t physicalOffset);
 void GuestMemoryBackingUnmap_nid_postfix(void* address, std::size_t bytes);
 void GuestMemoryBackingRequire_nid_postfix(std::uint64_t address, std::size_t bytes);
 void GuestMemoryBackingActivate_nid_postfix(std::uint64_t address, std::size_t bytes, int protection);

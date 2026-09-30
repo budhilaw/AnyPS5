@@ -58,6 +58,17 @@ Mapping Map(void* address, std::size_t bytes, std::size_t alignment, int protect
     }
 }
 
+Mapping MapPhysical(void* address, std::size_t bytes, std::size_t alignment, int protection, std::uint64_t offset) {
+    static_cast<void>(offset);
+    return Map(address, bytes, alignment, protection);
+}
+
+void UnmapViewRange(std::uint64_t address, std::size_t bytes) {
+    static_cast<void>(address);
+    static_cast<void>(bytes);
+    throw std::logic_error("partial guest physical views are not supported on Windows");
+}
+
 void UnmapView(const Mapping& mapping) {
     check(UnmapViewOfFile(reinterpret_cast<void*>(mapping.address)) != FALSE, "UnmapViewOfFile guest view");
 }
