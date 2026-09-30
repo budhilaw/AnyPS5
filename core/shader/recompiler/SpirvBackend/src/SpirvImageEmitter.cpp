@@ -5,8 +5,11 @@
 #include "RdnaDecoder/RdnaImageOpDecoder.hpp"
 #include <spirv/unified1/GLSL.std.450.h>
 #include <spirv/unified1/spirv.hpp>
+#include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstdint>
+#include <cstdio>
 #include <stdexcept>
 #include <vector>
 
@@ -97,10 +100,14 @@ std::uint32_t AddressF32(SpirvValueEmitContext& ctx, const ImageEmitAccess& acce
     return GetRdnaImageAddressComponentLayout(access.mem.imageSampleFlags, component).bitWidth == 16u ? EmitF16BitsToF32(ctx.state, value) : Unary(ctx.state, spv::OpBitcast, TypeF32(ctx.state), value);
 }
 
-ImageSampleLayout Layout(const MemoryInfo& mem, RdnaImageDimension dimension) {
+const RdnaImageDimensionInfo& InstructionDimensionInfo(const ImageEmitAccess& access) {
+    return RdnaImageDimensionInfoFor(access.mem.imageDimension);
+}
+
+ImageSampleLayout Layout(const MemoryInfo& mem) {
     ImageSampleLayout layout;
     std::uint32_t cursor = 0;
-    const auto& info = RdnaImageDimensionInfoFor(dimension);
+    const auto& info = RdnaImageDimensionInfoFor(mem.imageDimension);
     if (HasFlag(mem, RdnaImageSampleFlagOffset)) {
         layout.offset = cursor++;
     }
@@ -138,23 +145,37 @@ std::uint32_t CubeLayer(SpirvEmitterState& state, std::uint32_t value) {
     return result;
 }
 
-std::uint32_t CoordF32(SpirvValueEmitContext& ctx, const ImageEmitAccess& access, std::uint32_t first, std::uint32_t components) {
-    if (first == NoImageComponent || access.mem.imageAddressComponents < first + components) {
+std::uint32_t SuppliedCoordinateComponents(SpirvValueEmitContext& ctx, const ImageEmitAccess& access, std::uint32_t first, std::uint32_t instructionComponents, std::uint32_t components) {
+    const auto supplied = std::min(instructionComponents, components);
+    if (first == NoImageComponent || access.mem.imageAddressComponents < first + supplied || supplied < RdnaImageDimensionInfoFor(access.image.dimension).spatialComponents) {
         ctx.Fail(access.inst, "has an image address with too few coordinate components");
     }
+    static std::atomic<bool> reported{false};
+    if (supplied < components && !reported.exchange(true, std::memory_order_relaxed)) {
+        const auto opcode = IrOpcodeName(access.inst.Opcode());
+        std::fprintf(stderr, "SPIR-V emission: hash=0x%016llx opcode=%.*s supplies %u of %u image coordinate components; the missing ones read as zero\n", static_cast<unsigned long long>(ctx.state.program.Resources().shaderHash), static_cast<int>(opcode.size()), opcode.data(), supplied, components);
+    }
+    return supplied;
+}
+
+std::uint32_t CoordF32(SpirvValueEmitContext& ctx, const ImageEmitAccess& access, std::uint32_t first, std::uint32_t instructionComponents, std::uint32_t components) {
+    const auto supplied = SuppliedCoordinateComponents(ctx, access, first, instructionComponents, components);
+    const auto component = [&](std::uint32_t index) {
+        return index < supplied ? AddressF32(ctx, access, first + index) : ZeroF32(ctx.state);
+    };
     const bool cube = access.image.cube;
-    auto x = AddressF32(ctx, access, first);
+    auto x = component(0u);
     if (components == 1u) {
         return x;
     }
-    auto y = AddressF32(ctx, access, first + 1u);
+    auto y = component(1u);
     if (cube) {
         x = CubeAxis(ctx.state, x);
         y = CubeAxis(ctx.state, y);
     }
     const auto result = ctx.state.module.AllocateId();
     if (components == 3u) {
-        auto z = AddressF32(ctx, access, first + 2u);
+        auto z = component(2u);
         if (cube) {
             z = CubeLayer(ctx.state, z);
         }
@@ -167,17 +188,18 @@ std::uint32_t CoordF32(SpirvValueEmitContext& ctx, const ImageEmitAccess& access
 
 std::uint32_t CoordU32(SpirvValueEmitContext& ctx, const ImageEmitAccess& access) {
     const auto components = RdnaImageDimensionInfoFor(access.image.dimension).coordinateComponents;
-    if (access.mem.imageAddressComponents < components) {
-        ctx.Fail(access.inst, "has an image address with too few coordinate components");
-    }
-    const auto x = AddressU32(ctx, access, 0);
+    const auto supplied = SuppliedCoordinateComponents(ctx, access, 0u, InstructionDimensionInfo(access).coordinateComponents, components);
+    const auto component = [&](std::uint32_t index) {
+        return index < supplied ? AddressU32(ctx, access, index) : ConstantU32(ctx.state, 0);
+    };
+    const auto x = component(0u);
     if (components == 1u) {
         return x;
     }
-    const auto y = AddressU32(ctx, access, 1);
+    const auto y = component(1u);
     const auto result = ctx.state.module.AllocateId();
     if (components == 3u) {
-        const auto z = AddressU32(ctx, access, 2);
+        const auto z = component(2u);
         ctx.state.module.AddFunction(spv::OpCompositeConstruct, TypeU32Vector(ctx.state, 3), result, x, y, z);
     } else {
         ctx.state.module.AddFunction(spv::OpCompositeConstruct, TypeU32Vector(ctx.state, 2), result, x, y);
@@ -189,7 +211,7 @@ std::uint32_t LodU32(SpirvValueEmitContext& ctx, const ImageEmitAccess& access) 
     if (!access.mem.imageHasMip) {
         return ConstantU32(ctx.state, 0);
     }
-    const auto component = RdnaImageDimensionInfoFor(access.image.dimension).coordinateComponents;
+    const auto component = InstructionDimensionInfo(access).coordinateComponents;
     if (access.mem.imageAddressComponents <= component) {
         ctx.Fail(access.inst, "has an image address without the mip level component");
     }
@@ -548,7 +570,7 @@ void EmitQueryLodOp(SpirvValueEmitContext& ctx, const ImageEmitAccess& access) {
     auto& state = ctx.state;
     state.module.EmitCapability(spv::CapabilityImageQuery);
     const auto sampled = MakeSampledImage(state, access.mem.resource, access.mem.sampler);
-    const auto coord = CoordF32(ctx, access, 0, RdnaImageDimensionInfoFor(access.image.dimension).spatialComponents);
+    const auto coord = CoordF32(ctx, access, 0, InstructionDimensionInfo(access).spatialComponents, RdnaImageDimensionInfoFor(access.image.dimension).spatialComponents);
     const auto lod = state.module.AllocateId();
     state.module.AddFunction(spv::OpImageQueryLod, TypeF32Vector(state, 2), lod, sampled, coord);
     std::uint32_t values[4] = {ConstantU32(state, 0), ConstantU32(state, 0), ConstantU32(state, 0), ConstantU32(state, 0)};
@@ -572,10 +594,11 @@ void EmitReadOp(SpirvValueEmitContext& ctx, const ImageEmitAccess& access) {
         const auto color = state.module.AllocateId();
         const auto coord = CoordU32(ctx, access);
         if (dimensionInfo.multisampled != 0u) {
-            if (access.mem.imageAddressComponents <= dimensionInfo.coordinateComponents) {
+            const auto sample = InstructionDimensionInfo(access).coordinateComponents;
+            if (access.mem.imageAddressComponents <= sample) {
                 ctx.Fail(access.inst, "has no sample index in the image address");
             }
-            state.module.AddFunction(spv::OpImageFetch, ImageVectorType(state, numericClass, 4), color, descriptor, coord, spv::ImageOperandsSampleMask, AddressU32(ctx, access, dimensionInfo.coordinateComponents));
+            state.module.AddFunction(spv::OpImageFetch, ImageVectorType(state, numericClass, 4), color, descriptor, coord, spv::ImageOperandsSampleMask, AddressU32(ctx, access, sample));
         } else {
             state.module.AddFunction(spv::OpImageFetch, ImageVectorType(state, numericClass, 4), color, descriptor, coord, spv::ImageOperandsLodMask, LodU32(ctx, access));
         }
@@ -610,12 +633,12 @@ void EmitAtomicOp(SpirvValueEmitContext& ctx, const ImageEmitAccess& access) {
 
 SampleSetup MakeSampleSetup(SpirvValueEmitContext& ctx, const ImageEmitAccess& access) {
     const auto& dimensionInfo = RdnaImageDimensionInfoFor(access.image.dimension);
-    const auto layout = Layout(access.mem, access.image.dimension);
+    const auto layout = Layout(access.mem);
     const bool dref = HasFlag(access.mem, RdnaImageSampleFlagCompare);
     if (dref && access.image.conversionFormat != IrBufferFormat::Invalid) {
         ctx.Fail(access.inst, "uses depth comparison with a packed integer image");
     }
-    const auto coord = CoordF32(ctx, access, layout.coord, dimensionInfo.coordinateComponents);
+    const auto coord = CoordF32(ctx, access, layout.coord, InstructionDimensionInfo(access).coordinateComponents, dimensionInfo.coordinateComponents);
     return {dimensionInfo, layout, access.image.numericClass, dref, coord};
 }
 
@@ -716,8 +739,9 @@ void EmitSampleOp(SpirvValueEmitContext& ctx, const ImageEmitAccess& access, con
     std::vector<std::uint32_t> operands;
     if (HasFlag(mem, RdnaImageSampleFlagDerivative)) {
         operandMask |= spv::ImageOperandsGradMask;
-        operands.push_back(CoordF32(ctx, access, setup.layout.gradX, setup.dimensionInfo.spatialComponents));
-        operands.push_back(CoordF32(ctx, access, setup.layout.gradY, setup.dimensionInfo.spatialComponents));
+        const auto gradientComponents = InstructionDimensionInfo(access).spatialComponents;
+        operands.push_back(CoordF32(ctx, access, setup.layout.gradX, gradientComponents, setup.dimensionInfo.spatialComponents));
+        operands.push_back(CoordF32(ctx, access, setup.layout.gradY, gradientComponents, setup.dimensionInfo.spatialComponents));
     } else if (explicitLod) {
         operandMask |= spv::ImageOperandsLodMask;
         operands.push_back(HasFlag(mem, RdnaImageSampleFlagLod) ? AddressF32(ctx, access, setup.layout.lod) : ZeroF32(state));
