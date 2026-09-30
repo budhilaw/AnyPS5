@@ -1,7 +1,9 @@
 #include "prx/libSceAgcDriver/Graphics/include/TextureTiling.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Context.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureFormat.hpp"
+#include "prx/libc/include/General.hpp"
 #include <algorithm>
+#include <atomic>
 #include <bit>
 #include <cstddef>
 #include <cstdint>
@@ -57,7 +59,8 @@ enum class SwizzleChannel : std::uint8_t {
     kElement,
     kX,
     kY,
-    kZ
+    kZ,
+    kSlice
 };
 
 struct SwizzleBit {
@@ -79,6 +82,10 @@ constexpr SwizzleBit Z(std::uint8_t index) {
     return {SwizzleChannel::kZ, index};
 }
 
+constexpr SwizzleBit S(std::uint8_t index) {
+    return {SwizzleChannel::kSlice, index};
+}
+
 constexpr SwizzleBit kThickStandardSwizzle[5][16] = {
     {X(0), X(1), Z(0), Y(0), Z(1), Y(1), X(2), Z(2), Y(2), X(3), Z(3), Y(3), X(4), Z(4), Y(4), X(5)},
     {kElementByte, X(0), Z(0), Y(0), Z(1), Y(1), X(1), Z(2), Y(2), X(2), Z(3), Y(3), X(3), Z(4), Y(4), X(4)},
@@ -98,6 +105,61 @@ constexpr bool DepositsInOrder(const SwizzleBit (&pattern)[16], std::uint32_t el
 }
 
 static_assert(DepositsInOrder(kThickStandardSwizzle[0], 0) && DepositsInOrder(kThickStandardSwizzle[1], 1) && DepositsInOrder(kThickStandardSwizzle[2], 2) && DepositsInOrder(kThickStandardSwizzle[3], 3) && DepositsInOrder(kThickStandardSwizzle[4], 4));
+
+struct SwizzleXor {
+    constexpr SwizzleXor(SwizzleBit bit) : terms{bit, kElementByte, kElementByte} {}
+    constexpr SwizzleXor(SwizzleBit first, SwizzleBit second, SwizzleBit third) : terms{first, second, third} {}
+    SwizzleBit terms[3];
+};
+
+constexpr SwizzleXor kZOrder64KBSwizzle[5][16] = {
+    {X(0), Y(0), X(1), Y(1), X(2), Y(2), X(3), Y(4), {X(3), Y(3), S(3)}, {X(4), Y(4), S(2)}, {X(6), Y(5), S(1)}, {X(5), Y(6), S(0)}, Y(6), X(6), Y(7), X(7)},
+    {kElementByte, X(0), Y(0), X(1), Y(1), X(2), Y(2), X(3), {X(3), Y(3), S(3)}, {X(4), Y(4), S(2)}, {X(6), Y(5), S(1)}, {X(5), Y(6), S(0)}, Y(4), X(6), Y(6), X(7)},
+    {kElementByte, kElementByte, X(0), Y(0), X(1), Y(1), X(2), Y(2), {X(3), Y(3), S(3)}, {X(4), Y(4), S(2)}, {X(6), Y(5), S(1)}, {X(5), Y(6), S(0)}, Y(3), X(4), Y(6), X(6)},
+    {kElementByte, kElementByte, kElementByte, X(0), Y(0), X(1), Y(1), X(2), {X(3), Y(3), S(3)}, {X(4), Y(4), S(2)}, {X(6), Y(5), S(1)}, {X(5), Y(6), S(0)}, Y(2), X(3), Y(4), X(6)},
+    {kElementByte, kElementByte, kElementByte, kElementByte, X(0), Y(0), X(1), Y(1), {X(3), Y(3), S(3)}, {X(4), Y(4), S(2)}, {X(6), Y(5), S(1)}, {X(5), Y(6), S(0)}, Y(2), X(2), Y(3), X(4)},
+};
+
+constexpr bool CoversThinBlock(const SwizzleXor (&pattern)[16], std::uint32_t elementBits, Log2BlockDimensions block) {
+    std::uint32_t basis[16] = {};
+    std::uint32_t rank = 0;
+    for (std::uint32_t bit = 0; bit < 16u; ++bit) {
+        std::uint32_t row = 0;
+        for (const auto& term : pattern[bit].terms) {
+            if (term.channel == SwizzleChannel::kZ || ((term.channel == SwizzleChannel::kX || term.channel == SwizzleChannel::kY) && term.index >= 8u) || (term.channel == SwizzleChannel::kSlice && term.index >= 4u)) return false;
+            if (term.channel == SwizzleChannel::kX && term.index < block.width) row ^= 1u << term.index;
+            if (term.channel == SwizzleChannel::kY && term.index < block.height) row ^= 1u << (8u + term.index);
+        }
+        if ((bit < elementBits) != (row == 0)) return false;
+        for (std::uint32_t column = 16; column-- > 0 && row != 0;) {
+            if (((row >> column) & 1u) == 0) continue;
+            if (basis[column] == 0) {
+                basis[column] = row;
+                ++rank;
+                break;
+            }
+            row ^= basis[column];
+        }
+    }
+    return rank + elementBits == 16u && block.width + block.height + elementBits == 16u;
+}
+
+static_assert(CoversThinBlock(kZOrder64KBSwizzle[0], 0, kLog2BlockThin64KB[0]) && CoversThinBlock(kZOrder64KBSwizzle[1], 1, kLog2BlockThin64KB[1]) && CoversThinBlock(kZOrder64KBSwizzle[2], 2, kLog2BlockThin64KB[2]) && CoversThinBlock(kZOrder64KBSwizzle[3], 3, kLog2BlockThin64KB[3]) && CoversThinBlock(kZOrder64KBSwizzle[4], 4, kLog2BlockThin64KB[4]));
+
+constexpr TileSwizzleEquation MakeSwizzleEquation(const SwizzleXor (&pattern)[16]) {
+    TileSwizzleEquation equation{};
+    for (std::uint32_t bit = 0; bit < 16u; ++bit) {
+        const auto mask = static_cast<std::uint16_t>(1u << bit);
+        for (const auto& term : pattern[bit].terms) {
+            if (term.channel == SwizzleChannel::kX) equation.x[term.index] ^= mask;
+            if (term.channel == SwizzleChannel::kY) equation.y[term.index] ^= mask;
+            if (term.channel == SwizzleChannel::kSlice) equation.slice[term.index] ^= mask;
+        }
+    }
+    return equation;
+}
+
+constexpr TileSwizzleEquation kZOrder64KBEquations[5] = {MakeSwizzleEquation(kZOrder64KBSwizzle[0]), MakeSwizzleEquation(kZOrder64KBSwizzle[1]), MakeSwizzleEquation(kZOrder64KBSwizzle[2]), MakeSwizzleEquation(kZOrder64KBSwizzle[3]), MakeSwizzleEquation(kZOrder64KBSwizzle[4])};
 
 std::uint32_t ThickBlockBits(TextureTileMode tileMode) {
     switch (tileMode) {
@@ -181,8 +243,14 @@ bool GetMipTailLayout(TextureTileMode tileMode, const BlockLayout& block, std::u
         case TextureTileMode::kStandard4KB:
             out = MakeMipTailLayout(kMipTailThin4KB[index], block.blockWidth >> 1u, block.blockHeight);
             return true;
-        case TextureTileMode::RenderTarget64KB:
         case TextureTileMode::Depth64KB:
+            out = MakeMipTailLayout(kMipTailThin64KB[index], block.blockWidth >> 1u, block.blockHeight);
+            if (index <= 1u) {
+                out.widthLimit >>= kLog2BlockThin256B[index].width - kLog2BlockThin256B[2].width;
+                out.heightLimit >>= kLog2BlockThin256B[index].height - kLog2BlockThin256B[2].height;
+            }
+            return true;
+        case TextureTileMode::RenderTarget64KB:
         case TextureTileMode::kStandard64KB:
             out = MakeMipTailLayout(kMipTailThin64KB[index], block.blockWidth >> 1u, block.blockHeight);
             return true;
@@ -336,7 +404,16 @@ std::vector<TileMipLayout> ComputeMipLayout(TextureTileMode tileMode, std::uint3
 
 std::vector<TileMipLayout> ComputeMipLayout(const GuestTextureResource& descriptor) {
     const auto thick = UsesThickTiling(descriptor);
-    return ComputeLayout(descriptor.tileMode, descriptor.format, descriptor.width, descriptor.height, thick ? descriptor.depthOrLastArray + 1u : 1u, descriptor.mipCount, thick);
+    auto mips = ComputeLayout(descriptor.tileMode, descriptor.format, descriptor.width, descriptor.height, thick ? descriptor.depthOrLastArray + 1u : 1u, descriptor.mipCount, thick);
+    if (descriptor.tileMode == TextureTileMode::Depth64KB) {
+        static std::atomic<std::uint32_t> reported{0};
+        const auto bytesPerElement = BytesPerElement(descriptor.format);
+        const auto bit = 1u << std::countr_zero(bytesPerElement);
+        if ((reported.load(std::memory_order_relaxed) & bit) == 0 && (reported.fetch_or(bit, std::memory_order_relaxed) & bit) == 0) {
+            APS5_LOG_OUT("texture 0x%llx (%ux%u format 0x%x, %u mips, %u slices) is the first 64KB_Z_X texture of %u-byte elements detiled with the Z-order swizzle", static_cast<unsigned long long>(descriptor.baseAddress), descriptor.width, descriptor.height, descriptor.format, descriptor.mipCount, descriptor.depthOrLastArray + 1u, bytesPerElement);
+        }
+    }
+    return mips;
 }
 
 TileSwizzleMasks ThickSwizzleMasks(TextureTileMode tileMode, std::uint32_t bytesPerElement) {
@@ -346,13 +423,19 @@ TileSwizzleMasks ThickSwizzleMasks(TextureTileMode tileMode, std::uint32_t bytes
     TileSwizzleMasks masks{0, 0, 0};
     for (std::uint32_t bit = 0; bit < blockBits; ++bit) {
         switch (pattern[bit].channel) {
-            case SwizzleChannel::kElement: break;
+            case SwizzleChannel::kElement:
+            case SwizzleChannel::kSlice: break;
             case SwizzleChannel::kX: masks.x |= 1u << bit; break;
             case SwizzleChannel::kY: masks.y |= 1u << bit; break;
             case SwizzleChannel::kZ: masks.z |= 1u << bit; break;
         }
     }
     return masks;
+}
+
+TileSwizzleEquation ZOrderSwizzleEquation(std::uint32_t bytesPerElement) {
+    Require(std::has_single_bit(bytesPerElement) && bytesPerElement <= 16u, "unsupported bytes per element for the Z-order swizzle");
+    return kZOrder64KBEquations[std::countr_zero(bytesPerElement)];
 }
 
 std::uint64_t DepthSliceBytes(std::uint32_t bytesPerElement, std::uint32_t width, std::uint32_t height) {

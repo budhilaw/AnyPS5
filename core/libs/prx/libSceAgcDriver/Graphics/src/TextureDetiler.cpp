@@ -29,6 +29,7 @@ struct Push {
     std::uint32_t swizzleY;
     std::uint32_t swizzleZ;
     std::uint32_t encode;
+    std::uint32_t equation[10];
 };
 
 std::uint32_t BlockBytesFor(TextureTileMode tileMode) {
@@ -46,7 +47,13 @@ std::uint32_t BlockBytesFor(TextureTileMode tileMode) {
 std::uint32_t TileFamily(TextureTileMode tileMode, bool thick) {
     if (tileMode == TextureTileMode::kLinear) return 0u;
     if (thick) return 3u;
+    if (tileMode == TextureTileMode::Depth64KB) return 4u;
     return tileMode == TextureTileMode::RenderTarget64KB ? 2u : 1u;
+}
+
+std::uint32_t EquationWord(const TileSwizzleEquation& equation, std::uint32_t word) {
+    const auto mask = [&](std::uint32_t index) -> std::uint32_t { return index < 8u ? equation.x[index] : index < 16u ? equation.y[index - 8u] : equation.slice[index - 16u]; };
+    return mask(word * 2u) | (mask(word * 2u + 1u) << 16u);
 }
 
 std::uint32_t PipelineKey(TextureTileMode tileMode, std::uint32_t elementBytes, std::uint32_t family) {
@@ -143,7 +150,9 @@ void TextureDetiler::record(VkCommandBuffer commands, TextureTileMode tileMode, 
     const auto thick = layout.blockDepth > 1u;
     Require(thick || layout.depth == 1u, "texture detiling covers several slices only for thick volume layouts");
     const auto swizzle = thick ? ThickSwizzleMasks(tileMode, elementBytes) : TileSwizzleMasks{0, 0, 0};
-    const auto target = pipeline(tileMode, elementBytes, TileFamily(tileMode, thick));
+    const auto family = TileFamily(tileMode, thick);
+    const auto target = pipeline(tileMode, elementBytes, family);
+    const auto equation = family == 4u ? ZOrderSwizzleEquation(elementBytes) : TileSwizzleEquation{};
     const auto elementAlignment = std::min(elementBytes, 4u);
     Require(sourceOffset % elementAlignment == 0 && destinationOffset % elementAlignment == 0, "texture detiling buffer offsets must be aligned to the element size or 4 bytes");
     const auto tiledSpan = thick ? (layout.depth - 1u) / layout.blockDepth * layout.sliceStride + layout.tiledSize : layout.tiledSize;
@@ -194,6 +203,7 @@ void TextureDetiler::record(VkCommandBuffer commands, TextureTileMode tileMode, 
     push.swizzleY = swizzle.y;
     push.swizzleZ = swizzle.z;
     push.encode = encode ? 1u : 0u;
+    for (std::uint32_t word = 0; word < std::size(push.equation); ++word) push.equation[word] = EquationWord(equation, word);
     context.Function<PFN_vkCmdPushConstants>("vkCmdPushConstants")(commands, pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(Push), &push);
     const auto groupsX = (layout.width + 7u) / 8u;
     const auto groupsY = (layout.height + 7u) / 8u;

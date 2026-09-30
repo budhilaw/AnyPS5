@@ -32,6 +32,7 @@ struct Push {
     std::uint32_t swizzleY;
     std::uint32_t swizzleZ;
     std::uint32_t encode;
+    std::uint32_t equation[10];
 };
 
 Push decodePush(const std::vector<std::byte>& bytes) {
@@ -89,7 +90,7 @@ Swizzle expectedSwizzle(TextureTileMode tileMode, std::uint32_t elementBytes, bo
         case TextureTileMode::kStandard4KB: return {elementBytes, 4096u, thick ? 3u : 1u};
         case TextureTileMode::kStandard64KB: return {elementBytes, 65536u, thick ? 3u : 1u};
         case TextureTileMode::RenderTarget64KB: return {elementBytes, 65536u, 2u};
-        case TextureTileMode::Depth64KB: return {elementBytes, 65536u, 1u};
+        case TextureTileMode::Depth64KB: return {elementBytes, 65536u, 4u};
     }
     throw std::runtime_error("texture detiler test encountered an unknown tile mode");
 }
@@ -141,6 +142,22 @@ std::uint32_t renderTargetOffset(std::uint32_t elementBytes, std::uint32_t x, st
     return offset ^ ((layer & 8u) << 5u) ^ ((layer & 4u) << 7u) ^ ((layer & 2u) << 9u) ^ ((layer & 1u) << 11u);
 }
 
+std::uint32_t pushedEquationMask(const Push& push, std::uint32_t index) {
+    return (push.equation[index >> 1u] >> ((index & 1u) * 16u)) & 0xffffu;
+}
+
+std::uint32_t zOrderOffset(const Push& push, std::uint32_t x, std::uint32_t y) {
+    std::uint32_t offset = 0;
+    for (std::uint32_t bit = 0; bit < 8u; ++bit) {
+        if (((x >> bit) & 1u) != 0) offset ^= pushedEquationMask(push, bit);
+        if (((y >> bit) & 1u) != 0) offset ^= pushedEquationMask(push, 8u + bit);
+    }
+    for (std::uint32_t bit = 0; bit < 4u; ++bit) {
+        if (((push.arrayLayer >> bit) & 1u) != 0) offset ^= pushedEquationMask(push, 16u + bit);
+    }
+    return offset;
+}
+
 std::uint32_t emulatedBlockWidth(const Swizzle& swizzle) {
     const auto small = swizzle.elementBytes <= 2u;
     const auto medium = swizzle.elementBytes <= 8u;
@@ -166,6 +183,8 @@ std::uint32_t emulatedTiledOffset(const Push& push, const Swizzle& swizzle, std:
     auto offset = 0u;
     if (swizzle.family == 2) {
         offset = renderTargetOffset(swizzle.elementBytes, swizzleX, swizzleY, push.arrayLayer);
+    } else if (swizzle.family == 4) {
+        offset = zOrderOffset(push, swizzleX, swizzleY);
     } else {
         offset = standardOffset(swizzle.elementBytes, swizzleX, swizzleY);
         if (swizzle.blockBytes > 4096u) offset ^= standard64Extra(swizzle.elementBytes, swizzleX, swizzleY);
@@ -368,6 +387,96 @@ void volumeEncodeTests(const Context& context, const TextureDetilerTestAccess& a
     }
 }
 
+struct AddrlibZOrderSurface {
+    std::uint32_t format;
+    std::uint32_t width;
+    std::uint32_t height;
+    std::uint32_t mipCount;
+    std::uint32_t layers;
+    bool volume;
+    std::uint64_t addressHash;
+};
+
+constexpr AddrlibZOrderSurface kAddrlibZOrderSurfaces[] = {
+    {1, 256, 256, 9, 1, false, 0x5843751e7828cde3ull},
+    {1, 300, 200, 9, 3, false, 0xd7bda7b20217251bull},
+    {5, 1280, 720, 2, 1, false, 0x5d7ecf7b76a646e5ull},
+    {1, 37, 21, 6, 2, false, 0x5507c20b7d197e5cull},
+    {14, 256, 128, 9, 1, false, 0x1bdbbd1c139baa12ull},
+    {7, 200, 100, 8, 4, false, 0x10f0bdc450f5e3c5ull},
+    {7, 130, 129, 8, 1, false, 0x6f21b8601b21cd07ull},
+    {14, 97, 66, 3, 10, false, 0xbc04a7f641fb9e91ull},
+    {22, 64, 64, 7, 6, false, 0xc15640e3e59a0288ull},
+    {22, 640, 360, 1, 10, false, 0x256945d63b18b025ull},
+    {56, 130, 129, 8, 2, false, 0x52f9335dd83a1f3bull},
+    {56, 257, 17, 9, 3, false, 0xf504d12336f2d824ull},
+    {64, 130, 129, 5, 2, false, 0x636bce2b3eb506a5ull},
+    {64, 65, 31, 7, 1, false, 0x9ad0618986939aa9ull},
+    {77, 100, 60, 7, 3, false, 0x5f3c9fd21f651642ull},
+    {77, 40, 40, 6, 17, false, 0x875430469d06b7c4ull},
+    {7, 512, 512, 1, 4, false, 0x0e6624ddb9ffad25ull},
+    {22, 1280, 720, 1, 2, false, 0xeaebb5b5968c8525ull},
+    {22, 40, 30, 3, 5, true, 0xf57b238bc3933fe9ull},
+};
+
+void zOrderDetileTests(const Context& context, const TextureDetilerTestAccess& access) {
+    auto zOrderContext = context;
+    zOrderContext.limits.maxStorageBufferRange = 1u << 24;
+    TextureDetiler detiler(zOrderContext);
+    const auto commands = reinterpret_cast<VkCommandBuffer>(static_cast<std::uintptr_t>(1));
+    for (const auto& reference : kAddrlibZOrderSurfaces) {
+        auto descriptor = volumeDescriptor(TextureTileMode::Depth64KB, reference.format, reference.width, reference.height, reference.layers, reference.mipCount);
+        if (!reference.volume) {
+            descriptor.dimension = TextureDimension::k2DArray;
+            descriptor.viewDimension = TextureDimension::k2DArray;
+        }
+        const auto mips = ComputeMipLayout(descriptor);
+        const auto elementBytes = BytesPerElement(reference.format);
+        const auto guestBytes = ComputeSurfaceSize(mips, reference.layers);
+        const auto guestSlice = guestBytes / reference.layers;
+        std::uint64_t linearSlice = 0;
+        for (const auto& mip : mips) linearSlice = std::max(linearSlice, mip.linearOffset + mip.linearSize);
+        const auto source = access.makeBuffer(guestBytes);
+        const auto destination = access.makeBuffer(linearSlice * reference.layers);
+        const auto valueBytes = std::min(elementBytes, 4u);
+        const auto present = [&](std::uint32_t layer, std::uint32_t level) { return !reference.volume || layer < std::max(reference.layers >> level, 1u); };
+        std::vector<std::uint32_t> addresses;
+        for (std::uint32_t pass = 0; pass < 4u / valueBytes; ++pass) {
+            auto& tiled = access.bytes(source);
+            for (std::uint64_t address = 0; address < guestBytes; address += elementBytes) {
+                const auto value = static_cast<std::uint32_t>(address >> (pass * valueBytes * 8u));
+                std::memcpy(tiled.data() + address, &value, valueBytes);
+            }
+            for (std::uint32_t layer = 0; layer < reference.layers; ++layer) {
+                for (std::uint32_t level = 0; level < mips.size(); ++level) {
+                    if (!present(layer, level)) continue;
+                    detiler.Dispatch(commands, TextureTileMode::Depth64KB, elementBytes, source, layer * guestSlice + mips[level].tiledOffset, destination, layer * linearSlice + mips[level].linearOffset, mips[level], layer);
+                    emulateDispatch(access, expectedSwizzle(TextureTileMode::Depth64KB, elementBytes, false));
+                }
+            }
+            const auto& linear = access.bytes(destination);
+            std::size_t element = 0;
+            for (std::uint32_t layer = 0; layer < reference.layers; ++layer) {
+                for (std::uint32_t level = 0; level < mips.size(); ++level) {
+                    if (!present(layer, level)) continue;
+                    const auto& mip = mips[level];
+                    for (std::uint32_t y = 0; y < mip.height; ++y) {
+                        for (std::uint32_t x = 0; x < mip.width; ++x, ++element) {
+                            std::uint32_t value = 0;
+                            std::memcpy(&value, linear.data() + layer * linearSlice + mip.linearOffset + static_cast<std::uint64_t>(y) * mip.pitchBytes + static_cast<std::uint64_t>(x) * elementBytes, valueBytes);
+                            if (pass == 0) addresses.push_back(value);
+                            else addresses[element] |= value << (pass * valueBytes * 8u);
+                        }
+                    }
+                }
+            }
+        }
+        std::uint64_t hash = 14695981039346656037ull;
+        for (const auto address : addresses) hash = hashAddress(hash, address);
+        Require(hash == reference.addressHash, "a Z-order surface detiled element by element must read the addrlib SW_64KB_Z_X addresses of the GFX1013 configuration");
+    }
+}
+
 constexpr std::string_view kAddrlibStandard64KBPatterns[5] = {
     "X0 X1 X2 X3 Y0 Y1 Y2 Y3 Y4 X4 Y5 X5 Y6 X6 Y7 X7",
     "0 X0 X1 X2 Y0 Y1 Y2 X3 Y3 X4 Y4 X5 Y5 X6 Y6 X7",
@@ -381,6 +490,14 @@ constexpr std::string_view kAddrlibRenderTarget64KBSixteenPipePatterns[5] = {
     "0 X0 X1 X2 Y0 Y1 Y2 X3 X3^Y3^S3 X4^Y4^S2 X6^Y5^S1 X5^Y6^S0 Y4 X6 Y6 X7",
     "0 0 X0 X1 Y0 Y1 Y2 X2 X3^Y3^S3 X4^Y4^S2 X6^Y5^S1 X5^Y6^S0 Y3 X4 Y6 X6",
     "0 0 0 X0 Y0 X1 X2 Y1 X3^Y3^S3 X4^Y4^S2 X6^Y5^S1 X5^Y6^S0 Y2 X3 Y4 X6",
+    "0 0 0 0 X0 Y0 X1 Y1 X3^Y3^S3 X4^Y4^S2 X6^Y5^S1 X5^Y6^S0 Y2 X2 Y3 X4",
+};
+
+constexpr std::string_view kAddrlibZOrder64KBSixteenPipePatterns[5] = {
+    "X0 Y0 X1 Y1 X2 Y2 X3 Y4 X3^Y3^S3 X4^Y4^S2 X6^Y5^S1 X5^Y6^S0 Y6 X6 Y7 X7",
+    "0 X0 Y0 X1 Y1 X2 Y2 X3 X3^Y3^S3 X4^Y4^S2 X6^Y5^S1 X5^Y6^S0 Y4 X6 Y6 X7",
+    "0 0 X0 Y0 X1 Y1 X2 Y2 X3^Y3^S3 X4^Y4^S2 X6^Y5^S1 X5^Y6^S0 Y3 X4 Y6 X6",
+    "0 0 0 X0 Y0 X1 Y1 X2 X3^Y3^S3 X4^Y4^S2 X6^Y5^S1 X5^Y6^S0 Y2 X3 Y4 X6",
     "0 0 0 0 X0 Y0 X1 Y1 X3^Y3^S3 X4^Y4^S2 X6^Y5^S1 X5^Y6^S0 Y2 X2 Y3 X4",
 };
 
@@ -466,6 +583,15 @@ constexpr EncodeCase kEncodeCases[] = {
     {TextureTileMode::Depth64KB, 22, 130, 129, 1, 1, 2},
     {TextureTileMode::Depth64KB, 64, 65, 31, 1, 1, 1},
     {TextureTileMode::Depth64KB, 77, 40, 40, 1, 3, 1},
+    {TextureTileMode::Depth64KB, 1, 300, 200, 1, 9, 3},
+    {TextureTileMode::Depth64KB, 5, 37, 21, 1, 6, 2},
+    {TextureTileMode::Depth64KB, 7, 130, 129, 1, 8, 1},
+    {TextureTileMode::Depth64KB, 14, 97, 66, 1, 3, 10},
+    {TextureTileMode::Depth64KB, 22, 64, 64, 1, 7, 6},
+    {TextureTileMode::Depth64KB, 56, 257, 17, 1, 9, 3},
+    {TextureTileMode::Depth64KB, 64, 65, 31, 1, 7, 2},
+    {TextureTileMode::Depth64KB, 77, 100, 60, 1, 7, 3},
+    {TextureTileMode::Depth64KB, 77, 17, 9, 1, 5, 17},
     {TextureTileMode::kStandard4KB, 1, 16, 16, 16, 5, 1},
     {TextureTileMode::kStandard4KB, 64, 20, 12, 9, 4, 1},
     {TextureTileMode::kStandard4KB, 14, 64, 16, 8, 7, 1},
@@ -525,10 +651,10 @@ bool makeReferenceTiling(TextureTileMode tileMode, const EncodeSurface& surface,
         case TextureTileMode::kStandard256B: reference.bits = 8u; break;
         case TextureTileMode::kStandard4KB: reference.bits = 12u; break;
         case TextureTileMode::kStandard64KB:
-        case TextureTileMode::RenderTarget64KB: break;
-        case TextureTileMode::Depth64KB: return false;
+        case TextureTileMode::RenderTarget64KB:
+        case TextureTileMode::Depth64KB: break;
     }
-    reference.pattern = surface.thick ? kAddrlibThickStandardPatterns[index] : tileMode == TextureTileMode::RenderTarget64KB ? kAddrlibRenderTarget64KBSixteenPipePatterns[index] : kAddrlibStandard64KBPatterns[index];
+    reference.pattern = surface.thick ? kAddrlibThickStandardPatterns[index] : tileMode == TextureTileMode::RenderTarget64KB ? kAddrlibRenderTarget64KBSixteenPipePatterns[index] : tileMode == TextureTileMode::Depth64KB ? kAddrlibZOrder64KBSixteenPipePatterns[index] : kAddrlibStandard64KBPatterns[index];
     if (surface.thick) {
         reference.blockWidth = patternExtent(reference.pattern, reference.bits, 'X');
         reference.blockHeight = patternExtent(reference.pattern, reference.bits, 'Y');
@@ -778,7 +904,23 @@ void RunTextureDetilerTests(const Context& context, const TextureDetilerTestAcce
     const auto specialization = access.lastSpecialization();
     Require(specialization[0] == 4 && specialization[1] == 65536 && specialization[2] == 2, "render target detiling must select its own swizzle family");
     detiler.Encode(commands, TextureTileMode::RenderTarget64KB, 4, destination, 0, source, 0, layout, 13);
-    Require(decodePush(access.lastDispatch().pushConstants).arrayLayer == 13 && access.pipelineCount() == pipelinesAfterFirst + 3, "render target encoding must reuse its pipeline and push the absolute array layer");
+    const auto renderTargetPush = decodePush(access.lastDispatch().pushConstants);
+    Require(renderTargetPush.arrayLayer == 13 && access.pipelineCount() == pipelinesAfterFirst + 3, "render target encoding must reuse its pipeline and push the absolute array layer");
+    Require(std::all_of(std::begin(renderTargetPush.equation), std::end(renderTargetPush.equation), [](std::uint32_t word) { return word == 0; }), "only the Z-order family pushes a swizzle equation");
+
+    const auto zOrderEquation = ZOrderSwizzleEquation(4);
+    for (const auto encode : {false, true}) {
+        if (encode) detiler.Encode(commands, TextureTileMode::Depth64KB, 4, destination, 0, source, 0, layout, 11);
+        else detiler.Dispatch(commands, TextureTileMode::Depth64KB, 4, source, 0, destination, 0, layout, 11);
+        const auto zOrderPush = decodePush(access.lastDispatch().pushConstants);
+        const auto zOrderSpecialization = access.lastSpecialization();
+        Require(access.pipelineCount() == pipelinesAfterFirst + 4 && zOrderSpecialization[0] == 4 && zOrderSpecialization[1] == 65536 && zOrderSpecialization[2] == 4, "64KB_Z_X textures must use the Z-order swizzle family instead of the standard one");
+        Require(zOrderPush.arrayLayer == 11 && zOrderPush.encode == (encode ? 1u : 0u), "Z-order tiling must push the absolute array layer for the slice XOR");
+        for (std::uint32_t index = 0; index < 20; ++index) {
+            const std::uint32_t expected = index < 8 ? zOrderEquation.x[index] : index < 16 ? zOrderEquation.y[index - 8] : zOrderEquation.slice[index - 16];
+            Require(pushedEquationMask(zOrderPush, index) == expected, "Z-order tiling must push the addrlib Z-order swizzle equation");
+        }
+    }
 
     reject([&] { detiler.Dispatch(VK_NULL_HANDLE, TextureTileMode::kStandard4KB, 4, source, 0, destination, 0, layout, 0); }, "active command buffer");
     reject([&] { detiler.Dispatch(commands, TextureTileMode::kStandard4KB, 4, VK_NULL_HANDLE, 0, destination, 0, layout, 0); }, "source and destination buffers");
@@ -806,5 +948,6 @@ void RunTextureDetilerTests(const Context& context, const TextureDetilerTestAcce
     const auto wordPush = decodePush(access.lastDispatch().pushConstants);
     Require(wordPush.srcBase == 4 && wordPush.dstBase == 12, "texture encoding must accept word-aligned offsets for 8-byte elements");
     volumeDetileTests(context, access);
+    zOrderDetileTests(context, access);
     encodeTests(context, access);
 }

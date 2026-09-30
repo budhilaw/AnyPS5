@@ -27,6 +27,7 @@ layout(push_constant) uniform Push {
     uint swizzleY;
     uint swizzleZ;
     uint encode;
+    uint equation[10];
 } params;
 
 uint standardOffset(uint x, uint y) {
@@ -140,9 +141,34 @@ uint renderTargetOffset(uint x, uint y) {
     return offset ^ ((z & 8u) << 5u) ^ ((z & 4u) << 7u) ^ ((z & 2u) << 9u) ^ ((z & 1u) << 11u);
 }
 
+uint equationMask(uint index) {
+    return (params.equation[index >> 1u] >> ((index & 1u) << 4u)) & 0xffffu;
+}
+
+uint zOrderOffset(uint x, uint y) {
+    uint offset = 0u;
+    for (uint bit = 0u; bit < 8u; ++bit) {
+        if (((x >> bit) & 1u) != 0u) {
+            offset ^= equationMask(bit);
+        }
+        if (((y >> bit) & 1u) != 0u) {
+            offset ^= equationMask(8u + bit);
+        }
+    }
+    for (uint bit = 0u; bit < 4u; ++bit) {
+        if (((params.arrayLayer >> bit) & 1u) != 0u) {
+            offset ^= equationMask(16u + bit);
+        }
+    }
+    return offset;
+}
+
 uint blockOffset(uvec2 p) {
     if (TILE_FAMILY == 2u) {
         return renderTargetOffset(p.x, p.y);
+    }
+    if (TILE_FAMILY == 4u) {
+        return zOrderOffset(p.x, p.y);
     }
     uint offset = standardOffset(p.x, p.y);
     if (BLOCK_BYTES > 4096u) {

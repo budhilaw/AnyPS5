@@ -69,11 +69,13 @@ std::uint32_t addrlibPatternOffset(std::string_view pattern, std::uint32_t bits,
     std::size_t position = 0;
     for (std::uint32_t bit = 0; bit < bits; ++bit) {
         const auto end = std::min(pattern.find(' ', position), pattern.size());
-        const auto token = pattern.substr(position, end - position);
+        auto token = pattern.substr(position, end - position);
         position = end + 1;
-        if (token == "0") continue;
-        const auto coordinate = token[0] == 'X' ? x : token[0] == 'Y' ? y : z;
-        offset |= ((coordinate >> static_cast<std::uint32_t>(token[1] - '0')) & 1u) << bit;
+        while (token.size() >= 2) {
+            const auto coordinate = token[0] == 'X' ? x : token[0] == 'Y' ? y : z;
+            offset ^= ((coordinate >> static_cast<std::uint32_t>(token[1] - '0')) & 1u) << bit;
+            token.remove_prefix(std::min<std::size_t>(3, token.size()));
+        }
     }
     return offset;
 }
@@ -228,6 +230,131 @@ void volumeTilingTests() {
     reject([] { ThickSwizzleMasks(TextureTileMode::kStandard64KB, 12); }, "unsupported bytes per element");
 }
 
+constexpr std::string_view kAddrlibZOrder64KBPatterns[5] = {
+    "X0 Y0 X1 Y1 X2 Y2 X3 Y4 X3^Y3^S3 X4^Y4^S2 X6^Y5^S1 X5^Y6^S0 Y6 X6 Y7 X7",
+    "0 X0 Y0 X1 Y1 X2 Y2 X3 X3^Y3^S3 X4^Y4^S2 X6^Y5^S1 X5^Y6^S0 Y4 X6 Y6 X7",
+    "0 0 X0 Y0 X1 Y1 X2 Y2 X3^Y3^S3 X4^Y4^S2 X6^Y5^S1 X5^Y6^S0 Y3 X4 Y6 X6",
+    "0 0 0 X0 Y0 X1 Y1 X2 X3^Y3^S3 X4^Y4^S2 X6^Y5^S1 X5^Y6^S0 Y2 X3 Y4 X6",
+    "0 0 0 0 X0 Y0 X1 Y1 X3^Y3^S3 X4^Y4^S2 X6^Y5^S1 X5^Y6^S0 Y2 X2 Y3 X4",
+};
+
+constexpr std::array<std::array<std::uint32_t, 2>, 5> kAddrlibBlock64KThinLog2{{{8, 8}, {8, 7}, {7, 7}, {7, 6}, {6, 6}}};
+
+std::uint32_t equationOffset(const TileSwizzleEquation& equation, std::uint32_t x, std::uint32_t y, std::uint32_t slice) {
+    std::uint32_t offset = 0;
+    for (std::uint32_t bit = 0; bit < 8u; ++bit) {
+        if (((x >> bit) & 1u) != 0) offset ^= equation.x[bit];
+        if (((y >> bit) & 1u) != 0) offset ^= equation.y[bit];
+    }
+    for (std::uint32_t bit = 0; bit < 4u; ++bit) {
+        if (((slice >> bit) & 1u) != 0) offset ^= equation.slice[bit];
+    }
+    return offset;
+}
+
+struct AddrlibZOrderSurface {
+    std::uint32_t format;
+    std::uint32_t width;
+    std::uint32_t height;
+    std::uint32_t mipCount;
+    std::uint32_t layers;
+    bool volume;
+    std::uint64_t surfaceBytes;
+    std::uint32_t firstTailLevel;
+};
+
+constexpr AddrlibZOrderSurface kAddrlibZOrderSurfaces[] = {
+    {1, 256, 256, 9, 1, false, 196608, 2},
+    {1, 300, 200, 9, 3, false, 983040, 3},
+    {5, 1280, 720, 2, 1, false, 1376256, 2},
+    {1, 37, 21, 6, 2, false, 131072, 0},
+    {14, 256, 128, 9, 1, false, 196608, 2},
+    {7, 200, 100, 8, 4, false, 786432, 2},
+    {7, 130, 129, 8, 1, false, 262144, 2},
+    {14, 97, 66, 3, 10, false, 1310720, 1},
+    {22, 64, 64, 7, 6, false, 393216, 0},
+    {22, 640, 360, 1, 10, false, 9830400, 1},
+    {56, 130, 129, 8, 2, false, 786432, 2},
+    {56, 257, 17, 9, 3, false, 1376256, 3},
+    {64, 130, 129, 5, 2, false, 1179648, 2},
+    {64, 65, 31, 7, 1, false, 131072, 1},
+    {77, 100, 60, 7, 3, false, 786432, 2},
+    {77, 40, 40, 6, 17, false, 2228224, 1},
+    {7, 512, 512, 1, 4, false, 2097152, 1},
+    {22, 1280, 720, 1, 2, false, 7864320, 1},
+    {22, 40, 30, 3, 5, true, 327680, 0},
+};
+
+GuestTextureResource zOrderDescriptor(const AddrlibZOrderSurface& surface) {
+    auto descriptor = volume(TextureTileMode::Depth64KB, surface.format, surface.width, surface.height, surface.layers, surface.mipCount);
+    if (!surface.volume) {
+        descriptor.dimension = TextureDimension::k2DArray;
+        descriptor.viewDimension = TextureDimension::k2DArray;
+    }
+    return descriptor;
+}
+
+std::array<std::uint32_t, 8> depthDescriptorWords(std::uint32_t swizzleMode) {
+    constexpr std::uint32_t width = 2560;
+    constexpr std::uint32_t height = 1440;
+    std::array<std::uint32_t, 8> words{};
+    words[0] = static_cast<std::uint32_t>(0x1468930000ull >> 8u);
+    words[1] = (22u << 20u) | (((width - 1u) & 3u) << 30u);
+    words[2] = ((width - 1u) >> 2u) | ((height - 1u) << 14u);
+    words[3] = 4u | (5u << 3u) | (6u << 6u) | (7u << 9u) | (swizzleMode << 20u) | (9u << 28u);
+    return words;
+}
+
+void zOrderTilingTests() {
+    for (std::uint32_t index = 0; index < 5; ++index) {
+        const auto bytesPerElement = 1u << index;
+        const auto equation = ZOrderSwizzleEquation(bytesPerElement);
+        const auto& pattern = kAddrlibZOrder64KBPatterns[index];
+        for (std::uint32_t bit = 0; bit < 16u; ++bit) {
+            const auto unit = 1u << bit;
+            Require(equationOffset(equation, unit, 0, 0) == addrlibPatternOffset(pattern, 16, unit, 0, 0) && equationOffset(equation, 0, unit, 0) == addrlibPatternOffset(pattern, 16, 0, unit, 0) && equationOffset(equation, 0, 0, unit) == addrlibPatternOffset(pattern, 16, 0, 0, unit), "every x, y and slice bit of the Z-order swizzle must match the addrlib GFX10 SW_64KB_Z_X pattern for 16 pipes");
+        }
+        const auto blockWidth = 1u << kAddrlibBlock64KThinLog2[index][0];
+        const auto blockHeight = 1u << kAddrlibBlock64KThinLog2[index][1];
+        std::vector<bool> seen(65536u / bytesPerElement);
+        for (const std::uint32_t slice : {0u, 5u, 10u, 15u}) {
+            std::fill(seen.begin(), seen.end(), false);
+            for (std::uint32_t y = 0; y < blockHeight; ++y) {
+                for (std::uint32_t x = 0; x < blockWidth; ++x) {
+                    const auto offset = equationOffset(equation, x, y, slice);
+                    Require(offset == addrlibPatternOffset(pattern, 16, x, y, slice), "Z-order swizzle offsets must match the addrlib SW_64KB_Z_X pattern");
+                    Require(offset % bytesPerElement == 0 && offset < 65536u && !seen[offset / bytesPerElement], "the Z-order swizzle must place every element of a 64KB block at its own element-aligned offset");
+                    seen[offset / bytesPerElement] = true;
+                }
+            }
+        }
+    }
+    reject([] { ZOrderSwizzleEquation(3); }, "unsupported bytes per element");
+    reject([] { ZOrderSwizzleEquation(32); }, "unsupported bytes per element");
+
+    for (const auto& reference : kAddrlibZOrderSurfaces) {
+        const auto mips = ComputeMipLayout(zOrderDescriptor(reference));
+        Require(mips.size() == reference.mipCount && ComputeSurfaceSize(mips, reference.layers) == reference.surfaceBytes, "64KB_Z_X surface sizes must match addrlib for the GFX1013 configuration");
+        for (std::uint32_t level = 0; level < reference.mipCount; ++level) {
+            Require(mips[level].tail == (level >= reference.firstTailLevel) && mips[level].blockDepth == 1 && mips[level].depth == 1, "64KB_Z_X mip chains must enter the mip tail at the addrlib level and stay thin");
+        }
+    }
+    {
+        const auto zOrder = ComputeMipLayout(zOrderDescriptor(kAddrlibZOrderSurfaces[0]));
+        const auto renderTarget = ComputeMipLayout(TextureTileMode::RenderTarget64KB, 1, 256, 256, 9);
+        Require(!zOrder[1].tail && zOrder[2].tail && renderTarget[1].tail, "8-bit Z-order mip chains must enter the mip tail one level later than the other 64KB swizzles");
+        Require(zOrder[0].tiledOffset == 131072 && zOrder[1].tiledOffset == 65536 && zOrder[2].tiledOffset == 0 && zOrder[2].tailX == 128 && zOrder[2].tailY == 0 && zOrder[3].tailX == 0 && zOrder[3].tailY == 128, "the 8-bit Z-order mip chain must match the addrlib mip offsets and tail coordinates");
+        const auto sixteenBit = ComputeMipLayout(zOrderDescriptor(kAddrlibZOrderSurfaces[4]));
+        Require(!sixteenBit[1].tail && sixteenBit[2].tail && ComputeMipLayout(TextureTileMode::RenderTarget64KB, 14, 256, 128, 9)[1].tail, "16-bit Z-order mip chains must enter the mip tail one level later than the other 64KB swizzles");
+        const auto depth = ComputeMipLayout(zOrderDescriptor(kAddrlibZOrderSurfaces[8]));
+        const auto renderDepth = ComputeMipLayout(TextureTileMode::RenderTarget64KB, 22, 64, 64, 7);
+        for (std::size_t level = 0; level < depth.size(); ++level) Require(depth[level].tail && depth[level].tailX == renderDepth[level].tailX && depth[level].tailY == renderDepth[level].tailY && depth[level].tiledOffset == renderDepth[level].tiledOffset, "32-bit Z-order mip chains must keep the 64KB mip tail of the other swizzles");
+    }
+
+    Require(DecodeTextureResource(depthDescriptorWords(0x18)).tileMode == TextureTileMode::Depth64KB, "swizzle mode 0x18 (SW_64KB_Z_X) must decode to the Z-order tile mode");
+    reject([] { DecodeTextureResource(depthDescriptorWords(0x08)); }, "unsupported tile mode 8");
+}
+
 }
 
 void RunTextureTilingTests() {
@@ -325,4 +452,5 @@ void RunTextureTilingTests() {
     reject([] { ComputeSurfaceSize({}, 1); }, "empty mip chain");
     reject([] { ComputeSurfaceSize(ComputeMipLayout(TextureTileMode::kLinear, 1, 4, 4, 1), 0); }, "zero array layers");
     volumeTilingTests();
+    zOrderTilingTests();
 }
