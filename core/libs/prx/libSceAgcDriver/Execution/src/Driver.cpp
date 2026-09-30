@@ -165,7 +165,7 @@ ProgramError ProgramFailure(const char* kind, const ShaderRecompiler::ShaderBina
         }
     }
     char where[96];
-    std::snprintf(where, sizeof(where), "%s program 0x%llx (stage %u): ", kind, static_cast<unsigned long long>(shader.codeAddress), static_cast<unsigned>(shader.stage));
+    std::snprintf(where, sizeof(where), "%s program 0x%llx hash 0x%016llx (stage %u): ", kind, static_cast<unsigned long long>(shader.codeAddress), static_cast<unsigned long long>(shader.codeHash), static_cast<unsigned>(shader.stage));
     return ProgramError(where + std::string(error.what()), shader.codeAddress, shader.codeHash);
 }
 
