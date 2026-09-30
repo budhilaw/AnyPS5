@@ -28,7 +28,10 @@ void RunColorTargetLayoutTests() {
     reject([] { DecodeColorTileMode(0xcdc6c000); });
     reject([] { DecodeColorTileMode(0x09014000); });
     reject([] { ColorTargetLayout(0, 1, ColorTileMode::RenderTarget); });
-    reject([] { ColorTargetLayout(63, 1, ColorTileMode::Linear); });
+    reject([] { ColorTargetLayout(64, 1, ColorTileMode::Linear, 3); });
+    const ColorTargetLayout narrow(63, 2, ColorTileMode::Linear);
+    Require(narrow.Bytes() == 2 * 256 && narrow.LinearBytes() == 2 * 63 * 4 && narrow.Offset(0, 1) == 256 && narrow.Offset(62, 1) == 256 + 62 * 4, "a linear surface narrower than its 256-byte pitch was not padded");
+    Require(ColorTargetLayout(3, 1, ColorTileMode::Linear, 1).Bytes() == 256, "an 8-bit linear surface was not padded to a 256-byte pitch");
     const ColorTargetLayout screen(3840, 2160, ColorTileMode::RenderTarget);
     Require(screen.Bytes() == 33423360 && screen.LinearBytes() == 33177600 && screen.Alignment() == 65536, "4K color backing layout is incorrect");
     const ColorTargetLayout layout(257, 129, ColorTileMode::RenderTarget);

@@ -102,7 +102,7 @@ void RunBdaResourceTests(const Context& context, const BdaTestAccess& access) {
         ShaderResources resources(context, compiled);
         changed = 999;
         std::memcpy(access.bytes(access.descriptor(6).buffer).data(), &changed, sizeof(changed));
-        const ShaderRecompiler::BdaAbi::Fault report{ShaderRecompiler::BdaAbi::FaultState::Ready, ShaderRecompiler::BdaAbi::FaultReason::Unmapped, 0x7fff99880000ULL, 4, 0, 0x44, 0};
+        const ShaderRecompiler::BdaAbi::Fault report{ShaderRecompiler::BdaAbi::FaultState::Ready, ShaderRecompiler::BdaAbi::FaultReason::Permission, 0x7fff99880000ULL, 4, 0, 0x44, 0};
         std::memcpy(access.bytes(access.descriptor(5).buffer).data(), &report, sizeof(report));
         reject([&] { resources.WriteBack(); }, "BDA access failed");
         auto invalidRectangle = report;
@@ -110,6 +110,16 @@ void RunBdaResourceTests(const Context& context, const BdaTestAccess& access) {
         std::memcpy(access.bytes(access.descriptor(5).buffer).data(), &invalidRectangle, sizeof(invalidRectangle));
         reject([&] { resources.WriteBack(); }, "rect-list requires");
         Require(guest[0] == 123, "failed GPU command published writes");
+    }
+    {
+        ShaderResources resources(context, compiled);
+        changed = 999;
+        const auto view = access.descriptor(6);
+        std::memcpy(access.bytes(view.buffer).data() + view.offset + address % GuestBufferMemory::ViewAlignment, &changed, sizeof(changed));
+        const ShaderRecompiler::BdaAbi::Fault unmapped{ShaderRecompiler::BdaAbi::FaultState::Ready, ShaderRecompiler::BdaAbi::FaultReason::Unmapped, 0x7fff99880000ULL, 4, 0, 0x44, 0};
+        std::memcpy(access.bytes(access.descriptor(5).buffer).data(), &unmapped, sizeof(unmapped));
+        resources.WriteBack();
+        Require(guest[0] == changed, "an unmapped BDA access stops only its invocation, so the other writes of the command must be published");
     }
     {
         auto aligned = context;

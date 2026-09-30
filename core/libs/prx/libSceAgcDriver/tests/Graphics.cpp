@@ -1,6 +1,7 @@
 #include "BdaTests.hpp"
 #include "GraphicsTests.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Pipeline.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/TextureCache.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureDetiler.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/VertexInput.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Draw.hpp"
@@ -108,12 +109,15 @@ void stateTests() {
     expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "unsupported color tile mode");
     queue = makeState();
     queue.context[0x3b0] = (62u << 14u) | 3u;
-    expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "pitch");
+    state = AgcDriver::Graphics::DecodeState(queue);
+    Require(state.color.extent.width == 63 && state.color.bytes == colorMemory.size(), "a linear target narrower than its 256-byte pitch lost its padded rows");
     queue = makeState();
     queue.context[0x8e] = 0xff;
     Require(AgcDriver::Graphics::DecodeState(queue).extraColors.empty(), "a target without exports gained an attachment");
     queue.context[0x8e] = 0xf0f;
     queue.context[0x1c5] |= (queue.context[0x1c5] & 0xfu) << 8u;
+    Require(AgcDriver::Graphics::DecodeState(queue).extraColors.empty(), "a masked target without a color format gained an attachment");
+    queue.context[0x31c + 2u * 0xfu] = queue.context[0x31c];
     expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "target zero");
     queue = makeState();
     queue.context[0x200] = 2;
@@ -215,7 +219,8 @@ void DisabledColorTests() {
     const auto partial = AgcDriver::Graphics::DecodeState(queue);
     Require(partial.hasColorTarget && partial.blend.colorWriteMask == 3, "partial color write mask changed");
     queue.context.erase(0x31c);
-    expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "missing register");
+    const auto unformatted = AgcDriver::Graphics::DecodeState(queue);
+    Require(!unformatted.hasColorTarget && unformatted.color.bytes == 0, "a target without a color format bound a color surface");
 }
 
 void DepthClipTests() {
@@ -285,6 +290,7 @@ struct MockDescriptorWrite {
     std::uint32_t count;
     VkDescriptorType type;
     std::vector<VkDescriptorBufferInfo> buffers;
+    std::vector<VkDescriptorImageInfo> images;
 };
 
 struct MockVulkan {
@@ -308,6 +314,8 @@ struct MockVulkan {
     VkPipeline boundPipeline = VK_NULL_HANDLE;
     std::vector<std::byte> lastPushConstants;
     struct { std::uint32_t x = 0, y = 0, z = 0; } lastDispatchGroups;
+    std::map<VkSampler, VkSamplerCreateInfo> samplers;
+    std::map<VkImageView, float> viewMinLods;
 };
 
 MockVulkan mock;
@@ -397,10 +405,101 @@ VKAPI_ATTR VkResult VKAPI_CALL mockAllocateDescriptorSets(VkDevice, const VkDesc
 VKAPI_ATTR void VKAPI_CALL mockUpdateDescriptorSets(VkDevice, std::uint32_t count, const VkWriteDescriptorSet* writes, std::uint32_t copyCount, const VkCopyDescriptorSet*) {
     Require(copyCount == 0, "descriptor copies are not expected");
     for (std::uint32_t i = 0; i < count; ++i) {
-        MockDescriptorWrite write{writes[i].dstBinding, writes[i].descriptorCount, writes[i].descriptorType, {}};
-        write.buffers.assign(writes[i].pBufferInfo, writes[i].pBufferInfo + writes[i].descriptorCount);
+        MockDescriptorWrite write{writes[i].dstBinding, writes[i].descriptorCount, writes[i].descriptorType, {}, {}};
+        if (writes[i].pBufferInfo != nullptr) write.buffers.assign(writes[i].pBufferInfo, writes[i].pBufferInfo + writes[i].descriptorCount);
+        if (writes[i].pImageInfo != nullptr) write.images.assign(writes[i].pImageInfo, writes[i].pImageInfo + writes[i].descriptorCount);
         mock.writes.push_back(write);
     }
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL mockCreateImage(VkDevice, const VkImageCreateInfo*, const VkAllocationCallbacks*, VkImage* image) {
+    *image = makeHandle<VkImage>();
+    ++mock.live;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL mockDestroyImage(VkDevice, VkImage, const VkAllocationCallbacks*) {
+    --mock.live;
+}
+
+VKAPI_ATTR void VKAPI_CALL mockGetImageMemoryRequirements(VkDevice, VkImage, VkMemoryRequirements* requirements) {
+    *requirements = {256, 1, 1};
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL mockBindImageMemory(VkDevice, VkImage, VkDeviceMemory, VkDeviceSize offset) {
+    Require(offset == 0, "mock image memory must be bound at offset zero");
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL mockCreateImageView(VkDevice, const VkImageViewCreateInfo* info, const VkAllocationCallbacks*, VkImageView* view) {
+    *view = makeHandle<VkImageView>();
+    auto minLod = -1.0f;
+    for (auto* next = static_cast<const VkBaseInStructure*>(info->pNext); next != nullptr; next = next->pNext) {
+        if (next->sType == VK_STRUCTURE_TYPE_IMAGE_VIEW_MIN_LOD_CREATE_INFO_EXT) minLod = reinterpret_cast<const VkImageViewMinLodCreateInfoEXT*>(next)->minLod;
+    }
+    mock.viewMinLods[*view] = minLod;
+    ++mock.live;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL mockDestroyImageView(VkDevice, VkImageView, const VkAllocationCallbacks*) {
+    --mock.live;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL mockAllocateCommandBuffers(VkDevice, const VkCommandBufferAllocateInfo* info, VkCommandBuffer* commands) {
+    Require(info->commandBufferCount == 1, "mock expects one command buffer per allocation");
+    *commands = makeHandle<VkCommandBuffer>();
+    ++mock.live;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL mockFreeCommandBuffers(VkDevice, VkCommandPool, std::uint32_t count, const VkCommandBuffer*) {
+    mock.live -= count;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL mockBeginCommandBuffer(VkCommandBuffer, const VkCommandBufferBeginInfo*) {
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL mockEndCommandBuffer(VkCommandBuffer) {
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL mockCmdPipelineBarrier(VkCommandBuffer, VkPipelineStageFlags, VkPipelineStageFlags, VkDependencyFlags, std::uint32_t, const VkMemoryBarrier*, std::uint32_t, const VkBufferMemoryBarrier*, std::uint32_t, const VkImageMemoryBarrier*) {}
+
+VKAPI_ATTR void VKAPI_CALL mockCmdClearColorImage(VkCommandBuffer, VkImage, VkImageLayout, const VkClearColorValue*, std::uint32_t, const VkImageSubresourceRange*) {}
+
+VKAPI_ATTR void VKAPI_CALL mockCmdCopyBufferToImage(VkCommandBuffer, VkBuffer, VkImage, VkImageLayout layout, std::uint32_t count, const VkBufferImageCopy*) {
+    Require(layout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL && count != 0, "texture upload copied into an image that is not a transfer destination");
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL mockCreateFence(VkDevice, const VkFenceCreateInfo*, const VkAllocationCallbacks*, VkFence* fence) {
+    *fence = makeHandle<VkFence>();
+    ++mock.live;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL mockDestroyFence(VkDevice, VkFence, const VkAllocationCallbacks*) {
+    --mock.live;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL mockQueueSubmit(VkQueue, std::uint32_t, const VkSubmitInfo*, VkFence) {
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL mockWaitForFences(VkDevice, std::uint32_t, const VkFence*, VkBool32, std::uint64_t) {
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL mockCreateSampler(VkDevice, const VkSamplerCreateInfo* info, const VkAllocationCallbacks*, VkSampler* sampler) {
+    *sampler = makeHandle<VkSampler>();
+    mock.samplers[*sampler] = *info;
+    ++mock.live;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL mockDestroySampler(VkDevice, VkSampler, const VkAllocationCallbacks*) {
+    --mock.live;
 }
 
 VKAPI_ATTR void VKAPI_CALL mockCmdBindDescriptorSets(VkCommandBuffer, VkPipelineBindPoint point, VkPipelineLayout, std::uint32_t first, std::uint32_t count, const VkDescriptorSet*, std::uint32_t, const std::uint32_t*) {
@@ -493,7 +592,26 @@ PFN_vkVoidFunction VKAPI_CALL mockProc(VkDevice, const char* name) {
         {"vkDestroyPipeline", reinterpret_cast<PFN_vkVoidFunction>(mockDestroyPipeline)},
         {"vkCmdBindPipeline", reinterpret_cast<PFN_vkVoidFunction>(mockCmdBindPipeline)},
         {"vkCmdPushConstants", reinterpret_cast<PFN_vkVoidFunction>(mockCmdPushConstants)},
-        {"vkCmdDispatch", reinterpret_cast<PFN_vkVoidFunction>(mockCmdDispatch)}
+        {"vkCmdDispatch", reinterpret_cast<PFN_vkVoidFunction>(mockCmdDispatch)},
+        {"vkCreateImage", reinterpret_cast<PFN_vkVoidFunction>(mockCreateImage)},
+        {"vkDestroyImage", reinterpret_cast<PFN_vkVoidFunction>(mockDestroyImage)},
+        {"vkGetImageMemoryRequirements", reinterpret_cast<PFN_vkVoidFunction>(mockGetImageMemoryRequirements)},
+        {"vkBindImageMemory", reinterpret_cast<PFN_vkVoidFunction>(mockBindImageMemory)},
+        {"vkCreateImageView", reinterpret_cast<PFN_vkVoidFunction>(mockCreateImageView)},
+        {"vkDestroyImageView", reinterpret_cast<PFN_vkVoidFunction>(mockDestroyImageView)},
+        {"vkAllocateCommandBuffers", reinterpret_cast<PFN_vkVoidFunction>(mockAllocateCommandBuffers)},
+        {"vkFreeCommandBuffers", reinterpret_cast<PFN_vkVoidFunction>(mockFreeCommandBuffers)},
+        {"vkBeginCommandBuffer", reinterpret_cast<PFN_vkVoidFunction>(mockBeginCommandBuffer)},
+        {"vkEndCommandBuffer", reinterpret_cast<PFN_vkVoidFunction>(mockEndCommandBuffer)},
+        {"vkCmdPipelineBarrier", reinterpret_cast<PFN_vkVoidFunction>(mockCmdPipelineBarrier)},
+        {"vkCmdClearColorImage", reinterpret_cast<PFN_vkVoidFunction>(mockCmdClearColorImage)},
+        {"vkCmdCopyBufferToImage", reinterpret_cast<PFN_vkVoidFunction>(mockCmdCopyBufferToImage)},
+        {"vkCreateFence", reinterpret_cast<PFN_vkVoidFunction>(mockCreateFence)},
+        {"vkDestroyFence", reinterpret_cast<PFN_vkVoidFunction>(mockDestroyFence)},
+        {"vkQueueSubmit", reinterpret_cast<PFN_vkVoidFunction>(mockQueueSubmit)},
+        {"vkWaitForFences", reinterpret_cast<PFN_vkVoidFunction>(mockWaitForFences)},
+        {"vkCreateSampler", reinterpret_cast<PFN_vkVoidFunction>(mockCreateSampler)},
+        {"vkDestroySampler", reinterpret_cast<PFN_vkVoidFunction>(mockDestroySampler)}
     };
     const auto it = table.find(name);
     return it == table.end() ? nullptr : it->second;
@@ -548,6 +666,13 @@ bool sameBytes(const std::vector<std::byte>& memory, const void* expected, std::
 const MockDescriptorWrite& findWrite(std::uint32_t binding) {
     for (const auto& write : mock.writes) {
         if (write.binding == binding) return write;
+    }
+    throw std::runtime_error("expected descriptor write is missing for binding " + std::to_string(binding));
+}
+
+const MockDescriptorWrite& findWrite(std::uint32_t binding, VkDescriptorType type) {
+    for (const auto& write : mock.writes) {
+        if (write.binding == binding && write.type == type) return write;
     }
     throw std::runtime_error("expected descriptor write is missing for binding " + std::to_string(binding));
 }
@@ -746,7 +871,7 @@ void resourceTests() {
     expectSingleFailure(changed([](auto& binding) { binding.role = Role::ShaderData; binding.count = 2; binding.guestDescriptor = {1, 2}; }), "must not be arrays");
     expectSingleFailure(changed([](auto& binding) { binding.role = Role::ShaderData; binding.guestDescriptor.clear(); }), "empty shader data descriptor");
     expectSingleFailure(changed([](auto& binding) { binding.role = Role::FlattenedSrt; binding.guestDescriptor.clear(); }), "empty shader data descriptor");
-    expectSingleFailure(changed([](auto& binding) { binding.guestDescriptor[0] = 0; binding.guestDescriptor[1] = 0; }), "null shader buffer descriptor address");
+    expectZeroBound(changed([](auto& binding) { binding.guestDescriptor[0] = 0; binding.guestDescriptor[1] = 0; }), 0);
     expectZeroBound(changed([](auto& binding) { binding.guestDescriptor[2] = 0; }), 0);
     expectSingleFailure(changed([](auto& binding) { binding.guestDescriptor[1] |= 0x40000000u; }), "reserved bits");
     expectSingleFailure(changed([](auto& binding) { binding.guestDescriptor[3] |= 0x40000000u; }), "unsupported type");
@@ -766,6 +891,163 @@ void resourceTests() {
         fragment.bindings.front().binding = 1;
         fragment.bindings.front().guestDescriptor = vsharp(guestFirst.data(), 16);
     }
+}
+
+std::vector<std::uint32_t> textureDescriptor(std::uint32_t typeRaw, std::uint32_t arrays, std::uint32_t word5) {
+    return {0x00123456u, 0xc3800000u, 0x0003c003u, 0x00000facu | (typeRaw << 28u), arrays, word5, 0u, 0u};
+}
+
+ShaderRecompiler::DescriptorBinding imageBinding(std::uint32_t binding, ShaderRecompiler::DescriptorImageShape shape, std::vector<std::vector<std::uint32_t>> elements) {
+    ShaderRecompiler::DescriptorBinding result;
+    result.kind = Kind::SampledImage;
+    result.role = Role::GuestImages;
+    result.descriptorSet = 0;
+    result.binding = binding;
+    result.count = static_cast<std::uint32_t>(elements.size());
+    for (const auto& element : elements) result.guestDescriptor.insert(result.guestDescriptor.end(), element.begin(), element.end());
+    result.imageShape = shape;
+    return result;
+}
+
+void descriptorFallbackTests() {
+    using Shape = ShaderRecompiler::DescriptorImageShape;
+    using AgcDriver::Graphics::TextureDimension;
+    mock = MockVulkan{};
+    auto context = mockContext();
+    context.memory.memoryTypes[0].propertyFlags |= VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+    context.limits.maxPerStageDescriptorSampledImages = 16;
+    context.limits.maxDescriptorSetSampledImages = 16;
+    context.limits.maxPerStageDescriptorSamplers = 16;
+    context.limits.maxDescriptorSetSamplers = 16;
+    context.limits.maxSamplerAnisotropy = 16;
+    context.limits.maxSamplerLodBias = 15;
+    {
+        AgcDriver::Graphics::TextureDetiler detiler(context);
+        context.detiler = &detiler;
+        AgcDriver::Graphics::TextureCache cache(context);
+        context.textureCache = &cache;
+        ShaderRecompiler::RecompileResult compute;
+        compute.bindings.push_back(imageBinding(0, Shape::Image2D, {textureDescriptor(9, 0, 1u << 23u), textureDescriptor(10, 0, 0), std::vector<std::uint32_t>(8, 0u)}));
+        compute.bindings.push_back(imageBinding(2, Shape::ImageCube, {textureDescriptor(13, 0x00010005u, 0)}));
+        compute.bindings.push_back(imageBinding(3, Shape::Image3D, {textureDescriptor(8, 0, 0)}));
+        ShaderRecompiler::DescriptorBinding samplerBinding;
+        samplerBinding.kind = Kind::Sampler;
+        samplerBinding.role = Role::GuestSamplers;
+        samplerBinding.descriptorSet = 0;
+        samplerBinding.binding = 1;
+        samplerBinding.count = 2;
+        samplerBinding.guestDescriptor = {0x00006092u | (1u << 15u), 0x00c00000u, 0x08500000u, 0u, 0x00000092u, 0x00c00000u, 0x08500000u, 3u << 30u};
+        samplerBinding.samplerDepthCompare = {true, false};
+        compute.bindings.push_back(samplerBinding);
+        const AgcDriver::Graphics::CompiledShader shader{ShaderRecompiler::ShaderStage::Compute, &compute, 0};
+        {
+            AgcDriver::Graphics::ShaderResources resources(context, shader);
+            const auto null2D = cache.Null(TextureDimension::k2D);
+            const auto nullCube = cache.Null(TextureDimension::kCube);
+            const auto null3D = cache.Null(TextureDimension::k3D);
+            const auto& textures = resources.Textures();
+            Require(textures.size() == 5 && textures[0] == null2D && textures[1] == null2D && textures[2] == null2D && textures[3] == nullCube && textures[4] == null3D, "undecodable texture descriptors must bind the null texture of the binding's shape");
+            const auto& images = findWrite(0).images;
+            Require(images.size() == 3 && std::all_of(images.begin(), images.end(), [&](const VkDescriptorImageInfo& image) { return image.imageView == null2D->View() && image.imageLayout == null2D->Layout(); }), "fallback texture descriptors were not written");
+            Require(findWrite(2).images.size() == 1 && findWrite(2).images[0].imageView == nullCube->View(), "a cube view of a 2D array without whole cubes was not replaced");
+            Require(findWrite(3).images.size() == 1 && findWrite(3).images[0].imageView == null3D->View(), "a 3D binding received a null texture of another shape");
+            const auto& samplers = findWrite(1).images;
+            Require(samplers.size() == 2 && samplers[0].sampler != VK_NULL_HANDLE && samplers[1].sampler != VK_NULL_HANDLE, "sampler descriptors were not written");
+            const auto& fallback = mock.samplers.at(samplers[0].sampler);
+            Require(fallback.minFilter == VK_FILTER_LINEAR && fallback.addressModeU == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE && fallback.maxLod == VK_LOD_CLAMP_NONE && fallback.unnormalizedCoordinates == VK_FALSE, "an undecodable sampler did not bind the default sampler");
+            Require(fallback.compareEnable == VK_TRUE && fallback.compareOp == VK_COMPARE_OP_GREATER_OR_EQUAL, "the default sampler lost the binding's depth comparison");
+            const auto& table = mock.samplers.at(samplers[1].sampler);
+            Require(table.borderColor == VK_BORDER_COLOR_INT_TRANSPARENT_BLACK && table.compareEnable == VK_FALSE && table.minFilter == VK_FILTER_LINEAR, "a border color table sampler was not decoded");
+        }
+    }
+    Require(mock.live == 0, "descriptor fallbacks leaked Vulkan objects");
+}
+
+alignas(256) std::array<std::byte, 65536> textureMemory{};
+
+std::vector<std::uint32_t> mipTextureDescriptor(std::uint32_t minLod, std::uint32_t baseLevel) {
+    const auto base = reinterpret_cast<std::uintptr_t>(textureMemory.data()) >> 8u;
+    return {static_cast<std::uint32_t>(base), static_cast<std::uint32_t>((base >> 32u) & 0xffu) | (minLod << 8u) | 0xc3800000u, 0x0003c003u, 0x90020facu | (baseLevel << 12u), 0u, 0x20u, 0u, 0u};
+}
+
+void minimumLodViewTests() {
+    for (const bool supported : {true, false}) {
+        mock = MockVulkan{};
+        auto context = mockContext();
+        context.memory.memoryTypes[0].propertyFlags |= VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+        context.limits.maxStorageBufferRange = 1u << 20u;
+        context.limits.maxPerStageDescriptorSampledImages = 16;
+        context.limits.maxDescriptorSetSampledImages = 16;
+        context.imageViewMinLod = supported;
+        {
+            AgcDriver::Graphics::TextureDetiler detiler(context);
+            context.detiler = &detiler;
+            AgcDriver::Graphics::TextureCache cache(context);
+            context.textureCache = &cache;
+            ShaderRecompiler::RecompileResult compute;
+            compute.bindings.push_back(imageBinding(0, ShaderRecompiler::DescriptorImageShape::Image2D, {mipTextureDescriptor(0x180, 0), mipTextureDescriptor(0xd4d, 0), mipTextureDescriptor(0, 0), mipTextureDescriptor(0x080, 1)}));
+            const AgcDriver::Graphics::CompiledShader shader{ShaderRecompiler::ShaderStage::Compute, &compute, 0};
+            {
+                AgcDriver::Graphics::ShaderResources resources(context, shader);
+                const auto& textures = resources.Textures();
+                Require(textures.size() == 4 && textures[0]->Image() != VK_NULL_HANDLE && std::all_of(textures.begin(), textures.end(), [&](const auto& texture) { return texture->Image() == textures[0]->Image(); }), "descriptors that differ in their minimum LOD must view one detiled surface");
+                const auto minLod = [](const std::shared_ptr<AgcDriver::Graphics::Texture>& texture) { return mock.viewMinLods.at(texture->View()); };
+                if (supported) {
+                    Require(minLod(textures[0]) == 1.5f, "a minimum LOD inside the view's mip range was not applied to the view");
+                    Require(minLod(textures[1]) == 2.0f, "a minimum LOD past the view's last level was not clamped to it");
+                    Require(minLod(textures[2]) < 0.0f && minLod(textures[3]) < 0.0f, "a view without an effective minimum LOD chained one");
+                } else {
+                    Require(std::all_of(textures.begin(), textures.end(), [&](const auto& texture) { return minLod(texture) < 0.0f; }), "a device without image view minimum LOD support received one");
+                }
+            }
+        }
+        Require(mock.live == 0, "minimum LOD views leaked Vulkan objects");
+    }
+}
+
+std::vector<std::uint32_t> compressedTextureDescriptor() {
+    const auto base = reinterpret_cast<std::uintptr_t>(textureMemory.data()) >> 8u;
+    return {static_cast<std::uint32_t>(base), static_cast<std::uint32_t>((base >> 32u) & 0xffu) | 0xca900000u, 0x0003c003u, 0x90000facu, 0u, 0u, 0u, 0u};
+}
+
+void storageFallbackTests() {
+    using AgcDriver::Graphics::TextureDimension;
+    mock = MockVulkan{};
+    auto context = mockContext();
+    context.memory.memoryTypes[0].propertyFlags |= VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+    context.limits.maxStorageBufferRange = 1u << 20u;
+    context.limits.maxPerStageDescriptorSampledImages = 16;
+    context.limits.maxPerStageDescriptorStorageImages = 16;
+    context.limits.maxDescriptorSetSampledImages = 16;
+    context.storageImages = true;
+    context.textureCompressionBC = true;
+    {
+        AgcDriver::Graphics::TextureDetiler detiler(context);
+        context.detiler = &detiler;
+        AgcDriver::Graphics::TextureCache cache(context);
+        context.textureCache = &cache;
+        ShaderRecompiler::RecompileResult compute;
+        auto stored = imageBinding(0, ShaderRecompiler::DescriptorImageShape::Image2D, {compressedTextureDescriptor(), textureDescriptor(9, 0, 1u << 23u), std::vector<std::uint32_t>(8, 0u)});
+        stored.kind = Kind::StorageImage;
+        compute.bindings.push_back(stored);
+        compute.bindings.push_back(imageBinding(1, ShaderRecompiler::DescriptorImageShape::Image2D, {std::vector<std::uint32_t>(8, 0u), compressedTextureDescriptor()}));
+        const AgcDriver::Graphics::CompiledShader shader{ShaderRecompiler::ShaderStage::Compute, &compute, 0};
+        {
+            AgcDriver::Graphics::ShaderResources resources(context, shader);
+            const auto sink = cache.NullStorage(TextureDimension::k2D);
+            const auto null2D = cache.Null(TextureDimension::k2D);
+            const auto& textures = resources.Textures();
+            Require(sink != null2D && sink->Image() != null2D->Image(), "storage fallbacks must not share the null texture that sampled bindings read");
+            Require(textures.size() == 5 && textures[0] == sink && textures[1] == sink && textures[2] == sink && textures[3] == null2D, "unusable storage descriptors must bind the storage null texture");
+            Require(textures[4] != null2D && textures[4] != sink && textures[4]->Image() != VK_NULL_HANDLE && textures[4]->StorageView() == VK_NULL_HANDLE, "a compressed texture must decode without a storage view");
+            const auto& stores = findWrite(0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).images;
+            Require(stores.size() == 3 && std::all_of(stores.begin(), stores.end(), [&](const VkDescriptorImageInfo& image) { return image.imageView == sink->StorageView() && image.imageLayout == VK_IMAGE_LAYOUT_GENERAL; }), "storage fallbacks were not written as the storage null texture");
+            const auto& reads = findWrite(1, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE).images;
+            Require(reads.size() == 2 && reads[0].imageView == null2D->View() && reads[1].imageView == textures[4]->View(), "sampled bindings next to storage fallbacks changed");
+            Require(!sink->Stored() && !resources.Writes(), "a storage fallback was treated as a store the driver must publish");
+        }
+    }
+    Require(mock.live == 0, "storage fallbacks leaked Vulkan objects");
 }
 
 struct ModuleShape {
@@ -1187,6 +1469,9 @@ int main() {
         InitialContextTests();
         pushConstantTests();
         resourceTests();
+        descriptorFallbackTests();
+        minimumLodViewTests();
+        storageFallbackTests();
         validationTests();
         rectListTests();
         mock = MockVulkan{};
