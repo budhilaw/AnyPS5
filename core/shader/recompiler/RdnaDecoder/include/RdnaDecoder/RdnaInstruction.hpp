@@ -122,6 +122,7 @@ struct RdnaInstruction {
     std::uint32_t imageOpcodeId = 0;
     std::uint32_t imageDmask = 0;
     RdnaImageDimension imageDimension = RdnaImageDimension::Unknown;
+    bool imageCube = false;
     bool imageR128 = false;
     bool imageGlc = false;
     bool imageSlc = false;

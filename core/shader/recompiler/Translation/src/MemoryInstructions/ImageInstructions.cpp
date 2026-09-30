@@ -34,6 +34,7 @@ MemoryInfo imageMemoryInfoFromInstruction(const RdnaInstruction& inst) {
     memory.imageDimension = inst.imageDimension;
     memory.imageAddressComponents = inst.imageAddressComponents;
     memory.imageHasMip = inst.op == RdnaOpcode::ImageLoadMip || inst.op == RdnaOpcode::ImageStoreMip;
+    memory.imageCube = inst.imageCube;
     memory.imageR128 = inst.imageR128;
     return memory;
 }

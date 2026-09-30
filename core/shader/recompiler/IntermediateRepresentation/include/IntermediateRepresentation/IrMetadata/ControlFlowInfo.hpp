@@ -32,7 +32,7 @@ struct DescriptorSource {
     };
 
     struct TableImage {
-        std::uint32_t bufferSource = 0;
+        std::uint32_t baseSource = 0;
         std::uint32_t offset = 0;
         std::uint32_t stride = 0;
 

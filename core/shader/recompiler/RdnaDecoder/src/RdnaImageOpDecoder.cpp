@@ -301,6 +301,7 @@ RdnaInstruction DecodeRdnaMimg(std::uint32_t programCounter, std::span<const std
     instruction.imageD16 = d16;
     instruction.imageR128 = r128;
     instruction.imageDimension = dimension;
+    instruction.imageCube = ((word0 >> 3u) & 7u) == 3u;
     instruction.imageSampleFlags = flags;
     instruction.imageAddressComponents = components;
     instruction.imageNsaDwordCount = nsa;

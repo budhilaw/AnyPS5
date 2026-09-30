@@ -4,7 +4,10 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdio>
 #include <limits>
+#include <mutex>
+#include <set>
 #include <span>
 #include <string>
 #include <utility>
@@ -50,6 +53,20 @@ std::string describeValueChain(const IrValue* value, std::uint32_t depth) {
     }
     text += ")";
     return text;
+}
+
+void reportNullImage(const IrResourcePlan& plan, std::uint32_t pc, std::uint32_t dword, const IrValue* value) {
+    static std::mutex mutex;
+    static std::set<std::pair<std::uint64_t, std::uint32_t>> reported;
+    {
+        const std::lock_guard lock(mutex);
+        if (!reported.emplace(plan.shaderHash, pc).second) {
+            return;
+        }
+    }
+    const auto chain = describeValueChain(value, 8u);
+    std::fprintf(stderr, "shader recompiler: program with code hash 0x%016llx samples an image at pc 0x%08x whose descriptor is selected at run time; it reads as a null texture, descriptor dword %u: %s\n", static_cast<unsigned long long>(plan.shaderHash), pc, dword, chain.c_str());
+    std::fflush(stderr);
 }
 
 std::uint32_t possibleU32Bits(const IrValue* value) {
@@ -270,8 +287,9 @@ private:
         });
     }
 
-    const MemoryInfo* ScalarReadMemory(const IrValue& read, std::uint32_t& index) const {
-        if (read.Opcode() != IrOpcode::ReadConstBuffer || read.ArgumentCount() != 2u) {
+    const MemoryInfo* ScalarReadMemory(const IrValue& read, std::uint32_t& index, IrOpcode opcode = IrOpcode::ReadConstBuffer) const {
+        const bool address = opcode == IrOpcode::LoadAddressU32;
+        if (read.Opcode() != opcode || read.ArgumentCount() != (address ? 4u : 2u)) {
             return nullptr;
         }
         index = read.Flags<MemoryFlags>().index;
@@ -279,7 +297,8 @@ private:
             return nullptr;
         }
         const auto& memory = m_program.Resources().memoryInfo[index];
-        return memory.kind == ResourceKind::ScalarBuffer && memory.dataBits == 32u && memory.dataDwords == 1u ? &memory : nullptr;
+        const auto kind = address ? ResourceKind::ScalarAddress : ResourceKind::ScalarBuffer;
+        return memory.kind == kind && memory.dataBits == 32u && memory.dataDwords == 1u ? &memory : nullptr;
     }
 
     bool MemoryIndexBelongsTo(std::uint32_t index, const IrValue& owner) const {
@@ -297,11 +316,11 @@ private:
         return true;
     }
 
-    bool MakeRuntimeBufferSource(const IrValue& handle, std::uint32_t& source, DescriptorSource& descriptor) {
-        if (handle.Opcode() != IrOpcode::GetBufferResource) {
+    bool MakeRuntimeSource(const IrValue& handle, IrOpcode opcode, std::uint32_t width, std::uint32_t& source, DescriptorSource& descriptor) {
+        if (handle.Opcode() != opcode || handle.ArgumentCount() != width) {
             return false;
         }
-        MakeSource(handle, 4u, false, false, descriptor);
+        MakeSource(handle, width, false, false, descriptor);
         std::uint32_t badDword = 0;
         if (!ValidateSource(descriptor, badDword)) {
             return false;
@@ -405,7 +424,7 @@ private:
         DescriptorSource heapSource;
         std::uint32_t materialSourceIndex = 0;
         std::uint32_t heapSourceIndex = 0;
-        if (!MakeRuntimeBufferSource(*materialHandle, materialSourceIndex, materialSource) || !MakeRuntimeBufferSource(*heapHandle, heapSourceIndex, heapSource)) {
+        if (!MakeRuntimeSource(*materialHandle, IrOpcode::GetBufferResource, 4u, materialSourceIndex, materialSource) || !MakeRuntimeSource(*heapHandle, IrOpcode::GetBufferResource, 4u, heapSourceIndex, heapSource)) {
             return false;
         }
 
@@ -476,15 +495,15 @@ private:
         source = InternSource(descriptor);
     }
 
-    bool ResolvableImage(const IrValue& handle) {
+    bool ResolvableImage(const IrValue& handle, std::uint32_t& badDword) {
         DescriptorSource descriptor;
         MakeSource(handle, 8, false, false, descriptor);
-        for (std::uint32_t dword = 0; dword < descriptor.dwordCount; dword++) {
-            if (descriptor.dwords[dword]->Resolve()->Opcode() == IrOpcode::ReadConstBuffer) {
+        for (badDword = 0; badDword < descriptor.dwordCount; badDword++) {
+            if (descriptor.dwords[badDword]->Resolve()->Opcode() == IrOpcode::ReadConstBuffer) {
                 return false;
             }
         }
-        std::uint32_t badDword = 0;
+        badDword = 0;
         return ValidateSource(descriptor, badDword);
     }
 
@@ -492,23 +511,25 @@ private:
         if (handle.Opcode() != IrOpcode::GetImageResource || handle.ArgumentCount() != 8u) {
             return false;
         }
-        IrValue* buffer = nullptr;
+        const bool pointer = handle.Argument(0)->Resolve()->Opcode() == IrOpcode::LoadAddressU32;
+        const auto readOpcode = pointer ? IrOpcode::LoadAddressU32 : IrOpcode::ReadConstBuffer;
+        IrValue* base = nullptr;
         IrValue* offset = nullptr;
         std::uint32_t first = 0;
         for (std::uint32_t dword = 0; dword < 8u; dword++) {
             IrValue* read = handle.Argument(dword)->Resolve();
             std::uint32_t memoryIndex = 0;
-            const MemoryInfo* memory = ScalarReadMemory(*read, memoryIndex);
+            const MemoryInfo* memory = ScalarReadMemory(*read, memoryIndex, readOpcode);
             if (memory == nullptr) {
                 return false;
             }
-            IrValue* readBuffer = read->Argument(0)->Resolve();
+            IrValue* readBase = read->Argument(0)->Resolve();
             IrValue* readOffset = read->Argument(1)->Resolve();
             if (dword == 0u) {
-                buffer = readBuffer;
+                base = readBase;
                 offset = readOffset;
                 first = memory->offset;
-            } else if (!EquivalentValue(m_program.Resources(), buffer, readBuffer) || !EquivalentValue(m_program.Resources(), offset, readOffset) || memory->offset != first + dword * 4u) {
+            } else if (!EquivalentValue(m_program.Resources(), base, readBase) || !EquivalentValue(m_program.Resources(), offset, readOffset) || memory->offset != first + dword * 4u) {
                 return false;
             }
         }
@@ -534,22 +555,23 @@ private:
         if (!indexed || stride < 32u) {
             return false;
         }
-        DescriptorSource bufferDescriptor;
-        std::uint32_t bufferSource = 0;
-        if (!MakeRuntimeBufferSource(*buffer, bufferSource, bufferDescriptor)) {
+        DescriptorSource baseDescriptor;
+        std::uint32_t baseSource = 0;
+        if (!MakeRuntimeSource(*base, pointer ? IrOpcode::GetAddressResource : IrOpcode::GetBufferResource, pointer ? 2u : 4u, baseSource, baseDescriptor)) {
             return false;
         }
         for (std::uint32_t dword = 0; dword < 8u; dword++) {
-            handle.ReplaceArgument(dword, &m_builder.Constant(0u));
+            handle.ReplaceArgument(dword, pointer && dword < baseDescriptor.dwordCount ? baseDescriptor.dwords[dword] : &m_builder.Constant(0u));
         }
         DescriptorSource descriptor;
         MakeSource(handle, 8, false, false, descriptor);
-        descriptor.tableImage = DescriptorSource::TableImage {bufferSource, constant + first, stride};
+        descriptor.tableImage = DescriptorSource::TableImage {baseSource, constant + first, stride};
         source = InternSource(descriptor);
         return true;
     }
 
-    std::uint32_t NullImageSource(IrValue& handle) {
+    std::uint32_t NullImageSource(IrValue& handle, std::uint32_t pc, std::uint32_t badDword) {
+        reportNullImage(m_program.Resources(), pc, badDword, handle.Argument(badDword));
         for (std::uint32_t dword = 0; dword < 8u; dword++) {
             handle.ReplaceArgument(dword, &m_builder.Constant(0u));
         }
@@ -622,7 +644,7 @@ private:
         for (std::uint32_t i = 0; i < m_info.images.size(); i++) {
             auto& image = m_info.images[i];
             if (image.source == source && image.resourceClass == resourceClass && image.dimension == memory.imageDimension && image.mipMode == mip && image.depthCompare == depth && image.r128 == memory.imageR128) {
-                Merge(image, op, pc);
+                Merge(image, memory, op, pc);
                 return i;
             }
         }
@@ -637,12 +659,12 @@ private:
         image.mipMode = mip;
         image.depthCompare = depth;
         image.r128 = memory.imageR128;
-        Merge(image, op, pc);
+        Merge(image, memory, op, pc);
         m_info.images.push_back(image);
         return static_cast<std::uint32_t>(m_info.images.size() - 1);
     }
 
-    static void Merge(ImageResource& image, IrOpcode op, std::uint32_t pc) {
+    static void Merge(ImageResource& image, const MemoryInfo& memory, IrOpcode op, std::uint32_t pc) {
         const auto access = ImageOpcodeInfoOf(op).access;
         const bool atomic = access == ImageAccess::Atomic;
         const bool write = access == ImageAccess::Write || atomic;
@@ -650,6 +672,7 @@ private:
         image.read = image.read || !write || atomic;
         image.written = image.written || write;
         image.atomic = image.atomic || atomic;
+        image.cubeInstruction = image.cubeInstruction || memory.imageCube;
     }
 
     std::uint32_t AddSampler(std::uint32_t source, std::uint32_t pc) {
@@ -765,11 +788,12 @@ private:
         }
         handle = inst.Argument(0)->Resolve();
         const IndirectImagePlan* indirect = FindIndirectImage(*handle);
+        std::uint32_t badDword = 0;
         if (indirect != nullptr) {
             source = indirect->source;
-        } else if (imageInfo.access == ImageAccess::Read && handle->Opcode() == IrOpcode::GetImageResource && handle->ArgumentCount() == 8u && !ResolvableImage(*handle)) {
+        } else if (imageInfo.access == ImageAccess::Read && handle->Opcode() == IrOpcode::GetImageResource && handle->ArgumentCount() == 8u && !ResolvableImage(*handle, badDword)) {
             if (!TryTableImageSource(*handle, source)) {
-                source = NullImageSource(*handle);
+                source = NullImageSource(*handle, flags.pc, badDword);
             }
         } else {
             GetHandle(inst.Argument(0), IrOpcode::GetImageResource, 8, handle, source);
@@ -810,7 +834,7 @@ private:
             }
             for (std::uint32_t image = 0; image < m_info.images.size(); image++) {
                 const DescriptorSource* imageSource = Source(m_info.images[image].source);
-                if (imageSource == nullptr || imageSource->dwordCount != 8 || imageSource->indirectImage.has_value()) {
+                if (imageSource == nullptr || imageSource->dwordCount != 8 || imageSource->indirectImage.has_value() || imageSource->tableImage.has_value()) {
                     continue;
                 }
                 bool alias = true;

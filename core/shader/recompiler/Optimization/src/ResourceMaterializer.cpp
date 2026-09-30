@@ -2,6 +2,7 @@
 #include "SpirvBackend/SpirvBufferFormat.hpp"
 #include "IntermediateRepresentation/IrBuilder.hpp"
 #include "Optimization/ShaderStageInputInfo.hpp"
+#include "Optimization/SrtWalker/SrtAddressArithmetic.hpp"
 #include "RdnaDecoder/RdnaDescriptorFormat.hpp"
 #include "RdnaDecoder/RdnaInstructionDecoder.hpp"
 #include "SpirvBackend/SpirvEmitterState.hpp"
@@ -12,8 +13,11 @@
 #include <array>
 #include <cstdint>
 #include <limits>
+#include <mutex>
+#include <set>
 #include <span>
 #include <stdexcept>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -22,6 +26,8 @@ namespace ShaderRecompiler {
 namespace {
 
 constexpr std::uint32_t NoRemap = std::numeric_limits<std::uint32_t>::max();
+constexpr std::uint64_t ApplicationMemoryEnd = std::uint64_t{1} << 40u;
+constexpr std::size_t EmptyImageTableReportLimit = 256u;
 
 struct DecodedImage {
     IrTextureNumericClass numericClass = IrTextureNumericClass::Unsupported;
@@ -81,6 +87,10 @@ bool reachableCandidate(const IrResourcePlan& plan, const BufferResource& buffer
 
 bool nullImageDescriptor(const DescriptorValue& descriptor) {
     return descriptor.dwords[0] == 0u && (descriptor.dwords[1] & 0xffu) == 0u;
+}
+
+std::uint64_t imageBaseAddress(const DescriptorValue& descriptor) {
+    return (static_cast<std::uint64_t>(descriptor.dwords[1] & 0xffu) << 40u) | (static_cast<std::uint64_t>(descriptor.dwords[0]) << 8u);
 }
 
 ImageType rawImageType(const DescriptorValue& descriptor) {
@@ -292,6 +302,43 @@ void resolveIndirectImage(const IrResourcePlan& plan, std::uint32_t imageIndex, 
     resolved = candidates[key];
 }
 
+bool readImageDescriptor(const SrtRuntime& runtime, std::uint64_t address, DescriptorValue& descriptor) {
+    descriptor.dwordCount = 8u;
+    for (std::uint32_t dword = 0; dword < 8u; dword++) {
+        if (!runtime.readMemory(runtime.userContext, address + dword * sizeof(std::uint32_t), &descriptor.dwords[dword])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool readPointerTableEntry(const SrtRuntime& runtime, std::uint64_t address, DescriptorValue& descriptor) {
+    try {
+        return readImageDescriptor(runtime, address, descriptor);
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
+void reportEmptyImageTable(const IrResourcePlan& plan, std::uint32_t imageIndex, bool pointer, std::uint64_t address, std::uint32_t stride, std::uint32_t readEntries) {
+    static std::mutex mutex;
+    static std::set<std::tuple<std::uint64_t, std::uint32_t, bool>> reported;
+    {
+        const std::lock_guard lock(mutex);
+        if (reported.size() >= EmptyImageTableReportLimit || !reported.emplace(plan.shaderHash, imageIndex, readEntries != 0u).second) {
+            return;
+        }
+    }
+    const char* kind = pointer ? "pointer" : "buffer";
+    const char* dimension = RdnaImageDimensionToString(plan.info.images.at(imageIndex).dimension);
+    if (address == 0u) {
+        std::fprintf(stderr, "shader recompiler: program with code hash 0x%016llx samples a %s image through a %s image table whose base is null; it reads as a null texture\n", static_cast<unsigned long long>(plan.shaderHash), dimension, kind);
+    } else {
+        std::fprintf(stderr, "shader recompiler: program with code hash 0x%016llx: %s image table at 0x%llx (stride %u) holds no image a %s sample can read in %u readable entries; it reads as a null texture\n", static_cast<unsigned long long>(plan.shaderHash), kind, static_cast<unsigned long long>(address), stride, dimension, readEntries);
+    }
+    std::fflush(stderr);
+}
+
 void resolveTableImage(const IrResourcePlan& plan, std::uint32_t imageIndex, const DescriptorSource::TableImage& table, const SrtRuntime& runtime, SrtWalker& walker, DescriptorValue& resolved) {
     const auto& image = plan.info.images.at(imageIndex);
     resolved = DescriptorValue{};
@@ -299,17 +346,26 @@ void resolveTableImage(const IrResourcePlan& plan, std::uint32_t imageIndex, con
     if (runtime.readMemory == nullptr || table.stride == 0u) {
         return;
     }
-    DescriptorValue bufferValue;
-    walker.EvaluateDescriptorSource(plan, table.bufferSource, runtime, bufferValue);
-    const ShaderBufferResource buffer = decodeBufferDescriptor(bufferValue);
-    const std::uint64_t base = buffer.Base48();
-    const std::uint64_t size = buffer.GetSize();
+    DescriptorValue baseValue;
+    walker.EvaluateDescriptorSource(plan, table.baseSource, runtime, baseValue);
+    const bool pointer = baseValue.dwordCount == 2u;
+    std::uint64_t base = 0;
+    std::uint64_t size = 0;
+    if (pointer) {
+        base = ((static_cast<std::uint64_t>(baseValue.dwords[1]) << 32u) | baseValue.dwords[0]) & Detail::AddressMask & ~std::uint64_t {3};
+    } else {
+        const ShaderBufferResource buffer = decodeBufferDescriptor(baseValue);
+        base = buffer.Base48();
+        size = buffer.GetSize();
+    }
     if (base == 0u) {
+        reportEmptyImageTable(plan, imageIndex, pointer, 0u, table.stride, 0u);
         return;
     }
     const auto& instruction = RdnaImageDimensionInfoFor(image.dimension);
     const auto plausible = [&](const DescriptorValue& candidate) {
-        if (!validImageDescriptor(candidate, image.r128) || (candidate.dwords[0] | (candidate.dwords[1] & 0xffu)) == 0u) {
+        const auto address = imageBaseAddress(candidate);
+        if (!validImageDescriptor(candidate, image.r128) || address == 0u || address >= ApplicationMemoryEnd) {
             return false;
         }
         const auto& entry = RdnaImageDimensionInfoFor(descriptorDimension(candidate, image.dimension));
@@ -330,14 +386,16 @@ void resolveTableImage(const IrResourcePlan& plan, std::uint32_t imageIndex, con
         return true;
     };
     std::vector<std::pair<DescriptorValue, std::uint32_t>> seen;
-    for (std::uint64_t at = table.offset, entry = 0; at + 32u <= size && entry < 256u; at += table.stride, entry++) {
+    std::uint32_t readEntries = 0;
+    for (std::uint64_t at = table.offset, entry = 0; (pointer || at + 32u <= size) && entry < 256u; at += table.stride, entry++) {
         DescriptorValue candidate;
-        candidate.dwordCount = 8u;
-        bool readable = true;
-        for (std::uint32_t dword = 0; dword < 8u && readable; dword++) {
-            readable = runtime.readMemory(runtime.userContext, base + at + dword * sizeof(std::uint32_t), &candidate.dwords[dword]);
+        const bool readable = pointer ? readPointerTableEntry(runtime, (base + at) & ~std::uint64_t {3}, candidate) : readImageDescriptor(runtime, base + at, candidate);
+        readEntries += readable ? 1u : 0u;
+        const bool usable = readable && plausible(candidate) && (!pointer || seen.empty() || rawImageType(candidate) == rawImageType(seen.front().first));
+        if (!usable && pointer) {
+            break;
         }
-        if (!readable || !plausible(candidate)) {
+        if (!usable) {
             continue;
         }
         const auto match = std::find_if(seen.begin(), seen.end(), [&](const auto& item) { return item.first.dwords == candidate.dwords; });
@@ -348,9 +406,11 @@ void resolveTableImage(const IrResourcePlan& plan, std::uint32_t imageIndex, con
         }
     }
     if (seen.empty()) {
+        reportEmptyImageTable(plan, imageIndex, pointer, base + table.offset, table.stride, readEntries);
         return;
     }
-    const auto chosen = std::max_element(seen.begin(), seen.end(), [](const auto& left, const auto& right) { return left.second < right.second; });
+    const auto rank = [&image](const auto& item) { return std::pair {!image.cubeInstruction || descriptorIsCube(item.first), item.second}; };
+    const auto chosen = std::max_element(seen.begin(), seen.end(), [&rank](const auto& left, const auto& right) { return rank(left) < rank(right); });
     resolved = chosen->first;
     if (seen.size() > 1u) {
         static std::atomic<int> reported{0};

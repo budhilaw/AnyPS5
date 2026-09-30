@@ -54,6 +54,7 @@ struct ImageResource {
     bool atomic = false;
     bool depthCompare = false;
     bool cube = false;
+    bool cubeInstruction = false;
     bool r128 = false;
     std::uint32_t indirectRoot = NoIndirectImage;
     std::uint32_t indirectMappingOffset = 0;
