@@ -4,8 +4,10 @@
 #include "prx/libSceAgcDriver/Graphics/include/Context.hpp"
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <mutex>
 #include <string>
+#include <thread>
 
 namespace AgcDriver::Graphics {
 
@@ -18,17 +20,22 @@ public:
     PipelineCache(const PipelineCache&) = delete;
     PipelineCache& operator=(const PipelineCache&) = delete;
     VkPipelineCache Handle() const { return cache; }
-    void Save();
     void NoteCreated() { created.store(true, std::memory_order_relaxed); }
     void SaveIfDue();
 
 private:
+    void save();
+    void runSaver();
     Context context;
     VkPipelineCache cache = VK_NULL_HANDLE;
     std::string path;
-    std::mutex saving;
     std::atomic<bool> created{false};
+    std::mutex saverMutex;
+    std::condition_variable saverChanged;
+    bool saveRequested = false;
+    bool saverStopping = false;
     std::chrono::steady_clock::time_point lastSave = std::chrono::steady_clock::now();
+    std::thread saver;
 };
 
 }

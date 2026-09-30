@@ -58,23 +58,56 @@ PipelineCache::PipelineCache(const Context& context) : context(context) {
 }
 
 PipelineCache::~PipelineCache() {
+    {
+        std::lock_guard lock(saverMutex);
+        saverStopping = true;
+    }
+    saverChanged.notify_all();
+    if (saver.joinable()) saver.join();
     try {
-        Save();
+        save();
     } catch (...) {
     }
     context.Function<PFN_vkDestroyPipelineCache>("vkDestroyPipelineCache")(context.device, cache, nullptr);
 }
 
 void PipelineCache::SaveIfDue() {
-    if (!created.load(std::memory_order_relaxed) || std::chrono::steady_clock::now() - lastSave < std::chrono::seconds(30)) return;
-    Save();
+    if (path.empty() || !created.load(std::memory_order_relaxed)) return;
+    const auto now = std::chrono::steady_clock::now();
+    {
+        std::lock_guard lock(saverMutex);
+        if (saveRequested || saverStopping || now - lastSave < std::chrono::seconds(30)) return;
+        lastSave = now;
+        if (!saver.joinable()) {
+            try {
+                saver = std::thread([this] { runSaver(); });
+            } catch (...) {
+                return;
+            }
+        }
+        saveRequested = true;
+    }
+    saverChanged.notify_all();
 }
 
-void PipelineCache::Save() {
+void PipelineCache::runSaver() {
+    std::unique_lock lock(saverMutex);
+    while (true) {
+        saverChanged.wait(lock, [&] { return saverStopping || saveRequested; });
+        if (saverStopping) return;
+        saveRequested = false;
+        lock.unlock();
+        try {
+            save();
+        } catch (...) {
+        }
+        lock.lock();
+    }
+}
+
+void PipelineCache::save() {
     if (path.empty() || cache == VK_NULL_HANDLE) return;
-    std::lock_guard lock(saving);
     created.store(false, std::memory_order_relaxed);
-    lastSave = std::chrono::steady_clock::now();
     const auto getData = context.Function<PFN_vkGetPipelineCacheData>("vkGetPipelineCacheData");
     std::size_t size = 0;
     if (getData(context.device, cache, &size, nullptr) != VK_SUCCESS || size == 0) return;
