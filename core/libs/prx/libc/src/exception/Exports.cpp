@@ -60,5 +60,24 @@ unsigned NativeUncaughtExceptions() asm("__cxa_uncaught_exceptions");
 unsigned NativeUncaughtExceptions() { return LibcException::globals.uncaught; }
 bool NativeUncaughtException() asm("__cxa_uncaught_exception");
 bool NativeUncaughtException() { return LibcException::globals.uncaught != 0; }
+bool NativeStdUncaughtException() asm("_ZSt18uncaught_exceptionv");
+bool NativeStdUncaughtException() { return LibcException::globals.uncaught != 0; }
+int NativeStdUncaughtExceptions() asm("_ZSt19uncaught_exceptionsv");
+int NativeStdUncaughtExceptions() { return static_cast<int>(LibcException::globals.uncaught); }
+std::type_info* NativeCurrentExceptionType() asm("__cxa_current_exception_type");
+std::type_info* NativeCurrentExceptionType() { return __cxa_current_exception_type_nid_postfix(); }
+void* NativeInitPrimaryException(void* object, std::type_info* type, void (*destructor)(void*)) asm("__cxa_init_primary_exception");
+void* NativeInitPrimaryException(void* object, std::type_info* type, void (*destructor)(void*)) {
+    using namespace LibcException;
+    auto* header = FromObject(object);
+    header->type = type;
+    header->destructor = destructor;
+    header->terminate = terminateHandler.load(std::memory_order_acquire);
+    header->adjusted = object;
+    header->unwind.exception_class = PrimaryClass;
+    header->unwind.exception_cleanup = Cleanup;
+    AllocationOf(header)->references.store(0, std::memory_order_relaxed);
+    return AllocationOf(header);
+}
 }
 #endif
