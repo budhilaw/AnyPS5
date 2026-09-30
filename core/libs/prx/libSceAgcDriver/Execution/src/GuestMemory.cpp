@@ -51,8 +51,11 @@ void CheckRange(const void* pointer, std::size_t bytes, std::size_t alignment, b
         throw std::runtime_error(std::string("AGC driver: ") + message);
     }
     require(bytes <= std::numeric_limits<std::uintptr_t>::max() - address, "address range overflow");
+    PerformanceTimer timing("GuestMemory.CheckRange");
     MemoryAccessScope::Resolve(address, bytes, writable);
+    timing.Mark("scope_resolve");
     GuestMemoryTracking::GuestMemoryTrackingResolve_nid_postfix(address, bytes, writable);
+    timing.Mark("tracking_resolve");
     auto cursor = address;
     const auto end = address + bytes;
 #if defined(_WIN32) || defined(__APPLE__)
@@ -63,6 +66,7 @@ void CheckRange(const void* pointer, std::size_t bytes, std::size_t alignment, b
     for (const auto& region : verified) {
         if (region.epoch == epoch && address >= region.first && end <= region.end && (region.writable || !writable)) return;
     }
+    timing.Mark("verified_miss");
 #endif
 #ifdef _WIN32
     bool rangeWritable = true;
@@ -85,6 +89,7 @@ void CheckRange(const void* pointer, std::size_t bytes, std::size_t alignment, b
         cursor = std::min(end, base + memory.RegionSize);
     }
     if (!coveredByOneRegion) verified[nextVerified++ % verified.size()] = {epoch, address, end, rangeWritable};
+    timing.Mark("query");
 #elif defined(__APPLE__)
     while (cursor < end) {
         mach_vm_address_t first = cursor;
