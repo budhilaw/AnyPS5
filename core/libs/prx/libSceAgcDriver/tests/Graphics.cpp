@@ -381,6 +381,7 @@ struct MockVulkan {
     std::uint32_t poolMaxSets = 0;
     std::uint32_t poolCreateCount = 0;
     std::uint32_t submitCount = 0;
+    std::uint32_t pipelineBarriers = 0;
     std::vector<MockDescriptorWrite> writes;
     std::uint32_t boundSets = 0;
     std::uint32_t boundFirst = 0;
@@ -551,7 +552,9 @@ VKAPI_ATTR VkResult VKAPI_CALL mockEndCommandBuffer(VkCommandBuffer) {
     return VK_SUCCESS;
 }
 
-VKAPI_ATTR void VKAPI_CALL mockCmdPipelineBarrier(VkCommandBuffer, VkPipelineStageFlags, VkPipelineStageFlags, VkDependencyFlags, std::uint32_t, const VkMemoryBarrier*, std::uint32_t, const VkBufferMemoryBarrier*, std::uint32_t, const VkImageMemoryBarrier*) {}
+VKAPI_ATTR void VKAPI_CALL mockCmdPipelineBarrier(VkCommandBuffer, VkPipelineStageFlags, VkPipelineStageFlags, VkDependencyFlags, std::uint32_t, const VkMemoryBarrier*, std::uint32_t, const VkBufferMemoryBarrier*, std::uint32_t, const VkImageMemoryBarrier*) {
+    ++mock.pipelineBarriers;
+}
 
 VKAPI_ATTR void VKAPI_CALL mockCmdClearColorImage(VkCommandBuffer, VkImage, VkImageLayout, const VkClearColorValue*, std::uint32_t, const VkImageSubresourceRange*) {}
 
@@ -575,6 +578,18 @@ VKAPI_ATTR VkResult VKAPI_CALL mockQueueSubmit(VkQueue, std::uint32_t, const VkS
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL mockWaitForFences(VkDevice, std::uint32_t, const VkFence*, VkBool32, std::uint64_t) {
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL mockGetFenceStatus(VkDevice, VkFence) {
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL mockResetFences(VkDevice, std::uint32_t, const VkFence*) {
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL mockResetCommandBuffer(VkCommandBuffer, VkCommandBufferResetFlags) {
     return VK_SUCCESS;
 }
 
@@ -697,6 +712,9 @@ PFN_vkVoidFunction VKAPI_CALL mockProc(VkDevice, const char* name) {
         {"vkDestroyFence", reinterpret_cast<PFN_vkVoidFunction>(mockDestroyFence)},
         {"vkQueueSubmit", reinterpret_cast<PFN_vkVoidFunction>(mockQueueSubmit)},
         {"vkWaitForFences", reinterpret_cast<PFN_vkVoidFunction>(mockWaitForFences)},
+        {"vkGetFenceStatus", reinterpret_cast<PFN_vkVoidFunction>(mockGetFenceStatus)},
+        {"vkResetFences", reinterpret_cast<PFN_vkVoidFunction>(mockResetFences)},
+        {"vkResetCommandBuffer", reinterpret_cast<PFN_vkVoidFunction>(mockResetCommandBuffer)},
         {"vkCreateSampler", reinterpret_cast<PFN_vkVoidFunction>(mockCreateSampler)},
         {"vkDestroySampler", reinterpret_cast<PFN_vkVoidFunction>(mockDestroySampler)}
     };
@@ -1795,6 +1813,47 @@ void drawQueueWriterTests() {
     Require(mock.live == 0, "draw queue writers leaked Vulkan objects");
 }
 
+void drawQueueBarrierTests() {
+    mock = MockVulkan{};
+    const auto context = mockContext();
+    {
+        AgcDriver::Graphics::DrawQueue queue;
+        queue.RecordMemoryBarrier(context);
+        Require(mock.pipelineBarriers == 0 && !queue.HasPending(), "a memory barrier with no recorded work before it began a batch");
+        queue.Begin(context);
+        queue.RecordMemoryBarrier(context);
+        queue.RecordMemoryBarrier(context);
+        Require(mock.pipelineBarriers == 1, "two memory barriers without work between them recorded more than one barrier");
+        const auto barrierAfter = [&](const char* work, const auto& record) {
+            record();
+            const auto before = mock.pipelineBarriers;
+            queue.RecordMemoryBarrier(context);
+            Require(mock.pipelineBarriers == before + 1, std::string("a memory barrier after ") + work + " was dropped");
+            queue.RecordMemoryBarrier(context);
+            Require(mock.pipelineBarriers == before + 1, std::string("a second memory barrier after ") + work + " was recorded");
+        };
+        barrierAfter("a recording", [&] { queue.Begin(context); });
+        barrierAfter("a barrier recording", [&] { queue.BeginBarrier(context); });
+        barrierAfter("GDS work", [&] { queue.MarkGds(); });
+        barrierAfter("an upload", [&] { queue.EnqueueUpload([] {}, 16); });
+        ShaderRecompiler::RecompileResult compute;
+        compute.bindings.push_back(makeBinding(Role::GuestBuffers, 3, 1, vsharp(guestThird.data(), 8)));
+        const AgcDriver::Graphics::CompiledShader shader{ShaderRecompiler::ShaderStage::Compute, &compute, 0};
+        barrierAfter("a dispatch", [&] { queue.Enqueue(std::make_shared<AgcDriver::Graphics::ShaderResources>(context, shader), std::make_shared<int>(0)); });
+        queue.Begin(context);
+        queue.Flush();
+        const auto flushed = mock.pipelineBarriers;
+        queue.RecordMemoryBarrier(context);
+        Require(mock.pipelineBarriers == flushed + 1 && queue.HasPending(), "a memory barrier after work submitted in an earlier batch was dropped");
+        queue.Flush();
+        queue.RecordMemoryBarrier(context);
+        Require(mock.pipelineBarriers == flushed + 1, "a memory barrier with no work since the previous barrier was recorded after a flush");
+        queue.Wait();
+        Require(!queue.HasPending(), "waiting for the draw queue left batches pending");
+    }
+    Require(mock.live == 0, "draw queue barrier tests leaked Vulkan objects");
+}
+
 void renderCacheTests() {
     using AgcDriver::Graphics::ColorTarget;
     using AgcDriver::Graphics::ColorTileMode;
@@ -1946,6 +2005,7 @@ int main() {
         pipelineKeyTests();
         writeIntervalTests();
         drawQueueWriterTests();
+        drawQueueBarrierTests();
         renderCacheTests();
         mock = MockVulkan{};
         auto bdaContext = mockContext();
