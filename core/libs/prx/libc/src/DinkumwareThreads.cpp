@@ -122,7 +122,7 @@ int APS5_VABI _Cnd_timedwait_nid_postfix(void* condition, void* mutex, const Xti
 
 int APS5_VABI _Thrd_sleep_nid_postfix(const Xtime* time) {
     const auto remaining = steadyDeadline(deadline(time)) - std::chrono::steady_clock::now();
-    if (remaining.count() > 0) PreciseSleepNanos_nid_no_patch(static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(remaining).count()));
+    if (remaining.count() > 0) GuestSleepNanos_nid_no_patch(static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(remaining).count()));
     return Success;
 }
 int APS5_VABI _Thrd_yield_nid_postfix() { std::this_thread::yield(); return Success; }

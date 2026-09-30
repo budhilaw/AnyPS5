@@ -10,10 +10,16 @@
 #include <time.h>
 #endif
 
+namespace {
+
+constexpr std::uint64_t SpinLimitNanos = 50000ULL;
+
+}
+
 extern "C" void PreciseSleepNanos_nid_no_patch(std::uint64_t nanos) {
     if (nanos == 0) return;
 #ifdef _WIN32
-    if (nanos <= 50000ULL) {
+    if (nanos <= SpinLimitNanos) {
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::nanoseconds(nanos);
         while (std::chrono::steady_clock::now() < deadline) YieldProcessor();
         return;
@@ -29,4 +35,17 @@ extern "C" void PreciseSleepNanos_nid_no_patch(std::uint64_t nanos) {
     request.tv_nsec = static_cast<long>(nanos % 1000000000ULL);
     while (nanosleep(&request, &request) == -1 && errno == EINTR) {}
 #endif
+}
+
+extern "C" void GuestSleepNanos_nid_no_patch(std::uint64_t nanos) {
+#ifdef _WIN32
+    if (nanos != 0 && nanos <= SpinLimitNanos) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::nanoseconds(nanos);
+        do {
+            if (!SwitchToThread()) YieldProcessor();
+        } while (std::chrono::steady_clock::now() < deadline);
+        return;
+    }
+#endif
+    PreciseSleepNanos_nid_no_patch(nanos);
 }

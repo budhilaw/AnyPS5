@@ -6,6 +6,7 @@
 extern "C" {
 
 void PreciseSleepNanos_nid_no_patch(std::uint64_t nanos);
+void GuestSleepNanos_nid_no_patch(std::uint64_t nanos);
 
 }
 

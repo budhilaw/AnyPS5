@@ -57,7 +57,7 @@ static std::uint64_t GetStartNanos() {
 }
 
 static void SleepNanos(std::uint64_t nanos) {
-    PreciseSleepNanos_nid_no_patch(nanos);
+    GuestSleepNanos_nid_no_patch(nanos);
 }
 
 struct TscClock {
