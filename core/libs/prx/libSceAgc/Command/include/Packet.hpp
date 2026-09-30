@@ -7,6 +7,8 @@
 
 namespace Agc::Command {
 
+constexpr std::uint32_t HeaderOnlyNop = 0xffff1000u;
+
 void Require(bool condition, const char* function, const char* reason);
 void CheckBits(std::uint64_t value, std::uint64_t mask, const char* function);
 void CheckAddress(std::uint64_t address, std::uint32_t alignment, const char* function);
