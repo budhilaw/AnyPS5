@@ -442,4 +442,10 @@ std::shared_ptr<Texture> TextureCache::Null(TextureDimension dimension) {
     return texture;
 }
 
+std::shared_ptr<Texture> TextureCache::NullStorage(TextureDimension dimension) {
+    auto& texture = storageNulls[dimension];
+    if (!texture) texture = std::make_shared<Texture>(context, dimension);
+    return texture;
+}
+
 }

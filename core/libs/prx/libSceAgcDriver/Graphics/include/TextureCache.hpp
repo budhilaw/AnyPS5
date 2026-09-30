@@ -16,6 +16,7 @@ public:
     explicit TextureCache(const Context& context);
     std::shared_ptr<Texture> Get(std::span<const std::uint32_t> words, const GuestTextureResource& resource, VkComponentMapping components, bool storage = false, bool compare = false);
     std::shared_ptr<Texture> Null(TextureDimension dimension);
+    std::shared_ptr<Texture> NullStorage(TextureDimension dimension);
     void DumpTextures(const std::string& prefix);
     std::string DescribeContents(const Texture& texture);
     std::vector<unsigned char> Contents(const Texture& texture);
@@ -50,6 +51,7 @@ private:
     std::unordered_multimap<std::uint64_t, std::list<Entry>::iterator> index;
     std::uint32_t lookupsSinceSweep = 0;
     std::map<TextureDimension, std::shared_ptr<Texture>> nulls;
+    std::map<TextureDimension, std::shared_ptr<Texture>> storageNulls;
     std::uint64_t retainedBytes = 0;
     std::uint64_t budget;
     static constexpr std::size_t maxEntries = 8192;

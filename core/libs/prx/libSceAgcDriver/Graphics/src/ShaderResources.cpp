@@ -13,8 +13,10 @@
 #include <cstdlib>
 #include <mutex>
 #include <limits>
+#include <optional>
 #include <set>
 #include <string>
+#include <string_view>
 
 namespace AgcDriver::Graphics {
 namespace {
@@ -77,6 +79,45 @@ const char* kindName(ShaderRecompiler::DescriptorKind kind) {
         case ShaderRecompiler::DescriptorKind::Sampler: return "Sampler";
     }
     throw std::runtime_error("AGC graphics: unknown descriptor kind");
+}
+
+TextureDimension nullDimension(ShaderRecompiler::DescriptorImageShape shape) {
+    switch (shape) {
+        case ShaderRecompiler::DescriptorImageShape::Image1D: return TextureDimension::k1D;
+        case ShaderRecompiler::DescriptorImageShape::Image2D: return TextureDimension::k2D;
+        case ShaderRecompiler::DescriptorImageShape::Image2DArray: return TextureDimension::k2DArray;
+        case ShaderRecompiler::DescriptorImageShape::ImageCube: return TextureDimension::kCube;
+        case ShaderRecompiler::DescriptorImageShape::Image3D: return TextureDimension::k3D;
+    }
+    throw std::runtime_error("AGC graphics: unknown descriptor image shape");
+}
+
+GuestTextureResource decodeImage(std::span<const std::uint32_t> words, ShaderRecompiler::DescriptorImageShape shape) {
+    using Shape = ShaderRecompiler::DescriptorImageShape;
+    auto resource = DecodeTextureResource(words);
+    if (MatchesGuestDimension(shape, resource.dimension)) return resource;
+    if (shape == Shape::Image2DArray && (resource.dimension == TextureDimension::k2D || resource.dimension == TextureDimension::kCube)) resource.viewDimension = TextureDimension::k2DArray;
+    else if (shape == Shape::Image2D && (resource.dimension == TextureDimension::k2DArray || resource.dimension == TextureDimension::kCube)) resource.viewDimension = TextureDimension::k2D;
+    else if (shape == Shape::ImageCube && resource.dimension == TextureDimension::k2DArray && (resource.depthOrLastArray + 1u - resource.baseArray) % 6u == 0) resource.viewDimension = TextureDimension::kCube;
+    else throw std::runtime_error("AGC graphics: guest texture dimension " + std::to_string(static_cast<int>(resource.dimension)) + " disagrees with the shader's declared image shape " + std::to_string(static_cast<int>(shape)));
+    static std::once_flag once;
+    std::call_once(once, [&] { APS5_LOG_OUT("sampling textures through a differently shaped sampler (dimension %d as shape %d)", static_cast<int>(resource.dimension), static_cast<int>(shape)); });
+    return resource;
+}
+
+void reportFallback(const char* kind, std::span<const std::uint32_t> words, const char* reason, const char* replacement) {
+    static std::mutex mutex;
+    static std::set<std::string, std::less<>> reported;
+    std::lock_guard lock(mutex);
+    if (reported.size() >= 256 || reported.find(std::string_view(reason)) != reported.end()) return;
+    reported.emplace(reason);
+    std::string text;
+    for (const auto word : words) {
+        char item[16];
+        std::snprintf(item, sizeof(item), "%s%08x", text.empty() ? "" : " ", word);
+        text += item;
+    }
+    APS5_LOG_OUT("guest %s descriptor {%s} cannot be used (%s); binding %s instead", kind, text.c_str(), reason, replacement);
 }
 
 }
@@ -308,42 +349,39 @@ void ShaderResources::addImageBinding(const ShaderRecompiler::DescriptorBinding&
         Require(context.textureCache != nullptr, "device texture cache is unavailable");
         Require(!storageImage || context.storageImages, "device does not support format-less storage images");
         Require(binding.count <= (storageImage ? context.limits.maxPerStageDescriptorStorageImages : context.limits.maxPerStageDescriptorSampledImages), "shader image descriptors exceed per-stage limits");
+        const auto shape = *binding.imageShape;
+        const auto nullTexture = [&](TextureDimension dimension) { return storageImage ? context.textureCache->NullStorage(dimension) : context.textureCache->Null(dimension); };
         for (std::uint32_t element = 0; element < binding.count; ++element) {
             const auto words = std::span<const std::uint32_t>(binding.guestDescriptor).subspan(static_cast<std::size_t>(element) * elementWords, elementWords);
-            if (words[0] == 0 && (words[1] & 0xffu) == 0) {
-                TextureDimension dimension = TextureDimension::k2D;
-                for (const auto candidate : {TextureDimension::k2D, TextureDimension::k2DArray, TextureDimension::kCube, TextureDimension::k1D}) if (MatchesGuestDimension(*binding.imageShape, candidate)) { dimension = candidate; break; }
-                textures.push_back(context.textureCache->Null(dimension));
+            std::optional<GuestTextureResource> decoded;
+            if (words[0] != 0 || (words[1] & 0xffu) != 0) {
+                try {
+                    decoded = decodeImage(words, shape);
+                } catch (const std::exception& error) {
+                    reportFallback("texture", words, error.what(), "a null texture");
+                }
+            }
+            if (!decoded) {
+                textures.push_back(nullTexture(nullDimension(shape)));
                 textureBindings.emplace_back(binding.binding, element);
                 item.imageAllocations.push_back(textures.size() - 1);
                 continue;
             }
-            auto resource = DecodeTextureResource(words);
-            if (!MatchesGuestDimension(*binding.imageShape, resource.dimension)) {
-                using Shape = ShaderRecompiler::DescriptorImageShape;
-                const auto shape = *binding.imageShape;
-                bool converted = true;
-                if (shape == Shape::Image2DArray && (resource.dimension == TextureDimension::k2D || resource.dimension == TextureDimension::kCube)) resource.viewDimension = TextureDimension::k2DArray;
-                else if (shape == Shape::Image2D && (resource.dimension == TextureDimension::k2DArray || resource.dimension == TextureDimension::kCube)) resource.viewDimension = TextureDimension::k2D;
-                else if (shape == Shape::ImageCube && resource.dimension == TextureDimension::k2DArray && (resource.depthOrLastArray + 1u) % 6u == 0) resource.viewDimension = TextureDimension::kCube;
-                else converted = false;
-                if (!converted) throw std::runtime_error("AGC graphics: guest texture dimension " + std::to_string(static_cast<int>(resource.dimension)) + " disagrees with the shader's declared image shape " + std::to_string(static_cast<int>(shape)));
-                static std::once_flag once;
-                std::call_once(once, [&] { APS5_LOG_OUT("sampling textures through a differently shaped sampler (dimension %d as shape %d)", static_cast<int>(resource.dimension), static_cast<int>(shape)); });
-            }
+            const auto& resource = *decoded;
             const VkComponentMapping components{ComponentSwizzleFor(resource.dstSelX), ComponentSwizzleFor(resource.dstSelY), ComponentSwizzleFor(resource.dstSelZ), ComponentSwizzleFor(resource.dstSelW)};
             static const std::uint64_t replaced = std::getenv("ANYPS5_DEBUG_NULL_TEXTURE") != nullptr ? std::strtoull(std::getenv("ANYPS5_DEBUG_NULL_TEXTURE"), nullptr, 16) : 0u;
-            textures.push_back(replaced != 0 && resource.baseAddress == replaced ? context.textureCache->Null(resource.viewDimension) : context.textureCache->Get(words, resource, components, storageImage, binding.imageDepthCompare));
-            textureBindings.emplace_back(binding.binding, element);
-            if (storageImage && textures.back()->StorageView() == VK_NULL_HANDLE) {
+            auto texture = replaced != 0 && resource.baseAddress == replaced ? nullTexture(resource.viewDimension) : context.textureCache->Get(words, resource, components, storageImage, binding.imageDepthCompare);
+            if (storageImage && texture->StorageView() == VK_NULL_HANDLE) {
                 char message[200];
                 std::snprintf(message, sizeof(message), "AGC graphics: storage image 0x%llx (%ux%u format 0x%x tile %u dimension %u mips %u) does not support shader stores", static_cast<unsigned long long>(resource.baseAddress), resource.width, resource.height, resource.format, static_cast<unsigned>(resource.tileMode), static_cast<unsigned>(resource.dimension), resource.mipCount);
-                throw std::runtime_error(message);
-            }
-            if (storageImage) {
-                textures.back()->MarkStored();
+                reportFallback("texture", words, message, "a null texture");
+                texture = nullTexture(nullDimension(shape));
+            } else if (storageImage) {
+                texture->MarkStored();
                 storesImages = true;
             }
+            textures.push_back(std::move(texture));
+            textureBindings.emplace_back(binding.binding, element);
             item.imageAllocations.push_back(textures.size() - 1);
         }
         Require(textures.size() <= context.limits.maxDescriptorSetSampledImages, "pipeline image descriptors exceed device limits");
@@ -353,10 +391,20 @@ void ShaderResources::addImageBinding(const ShaderRecompiler::DescriptorBinding&
         Require(binding.samplerDepthCompare.size() == binding.count, "guest sampler binding is missing depth comparison metadata");
         for (std::uint32_t element = 0; element < binding.count; ++element) {
             const auto words = std::span<const std::uint32_t>(binding.guestDescriptor).subspan(static_cast<std::size_t>(element) * elementWords, elementWords);
-            auto resource = DecodeSamplerResource(words);
-            resource.compareEnable = binding.samplerDepthCompare.at(element);
+            const bool compare = binding.samplerDepthCompare.at(element);
             if (!context.samplerCache) context.samplerCache = std::make_shared<SamplerCache>();
-            samplers.push_back(context.samplerCache->Get(context, words, resource));
+            std::shared_ptr<Sampler> sampler;
+            try {
+                auto resource = DecodeSamplerResource(words);
+                resource.compareEnable = compare;
+                sampler = context.samplerCache->Get(context, words, resource);
+            } catch (const std::exception& error) {
+                reportFallback("sampler", words, error.what(), "a default sampler");
+                auto resource = FallbackSamplerResource(words);
+                resource.compareEnable = compare;
+                sampler = context.samplerCache->Get(context, words, resource);
+            }
+            samplers.push_back(std::move(sampler));
             item.imageAllocations.push_back(samplers.size() - 1);
         }
         Require(samplers.size() <= context.limits.maxDescriptorSetSamplers, "pipeline sampler descriptors exceed device limits");
