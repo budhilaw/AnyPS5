@@ -4,6 +4,7 @@
 #else
 #include <arpa/inet.h>
 #endif
+#include "prx/libc/include/PreciseSleep.hpp"
 #include <cstdint>
 #include <cstddef>
 #include <cstdio>
@@ -104,7 +105,7 @@ int APS5_VABI sceNetEpollControl(int eid, int op, int id, const NetEpollEvent* e
 int APS5_VABI sceNetEpollWait(int eid, NetEpollEvent* events, int maxevents, int timeout) {
     (void)events;
     if (!epolls.Has(eid) || maxevents <= 0) return SCE_NET_ERROR_EINVAL;
-    if (timeout > 0) std::this_thread::sleep_for(std::chrono::microseconds(timeout));
+    if (timeout > 0) PreciseSleepNanos_nid_no_patch(static_cast<std::uint64_t>(timeout) * 1000);
     return 0;
 }
 
