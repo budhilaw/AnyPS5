@@ -84,7 +84,7 @@ void ReportFatalException(const EXCEPTION_POINTERS* exception) {
     write("  r8 =%016llx r9 =%016llx r10=%016llx r11=%016llx\n", context->R8, context->R9, context->R10, context->R11);
     write("  r12=%016llx r13=%016llx r14=%016llx r15=%016llx\n", context->R12, context->R13, context->R14, context->R15);
     int found = 0;
-    for (std::uint64_t slot = context->Rsp; found < 16 && slot < context->Rsp + 4096; slot += 8) {
+    for (std::uint64_t slot = context->Rsp; found < 48 && slot < context->Rsp + 8192; slot += 8) {
         if (!readable(slot, 8)) break;
         const auto value = *reinterpret_cast<const std::uint64_t*>(slot);
         if (value < 0x10000 || !executable(value)) continue;
