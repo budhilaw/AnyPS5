@@ -23,7 +23,11 @@ void DrawQueue::retire(Batch batch) {
     drawCount -= batch.entries.size();
     if (!batch.entries.empty()) {
         const auto last = batch.entries.back().sequence;
-        writers.erase(writers.begin(), std::find_if(writers.begin(), writers.end(), [&](const Writer& writer) { return writer.sequence > last; }));
+        const auto retired = std::find_if(writers.begin(), writers.end(), [&](const Writer& writer) { return writer.sequence > last; });
+        if (retired != writers.begin()) {
+            writers.erase(writers.begin(), retired);
+            writerEpoch.fetch_add(1, std::memory_order_release);
+        }
         retiredThrough = std::max(retiredThrough, last);
     }
     for (auto& entry : batch.entries) {

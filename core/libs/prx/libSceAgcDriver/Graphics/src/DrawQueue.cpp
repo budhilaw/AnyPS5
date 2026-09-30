@@ -17,6 +17,64 @@ constexpr std::size_t MaxPendingBatches = 4;
 
 }
 
+void WriteIntervals::Clear() {
+    intervals.clear();
+    reach.clear();
+}
+
+void WriteIntervals::Add(std::uint64_t begin, std::uint64_t end, std::uint64_t sequence, bool copied) {
+    intervals.push_back({begin, end, sequence, copied});
+}
+
+void WriteIntervals::Build() {
+    std::sort(intervals.begin(), intervals.end(), [](const Interval& left, const Interval& right) {
+        if (left.begin != right.begin) return left.begin < right.begin;
+        if (left.end != right.end) return left.end < right.end;
+        return left.copied < right.copied;
+    });
+    std::size_t kept = 0;
+    for (const auto& interval : intervals) {
+        if (kept != 0) {
+            auto& previous = intervals[kept - 1];
+            if (previous.begin == interval.begin && previous.end == interval.end && previous.copied == interval.copied) {
+                previous.sequence = std::max(previous.sequence, interval.sequence);
+                continue;
+            }
+        }
+        intervals[kept++] = interval;
+    }
+    intervals.resize(kept);
+    reach.resize(kept);
+    std::uint64_t furthest = 0;
+    for (std::size_t index = 0; index < kept; ++index) {
+        furthest = std::max(furthest, intervals[index].end);
+        reach[index] = furthest;
+    }
+}
+
+std::size_t WriteIntervals::first(std::uint64_t address) const {
+    return static_cast<std::size_t>(std::partition_point(reach.begin(), reach.end(), [address](std::uint64_t furthest) { return furthest <= address; }) - reach.begin());
+}
+
+std::uint64_t WriteIntervals::Latest(std::uint64_t address, std::size_t bytes, bool copiedOnly) const {
+    const auto end = address + bytes;
+    std::uint64_t latest = 0;
+    for (auto index = first(address); index < intervals.size() && intervals[index].begin < end; ++index) {
+        const auto& interval = intervals[index];
+        if (address < interval.end && (interval.copied || !copiedOnly)) latest = std::max(latest, interval.sequence);
+    }
+    return latest;
+}
+
+bool WriteIntervals::Pending(std::uint64_t address, std::size_t bytes, std::uint64_t adoptedBefore) const {
+    const auto end = address + bytes;
+    for (auto index = first(address); index < intervals.size() && intervals[index].begin < end; ++index) {
+        const auto& interval = intervals[index];
+        if (address < interval.end && (interval.copied || interval.sequence >= adoptedBefore)) return true;
+    }
+    return false;
+}
+
 DrawQueue::~DrawQueue() {
     recording.commands.reset();
     for (auto& batch : pending) batch.commands.reset();
@@ -80,7 +138,10 @@ void DrawQueue::EndPass() {
 
 void DrawQueue::Enqueue(std::shared_ptr<ShaderResources> resources, std::shared_ptr<void> storage) {
     Require(recording.commands != nullptr && resources != nullptr && storage != nullptr, "draw batch is incomplete");
-    if (resources->HasGuestWrites()) writers.push_back({nextSequence, resources.get()});
+    if (resources->HasGuestWrites()) {
+        writers.push_back({nextSequence, resources.get()});
+        writerEpoch.fetch_add(1, std::memory_order_release);
+    }
     if (resources->UsesGds()) lastGdsSequence = nextSequence;
     recording.entries.push_back({std::move(storage), std::move(resources), nextSequence++});
     ++drawCount;
@@ -123,33 +184,44 @@ void DrawQueue::Flush() {
     if (releases) releases->Collect();
 }
 
+const WriteIntervals& DrawQueue::writeIntervals() const {
+    const auto epoch = writerEpoch.load(std::memory_order_relaxed);
+    if (intervalsEpoch == epoch) return intervals;
+    intervals.Clear();
+    for (const auto& writer : writers) {
+        for (const auto& [begin, end] : writer.resources->WriteRanges()) intervals.Add(begin, end, writer.sequence, writer.resources->WriteCopied(begin));
+    }
+    intervals.Build();
+    intervalsEpoch = epoch;
+    return intervals;
+}
+
 bool DrawQueue::WritesPending(std::uint64_t address, std::size_t bytes, std::uint64_t adoptedBefore) const {
-    return std::any_of(writers.begin(), writers.end(), [&](const Writer& writer) { return writer.sequence < adoptedBefore ? writer.resources->WritesOverlapCopied(address, bytes) : writer.resources->WritesOverlap(address, bytes); });
+    return writeIntervals().Pending(address, bytes, adoptedBefore);
+}
+
+void DrawQueue::traceResolve(std::uint64_t address, std::size_t bytes, bool ordered, const char* traceValue) const {
+    static const auto traceStart = std::chrono::steady_clock::now();
+    static int reported = 0;
+    for (const auto& writer : writers) {
+        const auto& resources = *writer.resources;
+        if (ordered ? !resources.WritesOverlapCopied(address, bytes) : !resources.WritesOverlap(address, bytes)) continue;
+        if (reported >= 200 || std::chrono::duration<double>(std::chrono::steady_clock::now() - traceStart).count() < std::atof(traceValue)) continue;
+        ++reported;
+        std::string ranges;
+        for (const auto& [begin, end] : resources.WriteRanges()) {
+            char item[64];
+            std::snprintf(item, sizeof(item), " 0x%llx+0x%llx", static_cast<unsigned long long>(begin), static_cast<unsigned long long>(end - begin));
+            ranges += item;
+        }
+        std::fprintf(stderr, "[resolve-wait] 0x%llx+0x%zx overlaps writes%s (ordered %d, copied %d)\n", static_cast<unsigned long long>(address), bytes, ranges.c_str(), ordered ? 1 : 0, resources.WritesOverlapCopied(address, bytes) ? 1 : 0);
+    }
 }
 
 void DrawQueue::Resolve(std::uint64_t address, std::size_t bytes, bool ordered) {
-    const auto overlaps = [&](const Writer& writer) {
-        const auto& resources = *writer.resources;
-        if (ordered ? !resources.WritesOverlapCopied(address, bytes) : !resources.WritesOverlap(address, bytes)) return false;
-        static const char* traceValue = std::getenv("ANYPS5_TRACE_WAITS");
-        static const auto traceStart = std::chrono::steady_clock::now();
-        static int reported = 0;
-        if (traceValue != nullptr && reported < 200 && std::chrono::duration<double>(std::chrono::steady_clock::now() - traceStart).count() >= std::atof(traceValue)) {
-            ++reported;
-            std::string ranges;
-            for (const auto& [begin, end] : resources.WriteRanges()) {
-                char item[64];
-                std::snprintf(item, sizeof(item), " 0x%llx+0x%llx", static_cast<unsigned long long>(begin), static_cast<unsigned long long>(end - begin));
-                ranges += item;
-            }
-            std::fprintf(stderr, "[resolve-wait] 0x%llx+0x%zx overlaps writes%s (ordered %d, copied %d)\n", static_cast<unsigned long long>(address), bytes, ranges.c_str(), ordered ? 1 : 0, resources.WritesOverlapCopied(address, bytes) ? 1 : 0);
-        }
-        return true;
-    };
-    std::uint64_t last = 0;
-    for (const auto& writer : writers) {
-        if (writer.sequence > last && overlaps(writer)) last = writer.sequence;
-    }
+    static const char* traceValue = std::getenv("ANYPS5_TRACE_WAITS");
+    if (traceValue != nullptr) traceResolve(address, bytes, ordered, traceValue);
+    const auto last = writeIntervals().Latest(address, bytes, ordered);
     if (last != 0) waitThrough(last);
 }
 

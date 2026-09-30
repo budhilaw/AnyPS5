@@ -4,11 +4,32 @@
 #include "prx/libSceAgcDriver/Graphics/include/ShaderResources.hpp"
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <functional>
 #include <vector>
 
 namespace AgcDriver::Graphics {
+
+class WriteIntervals {
+public:
+    void Clear();
+    void Add(std::uint64_t begin, std::uint64_t end, std::uint64_t sequence, bool copied);
+    void Build();
+    std::uint64_t Latest(std::uint64_t address, std::size_t bytes, bool copiedOnly) const;
+    bool Pending(std::uint64_t address, std::size_t bytes, std::uint64_t adoptedBefore) const;
+
+private:
+    struct Interval {
+        std::uint64_t begin;
+        std::uint64_t end;
+        std::uint64_t sequence;
+        bool copied;
+    };
+    std::size_t first(std::uint64_t address) const;
+    std::vector<Interval> intervals;
+    std::vector<std::uint64_t> reach;
+};
 
 struct RenderPassKey {
     std::array<VkImageView, 10> views{};
@@ -36,6 +57,7 @@ public:
     void Flush();
     void Resolve(std::uint64_t address, std::size_t bytes, bool ordered = false);
     bool WritesPending(std::uint64_t address, std::size_t bytes, std::uint64_t adoptedBefore = 0) const;
+    std::uint64_t WriterEpoch() const { return writerEpoch.load(std::memory_order_acquire); }
     std::uint64_t NextSequence() const { return nextSequence; }
     void AppendWriteRanges(std::vector<std::pair<std::uint64_t, std::uint64_t>>& ranges) const {
         for (const auto& writer : writers) ranges.insert(ranges.end(), writer.resources->WriteRanges().begin(), writer.resources->WriteRanges().end());
@@ -63,6 +85,8 @@ private:
     void retire(Batch batch);
     void throttle();
     void waitThrough(std::uint64_t sequence);
+    const WriteIntervals& writeIntervals() const;
+    void traceResolve(std::uint64_t address, std::size_t bytes, bool ordered, const char* traceValue) const;
     Batch recording;
     std::vector<Batch> pending;
     std::vector<std::unique_ptr<CommandBatch>> available;
@@ -75,6 +99,9 @@ private:
         const ShaderResources* resources;
     };
     std::vector<Writer> writers;
+    std::atomic<std::uint64_t> writerEpoch{0};
+    mutable WriteIntervals intervals;
+    mutable std::uint64_t intervalsEpoch = 0;
     std::chrono::nanoseconds lastCompletion{};
     bool passOpen = false;
     RenderPassKey pass;
