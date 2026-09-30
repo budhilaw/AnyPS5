@@ -20,10 +20,12 @@ namespace AgcDriver::Graphics {
         TextureDetiler& operator=(const TextureDetiler&) = delete;
 
         void Dispatch(VkCommandBuffer commands, TextureTileMode tileMode, std::uint32_t elementBytes, VkBuffer source, std::uint64_t sourceOffset, VkBuffer destination, std::uint64_t destinationOffset, const TileMipLayout& layout, std::uint32_t arrayLayer);
+        void Encode(VkCommandBuffer commands, TextureTileMode tileMode, std::uint32_t elementBytes, VkBuffer linear, std::uint64_t linearOffset, VkBuffer tiled, std::uint64_t tiledOffset, const TileMipLayout& layout, std::uint32_t arrayLayer);
         void BeginBatch();
         void Retire(DrawQueue& queue);
 
     private:
+        void record(VkCommandBuffer commands, TextureTileMode tileMode, std::uint32_t elementBytes, VkBuffer source, std::uint64_t sourceOffset, VkBuffer destination, std::uint64_t destinationOffset, const TileMipLayout& layout, std::uint32_t arrayLayer, bool encode);
         VkPipeline pipeline(TextureTileMode tileMode, std::uint32_t elementBytes, std::uint32_t family);
         void release() noexcept;
         VkDescriptorSet allocateSet();

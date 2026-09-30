@@ -26,6 +26,7 @@ layout(push_constant) uniform Push {
     uint swizzleX;
     uint swizzleY;
     uint swizzleZ;
+    uint encode;
 } params;
 
 uint standardOffset(uint x, uint y) {
@@ -202,26 +203,13 @@ void copyElement(uint src, uint dst) {
     }
 }
 
-void main() {
-    uvec3 p = gl_GlobalInvocationID;
-    if (p.x >= params.width || p.y >= params.height || p.z >= params.depth) {
-        return;
-    }
-
-    uint linearOffset = (p.z * params.height + p.y) * params.pitchBytes + p.x * ELEMENT_BYTES;
-
+uint tiledOffset(uvec3 p, uint linearOffset) {
     if (TILE_FAMILY == 0u) {
-        // kLinear: guest and host layouts match; a straight copy at the
-        // same pitch, no swizzle.
-        copyElement(params.srcBase + linearOffset, params.dstBase + linearOffset);
-        return;
+        return linearOffset;
     }
-
     if (TILE_FAMILY == 3u) {
-        copyElement(params.srcBase + thickTiledOffset(p), params.dstBase + linearOffset);
-        return;
+        return thickTiledOffset(p);
     }
-
     uvec2 swizzle = p.xy;
     uvec2 block = uvec2(0u);
     if (params.tail != 0u) {
@@ -229,10 +217,23 @@ void main() {
     } else {
         block = p.xy / blockExtent();
     }
-
     uint blockIndex = block.y * params.blocksPerRow + block.x;
-    uint tiledOffset = blockIndex * BLOCK_BYTES + blockOffset(swizzle);
+    return blockIndex * BLOCK_BYTES + blockOffset(swizzle);
+}
 
-    copyElement(params.srcBase + tiledOffset, params.dstBase + linearOffset);
+void main() {
+    uvec3 p = gl_GlobalInvocationID;
+    if (p.x >= params.width || p.y >= params.height || p.z >= params.depth) {
+        return;
+    }
+
+    uint linearOffset = (p.z * params.height + p.y) * params.pitchBytes + p.x * ELEMENT_BYTES;
+    uint tiled = tiledOffset(p, linearOffset);
+
+    if (params.encode != 0u) {
+        copyElement(params.srcBase + linearOffset, params.dstBase + tiled);
+    } else {
+        copyElement(params.srcBase + tiled, params.dstBase + linearOffset);
+    }
 }
 

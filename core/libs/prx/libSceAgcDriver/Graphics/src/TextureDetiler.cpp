@@ -28,6 +28,7 @@ struct Push {
     std::uint32_t swizzleX;
     std::uint32_t swizzleY;
     std::uint32_t swizzleZ;
+    std::uint32_t encode;
 };
 
 std::uint32_t BlockBytesFor(TextureTileMode tileMode) {
@@ -127,6 +128,14 @@ VkPipeline TextureDetiler::pipeline(TextureTileMode tileMode, std::uint32_t elem
 }
 
 void TextureDetiler::Dispatch(VkCommandBuffer commands, TextureTileMode tileMode, std::uint32_t elementBytes, VkBuffer source, std::uint64_t sourceOffset, VkBuffer destination, std::uint64_t destinationOffset, const TileMipLayout& layout, std::uint32_t arrayLayer) {
+    record(commands, tileMode, elementBytes, source, sourceOffset, destination, destinationOffset, layout, arrayLayer, false);
+}
+
+void TextureDetiler::Encode(VkCommandBuffer commands, TextureTileMode tileMode, std::uint32_t elementBytes, VkBuffer linear, std::uint64_t linearOffset, VkBuffer tiled, std::uint64_t tiledOffset, const TileMipLayout& layout, std::uint32_t arrayLayer) {
+    record(commands, tileMode, elementBytes, linear, linearOffset, tiled, tiledOffset, layout, arrayLayer, true);
+}
+
+void TextureDetiler::record(VkCommandBuffer commands, TextureTileMode tileMode, std::uint32_t elementBytes, VkBuffer source, std::uint64_t sourceOffset, VkBuffer destination, std::uint64_t destinationOffset, const TileMipLayout& layout, std::uint32_t arrayLayer, bool encode) {
     Require(commands != VK_NULL_HANDLE, "texture detiling requires an active command buffer");
     Require(source != VK_NULL_HANDLE && destination != VK_NULL_HANDLE, "texture detiling requires source and destination buffers");
     Require(layout.width != 0 && layout.height != 0 && layout.depth != 0, "texture detiling requires a non-empty mip layout");
@@ -135,6 +144,8 @@ void TextureDetiler::Dispatch(VkCommandBuffer commands, TextureTileMode tileMode
     Require(thick || layout.depth == 1u, "texture detiling covers several slices only for thick volume layouts");
     const auto swizzle = thick ? ThickSwizzleMasks(tileMode, elementBytes) : TileSwizzleMasks{0, 0, 0};
     const auto target = pipeline(tileMode, elementBytes, TileFamily(tileMode, thick));
+    const auto elementAlignment = std::min(elementBytes, 4u);
+    Require(sourceOffset % elementAlignment == 0 && destinationOffset % elementAlignment == 0, "texture detiling buffer offsets must be aligned to the element size or 4 bytes");
     const auto tiledSpan = thick ? (layout.depth - 1u) / layout.blockDepth * layout.sliceStride + layout.tiledSize : layout.tiledSize;
     Require(!thick || layout.sliceStride <= UINT32_MAX, "texture detiling slice stride exceeds addressable range");
     const auto alignment = std::max<VkDeviceSize>(context.limits.minStorageBufferOffsetAlignment, 4);
@@ -143,8 +154,8 @@ void TextureDetiler::Dispatch(VkCommandBuffer commands, TextureTileMode tileMode
     const auto sourceBase = sourceOffset - sourceDescriptorOffset;
     const auto destinationBase = destinationOffset - destinationDescriptorOffset;
     Require(sourceBase <= UINT32_MAX && destinationBase <= UINT32_MAX, "texture detiling buffer offset exceeds addressable range");
-    const auto sourceRange = (sourceBase + tiledSpan + 3) / 4 * 4;
-    const auto destinationRange = (destinationBase + layout.linearSize + 3) / 4 * 4;
+    const auto sourceRange = (sourceBase + (encode ? layout.linearSize : tiledSpan) + 3) / 4 * 4;
+    const auto destinationRange = (destinationBase + (encode ? tiledSpan : layout.linearSize) + 3) / 4 * 4;
     Require(sourceRange <= context.limits.maxStorageBufferRange && destinationRange <= context.limits.maxStorageBufferRange, "texture detiling buffer range exceeds device limits");
     const auto set = allocateSet();
     const VkDescriptorBufferInfo sourceInfo{source, sourceDescriptorOffset, sourceRange};
@@ -182,6 +193,7 @@ void TextureDetiler::Dispatch(VkCommandBuffer commands, TextureTileMode tileMode
     push.swizzleX = swizzle.x;
     push.swizzleY = swizzle.y;
     push.swizzleZ = swizzle.z;
+    push.encode = encode ? 1u : 0u;
     context.Function<PFN_vkCmdPushConstants>("vkCmdPushConstants")(commands, pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(Push), &push);
     const auto groupsX = (layout.width + 7u) / 8u;
     const auto groupsY = (layout.height + 7u) / 8u;
