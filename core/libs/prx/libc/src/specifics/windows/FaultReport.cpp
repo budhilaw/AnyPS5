@@ -47,6 +47,15 @@ bool executable(std::uint64_t address) {
     return protection == PAGE_EXECUTE || protection == PAGE_EXECUTE_READ || protection == PAGE_EXECUTE_READWRITE || protection == PAGE_EXECUTE_WRITECOPY;
 }
 
+void describeRegion(std::uint64_t address) {
+    MEMORY_BASIC_INFORMATION info{};
+    if (VirtualQuery(reinterpret_cast<const void*>(address), &info, sizeof(info)) != sizeof(info)) {
+        write("  region of 0x%016llx cannot be queried\n", static_cast<unsigned long long>(address));
+        return;
+    }
+    write("  region 0x%016llx+0x%llx allocation 0x%016llx state 0x%lx protect 0x%lx type 0x%lx\n", static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(info.BaseAddress)), static_cast<unsigned long long>(info.RegionSize), static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(info.AllocationBase)), info.State, info.Protect, info.Type);
+}
+
 void describe(const char* label, std::uint64_t address) {
     char path[MAX_PATH];
     const char* name = nullptr;
@@ -78,6 +87,7 @@ void ReportFatalException(const EXCEPTION_POINTERS* exception) {
     if ((record->ExceptionCode == EXCEPTION_ACCESS_VIOLATION || record->ExceptionCode == EXCEPTION_IN_PAGE_ERROR) && record->NumberParameters >= 2) {
         const auto access = record->ExceptionInformation[0];
         write("  %s at 0x%016llx\n", access == 0 ? "read" : access == 1 ? "write" : "execute", static_cast<unsigned long long>(record->ExceptionInformation[1]));
+        describeRegion(record->ExceptionInformation[1]);
     }
     write("  rax=%016llx rbx=%016llx rcx=%016llx rdx=%016llx\n", context->Rax, context->Rbx, context->Rcx, context->Rdx);
     write("  rsi=%016llx rdi=%016llx rbp=%016llx rsp=%016llx\n", context->Rsi, context->Rdi, context->Rbp, context->Rsp);
