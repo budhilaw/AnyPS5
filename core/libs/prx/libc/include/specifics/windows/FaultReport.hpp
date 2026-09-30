@@ -1,0 +1,11 @@
+#ifndef CORE_LIBS_PRX_LIBC_INCLUDE_SPECIFICS_WINDOWS_FAULTREPORT_HPP
+#define CORE_LIBS_PRX_LIBC_INCLUDE_SPECIFICS_WINDOWS_FAULTREPORT_HPP
+
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+
+void ReportFatalException(const EXCEPTION_POINTERS* exception);
+
+#endif

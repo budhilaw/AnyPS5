@@ -36,7 +36,7 @@ else()
 endif()
 
 if(WIN32)
-    target_sources(libc PRIVATE src/MemoryTrackingWindows.cpp src/MemoryBackingWindows.cpp)
+    target_sources(libc PRIVATE src/MemoryTrackingWindows.cpp src/MemoryBackingWindows.cpp src/specifics/windows/FaultReport.cpp)
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
     target_sources(libc PRIVATE src/MemoryTrackingLinux.cpp src/MemoryBackingLinux.cpp)
 elseif(APPLE)

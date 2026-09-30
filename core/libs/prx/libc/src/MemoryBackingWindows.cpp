@@ -1,6 +1,7 @@
 #include "prx/libc/include/MemoryBackingPlatform.hpp"
 #include "prx/libc/include/GuestMemoryBacking.hpp"
 #include "prx/libc/include/specifics/windows/NativeProtection.hpp"
+#include "prx/libc/include/specifics/windows/FaultReport.hpp"
 #include <algorithm>
 #include <cstdio>
 #include <limits>
@@ -42,7 +43,6 @@ struct SavedProtection {
 
 std::recursive_mutex viewMutex;
 std::map<std::uint64_t, View> physicalViews;
-std::once_flag remapHandlerInstalled;
 thread_local std::uintptr_t retriedAddress = 0;
 thread_local unsigned retries = 0;
 
@@ -133,18 +133,25 @@ bool accessibleNow(std::uintptr_t address, ULONG_PTR access) {
     return true;
 }
 
-LONG CALLBACK retryRemappedAccess(EXCEPTION_POINTERS* exception) {
-    const auto* record = exception->ExceptionRecord;
-    if (record->ExceptionCode != EXCEPTION_ACCESS_VIOLATION || record->NumberParameters < 2) return EXCEPTION_CONTINUE_SEARCH;
+bool retryRemappedAccess(const EXCEPTION_RECORD* record) {
+    if (record->ExceptionCode != EXCEPTION_ACCESS_VIOLATION || record->NumberParameters < 2) return false;
     const auto address = static_cast<std::uintptr_t>(record->ExceptionInformation[1]);
     { std::lock_guard lock(viewMutex); }
-    if (address == 0 || !accessibleNow(address, record->ExceptionInformation[0])) return EXCEPTION_CONTINUE_SEARCH;
+    if (address == 0 || !accessibleNow(address, record->ExceptionInformation[0])) return false;
     if (retriedAddress != address) {
         retriedAddress = address;
         retries = 0;
     }
-    return ++retries <= 16 ? EXCEPTION_CONTINUE_EXECUTION : EXCEPTION_CONTINUE_SEARCH;
+    return ++retries <= 16;
 }
+
+LONG CALLBACK lastChanceHandler(EXCEPTION_POINTERS* exception) {
+    if (retryRemappedAccess(exception->ExceptionRecord)) return EXCEPTION_CONTINUE_EXECUTION;
+    ReportFatalException(exception);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+const bool lastChanceHandlerInstalled = AddVectoredExceptionHandler(0, lastChanceHandler) != nullptr;
 
 std::vector<SavedProtection> saveProtection(std::uint64_t address, std::uint64_t end) {
     std::vector<SavedProtection> saved;
@@ -216,7 +223,7 @@ Mapping MapPhysical(void* address, std::size_t bytes, std::size_t alignment, int
         std::snprintf(text, sizeof(text), "guest physical mapping %p+0x%zx of offset 0x%llx is not aligned to the 64 KiB Windows allocation granularity", address, bytes, static_cast<unsigned long long>(offset));
         throw std::invalid_argument(text);
     }
-    std::call_once(remapHandlerInstalled, [] { check(AddVectoredExceptionHandler(0, retryRemappedAccess) != nullptr, "AddVectoredExceptionHandler guest remap"); });
+    if (!lastChanceHandlerInstalled) throw std::runtime_error("guest memory needs its last-chance exception handler");
     const auto& memory = physicalMemory();
     std::lock_guard lock(viewMutex);
     void* placeholder = reservePlaceholder(address, bytes, alignment);
