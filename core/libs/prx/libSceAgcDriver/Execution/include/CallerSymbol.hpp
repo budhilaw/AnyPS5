@@ -17,9 +17,32 @@
 
 namespace AgcDriver {
 
+#ifdef _WIN32
+inline bool FollowsCall(std::uintptr_t address) {
+    MEMORY_BASIC_INFORMATION memory{};
+    if (address < 0x10000 || VirtualQuery(reinterpret_cast<const void*>(address - 7), &memory, sizeof(memory)) != sizeof(memory)) return false;
+    const auto protection = memory.Protect & 0xffu;
+    if (memory.State != MEM_COMMIT || memory.Type != MEM_IMAGE || (protection != PAGE_EXECUTE_READ && protection != PAGE_EXECUTE_READWRITE && protection != PAGE_EXECUTE_WRITECOPY)) return false;
+    const auto base = reinterpret_cast<std::uintptr_t>(memory.BaseAddress);
+    if (address - 7 < base || address > base + memory.RegionSize) return false;
+    const auto* code = reinterpret_cast<const unsigned char*>(address);
+    return code[-5] == 0xe8 || (code[-2] == 0xff && (code[-1] & 0x38) == 0x10) || (code[-3] == 0xff && (code[-2] & 0x38) == 0x10) || (code[-6] == 0xff && (code[-5] & 0x38) == 0x10) || (code[-7] == 0xff && (code[-6] & 0x38) == 0x10);
+}
+#endif
+
 inline int CaptureCallers(void** frames, int count) {
 #ifdef _WIN32
-    return static_cast<int>(CaptureStackBackTrace(0, static_cast<DWORD>(count), frames, nullptr));
+    if (count <= 0) return 0;
+    frames[0] = nullptr;
+    int found = 1;
+    const auto* tib = reinterpret_cast<const NT_TIB*>(NtCurrentTeb());
+    auto* slot = static_cast<void* const*>(__builtin_frame_address(0));
+    const auto* limit = static_cast<void* const*>(tib->StackBase);
+    for (int scanned = 0; slot < limit && found < count && scanned < 4096; ++slot, ++scanned) {
+        const auto value = reinterpret_cast<std::uintptr_t>(*slot);
+        if (FollowsCall(value)) frames[found++] = *slot;
+    }
+    return found;
 #else
     return ::backtrace(frames, count);
 #endif
