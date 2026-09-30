@@ -86,6 +86,20 @@ void rejectFields(const Fields& f, std::string_view reason) {
     reject([&] { DecodeTextureResource(words); }, reason);
 }
 
+void requireSameTexture(const GuestTextureResource& decoded, const GuestTextureResource& expected, const std::string& reason) {
+    Require(decoded.baseAddress == expected.baseAddress && decoded.width == expected.width && decoded.height == expected.height, reason + " changed texture storage");
+    Require(decoded.depthOrLastArray == expected.depthOrLastArray && decoded.baseArray == expected.baseArray && decoded.mipCount == expected.mipCount && decoded.baseLevel == expected.baseLevel && decoded.lastLevel == expected.lastLevel && decoded.minLod == expected.minLod, reason + " changed texture subresources");
+    Require(decoded.tileMode == expected.tileMode && decoded.dimension == expected.dimension && decoded.viewDimension == expected.viewDimension && decoded.format == expected.format, reason + " changed texture format or layout");
+    Require(decoded.dstSelX == expected.dstSelX && decoded.dstSelY == expected.dstSelY && decoded.dstSelZ == expected.dstSelZ && decoded.dstSelW == expected.dstSelW, reason + " changed texture channel selectors");
+}
+
+template<typename TMutate>
+void requireIgnored(const Fields& base, TMutate mutate, const std::string& reason) {
+    Fields fields = base;
+    mutate(fields);
+    requireSameTexture(DecodeTextureResource(pack(fields)), DecodeTextureResource(pack(base)), reason);
+}
+
 }
 
 void RunGuestTextureResourceTests() {
@@ -99,6 +113,7 @@ void RunGuestTextureResourceTests() {
     Require(result.dimension == TextureDimension::k2D, "decoded dimension changed");
     Require(result.format == 56, "decoded format changed");
     Require(result.dstSelX == 4 && result.dstSelY == 5 && result.dstSelZ == 6 && result.dstSelW == 7, "decoded destination selectors changed");
+    Require(result.minLod == 0.0f, "a descriptor without a minimum LOD decoded one");
 
     Fields wide = base;
     wide.width = 8192;
@@ -175,13 +190,29 @@ void RunGuestTextureResourceTests() {
     zeroAddress.base40 = 0;
     rejectFields(zeroAddress, "null base address");
 
-    Fields badMinLod = base;
-    badMinLod.minLod = 1;
-    rejectFields(badMinLod, "nonzero minimum LOD clamp");
+    Fields badFormat = base;
+    badFormat.format = 2;
+    rejectFields(badFormat, "unsupported guest texture format 2");
 
-    Fields badMinLodWarn = base;
-    badMinLodWarn.minLodWarn = 1;
-    rejectFields(badMinLodWarn, "minimum LOD warning threshold");
+    Fields clampedLod = base;
+    clampedLod.minLod = 0xd4d;
+    Require(DecodeTextureResource(pack(clampedLod)).minLod == static_cast<float>(0xd4d) / 256.0f, "the minimum LOD was not decoded as 4.8 fixed point");
+    clampedLod.minLod = 0x180;
+    Require(DecodeTextureResource(pack(clampedLod)).minLod == 1.5f, "a fractional minimum LOD was not decoded");
+    requireIgnored(base, [](Fields& f) { f.minLodWarn = 0xcd1; }, "a minimum LOD warning threshold");
+
+    Fields streamed = base;
+    streamed.width = 8192;
+    streamed.height = 8192;
+    streamed.tileModeRaw = 0x09;
+    streamed.maxMip = 13;
+    streamed.lastLevel = 13;
+    streamed.minLod = 0xd4d;
+    streamed.minLodWarn = 0xcd1;
+    streamed.mipStatsCntEn = true;
+    streamed.mipStatsCntId = 0x2a;
+    const auto streamedTexture = DecodeTextureResource(pack(streamed));
+    Require(streamedTexture.minLod == static_cast<float>(0xd4d) / 256.0f && streamedTexture.mipCount == 14 && streamedTexture.lastLevel == 13, "a streamed texture with mip statistics counters decoded incorrectly");
 
     const auto unmodulated = DecodeTextureResource(pack(base));
     for (std::uint32_t perfMod = 0; perfMod < 8; ++perfMod) {
@@ -196,20 +227,37 @@ void RunGuestTextureResourceTests() {
         rejectFields(modulated, "corner sampling");
     }
 
-    Fields badMipStats = base;
-    badMipStats.mipStatsCntId = 1;
-    rejectFields(badMipStats, "mip statistics counters");
-    badMipStats = base;
-    badMipStats.mipStatsCntEn = true;
-    rejectFields(badMipStats, "mip statistics counters");
+    requireIgnored(base, [](Fields& f) { f.mipStatsCntEn = true; }, "mip statistics counting");
+    requireIgnored(base, [](Fields& f) { f.mipStatsCntId = 0xff; }, "a mip statistics counter id");
+    requireIgnored(base, [](Fields& f) { f.prtDefColor = true; }, "a partially resident default color");
+    requireIgnored(base, [](Fields& f) { f.maxUncompBlkSize = 3; }, "a DCC maximum uncompressed block size");
+    requireIgnored(base, [](Fields& f) { f.maxCompBlkSize = 3; }, "a DCC maximum compressed block size");
+    requireIgnored(base, [](Fields& f) { f.metaPipeAligned = true; }, "pipe-aligned metadata");
+    requireIgnored(base, [](Fields& f) { f.writeCompress = true; }, "compressed writes");
+    requireIgnored(base, [](Fields& f) { f.metaCompress = true; }, "metadata compression");
+    requireIgnored(base, [](Fields& f) { f.dccAlphaPos = true; }, "the DCC alpha position");
+    requireIgnored(base, [](Fields& f) { f.dccColorTransf = true; }, "the DCC color transform");
+    requireIgnored(base, [](Fields& f) { f.metaAddr = 0xffffffffffull; }, "a metadata address");
+    requireIgnored(base, [](Fields& f) { f.bcSwizzle = 5; }, "a border color swizzle");
+    requireIgnored(base, [](Fields& f) {
+        f.mipStatsCntEn = true;
+        f.mipStatsCntId = 7;
+        f.prtDefColor = true;
+        f.minLodWarn = 0xfff;
+        f.maxUncompBlkSize = 1;
+        f.maxCompBlkSize = 2;
+        f.metaPipeAligned = true;
+        f.writeCompress = true;
+        f.metaCompress = true;
+        f.dccAlphaPos = true;
+        f.dccColorTransf = true;
+        f.metaAddr = 0x123456789aull;
+        f.bcSwizzle = 3;
+    }, "every ignored field at once");
 
     Fields badCorner = base;
     badCorner.cornerSample = true;
     rejectFields(badCorner, "corner sampling");
-
-    Fields badPrt = base;
-    badPrt.prtDefColor = true;
-    rejectFields(badPrt, "partially resident default color");
 
     Fields badPitch = base;
     badPitch.arrayPitch = 1;
@@ -218,36 +266,6 @@ void RunGuestTextureResourceTests() {
     Fields badMsaa = base;
     badMsaa.msaaDepth = true;
     rejectFields(badMsaa, "MSAA");
-
-    Fields badBlockSize = base;
-    badBlockSize.maxUncompBlkSize = 1;
-    rejectFields(badBlockSize, "DCC block size overrides");
-    badBlockSize = base;
-    badBlockSize.maxCompBlkSize = 1;
-    rejectFields(badBlockSize, "DCC block size overrides");
-
-    Fields badMeta = base;
-    badMeta.metaPipeAligned = true;
-    rejectFields(badMeta, "metadata compression");
-    badMeta = base;
-    badMeta.writeCompress = true;
-    rejectFields(badMeta, "metadata compression");
-    badMeta = base;
-    badMeta.metaCompress = true;
-    rejectFields(badMeta, "metadata compression");
-    badMeta = base;
-    badMeta.dccAlphaPos = true;
-    rejectFields(badMeta, "metadata compression");
-    badMeta = base;
-    badMeta.dccColorTransf = true;
-    rejectFields(badMeta, "metadata compression");
-    badMeta = base;
-    badMeta.metaAddr = 1;
-    rejectFields(badMeta, "metadata compression");
-
-    Fields badSwizzle = base;
-    badSwizzle.bcSwizzle = 1;
-    rejectFields(badSwizzle, "BC swizzle");
 
     Fields badLevels = base;
     badLevels.baseLevel = 2;

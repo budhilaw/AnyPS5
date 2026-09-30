@@ -73,6 +73,19 @@ bool nearlyEqual(float a, float b) {
     return std::fabs(a - b) < 0.001f;
 }
 
+bool sameSampler(const GuestSamplerResource& a, const GuestSamplerResource& b) {
+    return a.magFilter == b.magFilter && a.minFilter == b.minFilter && a.mipmapMode == b.mipmapMode && a.addressModeU == b.addressModeU && a.addressModeV == b.addressModeV && a.addressModeW == b.addressModeW
+        && a.anisotropyEnable == b.anisotropyEnable && a.maxAnisotropy == b.maxAnisotropy && a.minLod == b.minLod && a.maxLod == b.maxLod && a.lodBias == b.lodBias && a.borderColor == b.borderColor
+        && a.compareEnable == b.compareEnable && a.compareOp == b.compareOp;
+}
+
+template<typename TMutate>
+void requireIgnored(const Fields& base, TMutate mutate, const std::string& reason) {
+    Fields fields = base;
+    mutate(fields);
+    Require(sameSampler(DecodeSamplerResource(pack(fields)), DecodeSamplerResource(pack(base))), reason + " changed the decoded sampler");
+}
+
 }
 
 void RunGuestSamplerResourceTests() {
@@ -149,25 +162,13 @@ void RunGuestSamplerResourceTests() {
     badUnorm.forceUnormCoords = true;
     rejectFields(badUnorm, "unnormalized coordinates");
 
-    Fields badThreshold = base;
-    badThreshold.anisoThreshold = 1;
-    rejectFields(badThreshold, "anisotropy threshold override");
-
     Fields badSrgb = base;
     badSrgb.forceSrgb = true;
     rejectFields(badSrgb, "forces sRGB decoding");
 
-    Fields badAnisoBias = base;
-    badAnisoBias.anisoBias = 1;
-    rejectFields(badAnisoBias, "anisotropy bias");
-
     Fields badTrunc = base;
     badTrunc.truncCoord = true;
     rejectFields(badTrunc, "coordinate truncation");
-
-    Fields badCubeWrap = base;
-    badCubeWrap.disableCubeWrap = true;
-    rejectFields(badCubeWrap, "seamless cube filtering");
 
     Fields badFilterMode = base;
     badFilterMode.filterMode = 1;
@@ -177,32 +178,42 @@ void RunGuestSamplerResourceTests() {
     badDegamma.disableDegamma = true;
     rejectFields(badDegamma, "disables degamma");
 
-    Fields badPerf = base;
-    badPerf.perfMip = 1;
-    rejectFields(badPerf, "performance counters");
-    badPerf = base;
-    badPerf.perfZ = 1;
-    rejectFields(badPerf, "performance counters");
+    requireIgnored(base, [](Fields& f) { f.perfMip = 0xf; }, "a mip filtering performance setting");
+    requireIgnored(base, [](Fields& f) { f.perfZ = 0xf; }, "a depth filtering performance setting");
+    requireIgnored(base, [](Fields& f) { f.anisoThreshold = 7; }, "an anisotropy threshold");
+    requireIgnored(base, [](Fields& f) { f.anisoBias = 0x3f; }, "an anisotropy bias");
+    requireIgnored(base, [](Fields& f) { f.anisoOverride = true; }, "an anisotropy override");
+    requireIgnored(base, [](Fields& f) { f.lodBiasSec = 0x3f; }, "a secondary LOD bias");
+    requireIgnored(base, [](Fields& f) { f.pointPreclamp = true; }, "point preclamping");
+    requireIgnored(base, [](Fields& f) { f.blendZeroPrt = true; }, "PRT blend-zero");
+    requireIgnored(base, [](Fields& f) { f.disableCubeWrap = true; }, "non-seamless cube filtering");
+    Fields anisotropic = base;
+    anisotropic.xyMagFilter = 2;
+    anisotropic.xyMinFilter = 2;
+    anisotropic.maxAnisoRatio = 3;
+    requireIgnored(anisotropic, [](Fields& f) {
+        f.perfMip = 3;
+        f.perfZ = 5;
+        f.anisoThreshold = 2;
+        f.anisoBias = 9;
+        f.anisoOverride = true;
+    }, "anisotropy and performance settings");
 
-    Fields badLodBiasSec = base;
-    badLodBiasSec.lodBiasSec = 1;
-    rejectFields(badLodBiasSec, "secondary LOD bias");
+    Fields borderTable = base;
+    borderTable.clampX = 4;
+    borderTable.borderColorType = 3;
+    const auto tableBorder = DecodeSamplerResource(pack(borderTable));
+    Require(tableBorder.borderColor == VK_BORDER_COLOR_INT_TRANSPARENT_BLACK && tableBorder.addressModeU == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER, "a border color table entry must sample as transparent black");
 
-    Fields badPreclamp = base;
-    badPreclamp.pointPreclamp = true;
-    rejectFields(badPreclamp, "point preclamping");
-
-    Fields badAnisoOverride = base;
-    badAnisoOverride.anisoOverride = true;
-    rejectFields(badAnisoOverride, "anisotropy override");
-
-    Fields badBlendZero = base;
-    badBlendZero.blendZeroPrt = true;
-    rejectFields(badBlendZero, "PRT blend-zero");
-
-    Fields badBorder = base;
-    badBorder.borderColorType = 3;
-    rejectFields(badBorder, "border color table");
+    Fields shadow = badUnorm;
+    shadow.depthCompareFunc = 6;
+    const auto fallback = FallbackSamplerResource(pack(shadow));
+    Require(fallback.magFilter == VK_FILTER_LINEAR && fallback.minFilter == VK_FILTER_LINEAR && fallback.mipmapMode == VK_SAMPLER_MIPMAP_MODE_LINEAR, "the fallback sampler must filter linearly");
+    Require(fallback.addressModeU == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE && fallback.addressModeV == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE && fallback.addressModeW == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, "the fallback sampler must clamp to the edge");
+    Require(!fallback.anisotropyEnable && fallback.minLod == 0.0f && fallback.maxLod == VK_LOD_CLAMP_NONE && fallback.lodBias == 0.0f, "the fallback sampler must cover every mip level without bias");
+    Require(!fallback.compareEnable && fallback.compareOp == VK_COMPARE_OP_GREATER_OR_EQUAL, "the fallback sampler must keep the descriptor's depth comparison");
+    const std::array<std::uint32_t, 3> truncated{};
+    reject([&] { FallbackSamplerResource(truncated); }, "4 dwords");
 
     Fields opaqueBlack = base;
     opaqueBlack.borderColorType = 1;

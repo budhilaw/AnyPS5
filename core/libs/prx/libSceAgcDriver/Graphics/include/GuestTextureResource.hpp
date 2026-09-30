@@ -33,6 +33,7 @@ struct GuestTextureResource {
     std::uint32_t mipCount;
     std::uint32_t baseLevel;
     std::uint32_t lastLevel;
+    float minLod;
     TextureTileMode tileMode;
     TextureDimension dimension;
     TextureDimension viewDimension;

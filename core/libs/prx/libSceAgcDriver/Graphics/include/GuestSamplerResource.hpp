@@ -28,6 +28,7 @@ struct GuestSamplerResource {
 };
 
 GuestSamplerResource DecodeSamplerResource(std::span<const std::uint32_t> words);
+GuestSamplerResource FallbackSamplerResource(std::span<const std::uint32_t> words);
 
 }
 

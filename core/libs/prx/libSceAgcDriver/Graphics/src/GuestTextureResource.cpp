@@ -1,10 +1,14 @@
 #include "prx/libSceAgcDriver/Graphics/include/GuestTextureResource.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/TextureFormat.hpp"
 #include "prx/libc/include/General.hpp"
+#include <array>
 #include <mutex>
 #include "prx/libSceAgcDriver/Graphics/include/Context.hpp"
 #include <stdexcept>
 #include <cstdio>
 #include <string>
+#include <tuple>
+#include <utility>
 
 namespace AgcDriver::Graphics {
 
@@ -88,18 +92,28 @@ GuestTextureResource DecodeTextureResource(std::span<const std::uint32_t> words)
     requireValidDstSel(dstSelZ);
     requireValidDstSel(dstSelW);
 
-    if (minLod != 0 || minLodWarn != 0) {
-        static std::once_flag once;
-        std::call_once(once, [&] { APS5_LOG_OUT("guest texture descriptors use a minimum LOD clamp (0x%x, warn 0x%x); sampling ignores it", static_cast<unsigned>(minLod), static_cast<unsigned>(minLodWarn)); });
+    const std::array<std::pair<const char*, std::uint64_t>, 13> ignoredFields{{
+        {"mip statistics counting", mipStatsCntEn},
+        {"a mip statistics counter id", mipStatsCntId},
+        {"a partially resident default color", prtDefColor},
+        {"a minimum LOD warning threshold", minLodWarn},
+        {"a DCC maximum uncompressed block size", maxUncompBlkSize},
+        {"a DCC maximum compressed block size", maxCompBlkSize},
+        {"pipe-aligned metadata", metaPipeAligned},
+        {"compressed writes", writeCompress},
+        {"metadata compression", metaCompress},
+        {"the DCC alpha position", dccAlphaPos},
+        {"the DCC color transform", dccColorTransf},
+        {"a metadata address", metaAddr},
+        {"a border color swizzle", bcSwizzle}
+    }};
+    static std::array<std::once_flag, std::tuple_size_v<decltype(ignoredFields)>> ignoredOnce;
+    for (std::size_t field = 0; field < ignoredFields.size(); ++field) {
+        if (ignoredFields[field].second != 0) std::call_once(ignoredOnce[field], [&] { APS5_LOG_OUT("guest texture descriptors use %s (0x%llx); the driver ignores it", ignoredFields[field].first, static_cast<unsigned long long>(ignoredFields[field].second)); });
     }
-    Require(mipStatsCntId == 0 && !mipStatsCntEn, "guest texture descriptor uses mip statistics counters which are not implemented");
     Require(!cornerSample, "guest texture descriptor uses corner sampling which is not implemented");
-    Require(!prtDefColor, "guest texture descriptor uses a partially resident default color which is not implemented");
     Require(arrayPitch == 0, "guest texture descriptor uses a nonzero array pitch which is not implemented");
     Require(!msaaDepth, "guest texture descriptor uses MSAA which is not implemented");
-    Require(maxUncompBlkSize == 0 && maxCompBlkSize == 0, "guest texture descriptor uses DCC block size overrides which are not implemented");
-    Require(!metaPipeAligned && !writeCompress && !metaCompress && !dccAlphaPos && !dccColorTransf && metaAddr == 0, "guest texture descriptor uses metadata compression which is not implemented");
-    Require(bcSwizzle == 0, "guest texture descriptor uses a BC swizzle which is not implemented");
 
     Require(baseLevel <= lastLevel, "guest texture descriptor has a base mip level past its last mip level");
     Require(lastLevel <= maxMip, "guest texture descriptor exposes mip levels past the surface");
@@ -109,6 +123,7 @@ GuestTextureResource DecodeTextureResource(std::span<const std::uint32_t> words)
     try {
         tileMode = resolveTileMode(tileModeRaw);
         dimension = resolveDimension(typeRaw);
+        static_cast<void>(ResolveTextureFormat(format));
     } catch (const std::runtime_error& error) {
         char detail[200];
         std::snprintf(detail, sizeof(detail), " (%ux%u format 0x%x type %u mips %u-%u/%u words {%08x %08x %08x %08x %08x %08x %08x %08x})", width, height, format, typeRaw, baseLevel, lastLevel, maxMip, words[0], words[1], words[2], words[3], words[4], words[5], words[6], words[7]);
@@ -144,6 +159,7 @@ GuestTextureResource DecodeTextureResource(std::span<const std::uint32_t> words)
     result.mipCount = maxMip + 1u;
     result.baseLevel = baseLevel;
     result.lastLevel = lastLevel;
+    result.minLod = static_cast<float>(minLod) / 256.0f;
     result.tileMode = tileMode;
     result.dimension = dimension;
     result.viewDimension = dimension;

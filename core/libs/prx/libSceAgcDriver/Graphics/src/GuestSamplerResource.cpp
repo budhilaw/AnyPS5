@@ -1,12 +1,21 @@
 #include "prx/libSceAgcDriver/Graphics/include/GuestSamplerResource.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Context.hpp"
+#include "prx/libc/include/General.hpp"
 #include <array>
+#include <mutex>
 #include <stdexcept>
 #include <string>
+#include <tuple>
+#include <utility>
 
 namespace AgcDriver::Graphics {
 
 namespace {
+
+VkCompareOp toVkCompareOp(std::uint32_t raw) {
+    const std::array compareOps{VK_COMPARE_OP_NEVER, VK_COMPARE_OP_LESS, VK_COMPARE_OP_EQUAL, VK_COMPARE_OP_LESS_OR_EQUAL, VK_COMPARE_OP_GREATER, VK_COMPARE_OP_NOT_EQUAL, VK_COMPARE_OP_GREATER_OR_EQUAL, VK_COMPARE_OP_ALWAYS};
+    return compareOps.at(raw);
+}
 
 VkFilter toVkFilter(std::uint32_t raw) {
     switch (raw) {
@@ -72,22 +81,31 @@ GuestSamplerResource DecodeSamplerResource(std::span<const std::uint32_t> words)
     const auto anisoOverride = ((words[2] >> 29u) & 0x1u) != 0;
     const auto blendZeroPrt = ((words[2] >> 30u) & 0x1u) != 0;
 
+    const auto borderColorPtr = words[3] & 0xfffu;
     const auto borderColorType = (words[3] >> 30u) & 0x3u;
 
     Require(!forceUnormCoords, "guest sampler descriptor uses unnormalized coordinates which are not implemented");
-    Require(anisoThreshold == 0, "guest sampler descriptor uses an anisotropy threshold override which is not implemented");
     Require(!forceSrgb, "guest sampler descriptor forces sRGB decoding which is not implemented");
-    Require(anisoBias == 0, "guest sampler descriptor uses an anisotropy bias which is not implemented");
     Require(!truncCoord, "guest sampler descriptor uses coordinate truncation which is not implemented");
-    Require(!disableCubeWrap, "guest sampler descriptor disables seamless cube filtering which is not implemented");
     Require(filterMode == 0, "guest sampler descriptor uses a reduction filter mode which is not implemented");
     Require(!disableDegamma, "guest sampler descriptor disables degamma which is not implemented");
-    Require(perfMip == 0 && perfZ == 0, "guest sampler descriptor uses performance counters which are not implemented");
-    Require(lodBiasSec == 0, "guest sampler descriptor uses a secondary LOD bias which is not implemented");
-    Require(!pointPreclamp, "guest sampler descriptor uses point preclamping which is not implemented");
-    Require(!anisoOverride, "guest sampler descriptor uses an anisotropy override which is not implemented");
-    Require(!blendZeroPrt, "guest sampler descriptor uses PRT blend-zero which is not implemented");
     Require(mipFilter <= 2u, "guest sampler descriptor uses an unknown mip filter " + std::to_string(mipFilter));
+
+    const std::array<std::pair<const char*, std::uint32_t>, 9> ignoredFields{{
+        {"a mip filtering performance setting", perfMip},
+        {"a depth filtering performance setting", perfZ},
+        {"an anisotropy threshold", anisoThreshold},
+        {"an anisotropy bias", anisoBias},
+        {"an anisotropy override", anisoOverride},
+        {"a secondary LOD bias", lodBiasSec},
+        {"point preclamping", pointPreclamp},
+        {"PRT blend-zero", blendZeroPrt},
+        {"non-seamless cube filtering", disableCubeWrap}
+    }};
+    static std::array<std::once_flag, std::tuple_size_v<decltype(ignoredFields)>> ignoredOnce;
+    for (std::size_t field = 0; field < ignoredFields.size(); ++field) {
+        if (ignoredFields[field].second != 0) std::call_once(ignoredOnce[field], [&] { APS5_LOG_OUT("guest sampler descriptors use %s (0x%x); the driver ignores it", ignoredFields[field].first, ignoredFields[field].second); });
+    }
 
     const auto aniso = isAnisoFilter(xyMagFilter) || isAnisoFilter(xyMinFilter);
     auto anisoRatio = 1.0f;
@@ -110,7 +128,11 @@ GuestSamplerResource DecodeSamplerResource(std::span<const std::uint32_t> words)
         case 0: border = VK_BORDER_COLOR_INT_TRANSPARENT_BLACK; break;
         case 1: border = VK_BORDER_COLOR_INT_OPAQUE_BLACK; break;
         case 2: border = VK_BORDER_COLOR_INT_OPAQUE_WHITE; break;
-        default: throw std::runtime_error("AGC graphics: guest sampler descriptor uses a border color table which is not implemented");
+        default: {
+            static std::once_flag once;
+            std::call_once(once, [&] { APS5_LOG_OUT("guest sampler descriptors use border color table entry %u; their borders are transparent black", borderColorPtr); });
+            border = VK_BORDER_COLOR_INT_TRANSPARENT_BLACK;
+        }
     }
 
     GuestSamplerResource result{};
@@ -126,8 +148,26 @@ GuestSamplerResource DecodeSamplerResource(std::span<const std::uint32_t> words)
     result.maxLod = maxLod;
     result.lodBias = toSignedLodBias(lodBiasRaw);
     result.borderColor = border;
-    const std::array compareOps{VK_COMPARE_OP_NEVER, VK_COMPARE_OP_LESS, VK_COMPARE_OP_EQUAL, VK_COMPARE_OP_LESS_OR_EQUAL, VK_COMPARE_OP_GREATER, VK_COMPARE_OP_NOT_EQUAL, VK_COMPARE_OP_GREATER_OR_EQUAL, VK_COMPARE_OP_ALWAYS};
-    result.compareOp = compareOps.at(depthCompareFunc);
+    result.compareOp = toVkCompareOp(depthCompareFunc);
+    return result;
+}
+
+GuestSamplerResource FallbackSamplerResource(std::span<const std::uint32_t> words) {
+    Require(words.size() == 4, "guest sampler descriptor must contain 4 dwords");
+    GuestSamplerResource result{};
+    result.magFilter = VK_FILTER_LINEAR;
+    result.minFilter = VK_FILTER_LINEAR;
+    result.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    result.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    result.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    result.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    result.anisotropyEnable = false;
+    result.maxAnisotropy = 1.0f;
+    result.minLod = 0.0f;
+    result.maxLod = VK_LOD_CLAMP_NONE;
+    result.lodBias = 0.0f;
+    result.borderColor = VK_BORDER_COLOR_INT_TRANSPARENT_BLACK;
+    result.compareOp = toVkCompareOp((words[0] >> 12u) & 0x7u);
     return result;
 }
 
