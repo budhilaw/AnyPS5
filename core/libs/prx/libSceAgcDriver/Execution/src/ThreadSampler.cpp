@@ -33,12 +33,26 @@ struct Module {
     std::uintptr_t imageBase;
 };
 
+struct Chain {
+    std::array<std::uintptr_t, 4> frames{};
+    bool operator==(const Chain& other) const { return frames == other.frames; }
+};
+
+struct ChainHash {
+    std::size_t operator()(const Chain& chain) const noexcept {
+        std::size_t hash = 1469598103934665603ull;
+        for (const auto frame : chain.frames) hash = (hash ^ frame) * 1099511628211ull;
+        return hash;
+    }
+};
+
 struct Target {
     HANDLE thread;
     std::string name;
     std::uint64_t samples = 0;
     std::unordered_map<std::uintptr_t, std::uint64_t> self;
     std::unordered_map<std::uintptr_t, std::uint64_t> inclusive;
+    std::unordered_map<Chain, std::uint64_t, ChainHash> chains;
 };
 
 struct Sampler {
@@ -114,9 +128,25 @@ void report(Target& target, const std::vector<Module>& modules) {
     std::fprintf(stderr, "[sample] %s window %llu samples\n", target.name.c_str(), static_cast<unsigned long long>(target.samples));
     print("self", target.self);
     print("incl", target.inclusive);
+    std::vector<std::pair<std::uint64_t, const Chain*>> chains;
+    chains.reserve(target.chains.size());
+    for (const auto& [chain, count] : target.chains) chains.emplace_back(count, &chain);
+    std::sort(chains.begin(), chains.end(), [](const auto& left, const auto& right) { return left.first > right.first; });
+    for (std::size_t i = 0; i < chains.size() && i < 80; ++i) {
+        std::string text;
+        for (const auto frame : chains[i].second->frames) {
+            if (frame == 0) break;
+            char where[160];
+            describe(modules, frame, where, sizeof(where));
+            text += text.empty() ? "" : " <- ";
+            text += where;
+        }
+        std::fprintf(stderr, "[sample] %s chain %llu %s\n", target.name.c_str(), static_cast<unsigned long long>(chains[i].first), text.c_str());
+    }
     target.samples = 0;
     target.self.clear();
     target.inclusive.clear();
+    target.chains.clear();
 }
 
 void run() {
@@ -148,13 +178,18 @@ void run() {
             if (!captured) continue;
             ++target->samples;
             ++target->self[context.Rip];
+            Chain chain;
+            chain.frames[0] = context.Rip;
+            std::size_t depth = 1;
             std::size_t unique = 0;
             for (std::size_t i = 0; i < words && unique < seen.size(); ++i) {
                 const auto value = stack[i];
                 if (!followsCall(modules, value) || std::find(seen.begin(), seen.begin() + unique, value) != seen.begin() + unique) continue;
                 seen[unique++] = value;
                 ++target->inclusive[value];
+                if (depth < chain.frames.size()) chain.frames[depth++] = value;
             }
+            ++target->chains[chain];
         }
         const auto now = std::chrono::steady_clock::now();
         if (now - refreshed > std::chrono::seconds(5)) {
