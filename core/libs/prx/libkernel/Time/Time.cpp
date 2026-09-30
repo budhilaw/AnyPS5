@@ -4,6 +4,8 @@
 #include "prx/libc/include/PreciseSleep.hpp"
 #include <cerrno>
 #include <cstdint>
+#include <cstdlib>
+#include <optional>
 #include <thread>
 #include <ctime>
 #include <chrono>
@@ -18,6 +20,10 @@
 #endif
 #if defined(__APPLE__)
 #include <mach/mach_time.h>
+#endif
+#if defined(__x86_64__)
+#include <cpuid.h>
+#include <x86intrin.h>
 #endif
 
 static std::uint64_t GetMonotonicNanos() {
@@ -53,6 +59,78 @@ static std::uint64_t GetStartNanos() {
 static void SleepNanos(std::uint64_t nanos) {
     PreciseSleepNanos_nid_no_patch(nanos);
 }
+
+struct TscClock {
+    bool calibrated;
+    std::uint64_t frequency;
+};
+
+static constexpr TscClock LegacyTsc{false, 1000000000ULL};
+
+#if defined(__x86_64__)
+static constexpr std::uint64_t MinimumTscFrequency = 100000000ULL;
+static constexpr std::uint64_t MaximumTscFrequency = 10000000000ULL;
+static constexpr std::uint64_t TscCalibrationNanos = 100000000ULL;
+
+struct TscSample {
+    std::uint64_t tsc;
+    std::uint64_t nanos;
+};
+
+static bool HasInvariantTsc() {
+    unsigned int eax = 0, ebx = 0, ecx = 0, edx = 0;
+    return __get_cpuid(0x80000007u, &eax, &ebx, &ecx, &edx) != 0 && (edx & (1u << 8)) != 0;
+}
+
+static std::optional<TscSample> SampleTsc() {
+    std::optional<TscSample> best;
+    std::uint64_t bestWidth = 0;
+    for (int attempt = 0; attempt < 16; ++attempt) {
+        const std::uint64_t before = __rdtsc();
+        const std::uint64_t nanos = GetMonotonicNanos();
+        const std::uint64_t after = __rdtsc();
+        if (after < before || (best && after - before >= bestWidth)) continue;
+        bestWidth = after - before;
+        best = TscSample{before + bestWidth / 2, nanos};
+    }
+    return best;
+}
+
+static std::uint64_t CalibrateTscFrequency() {
+    const auto first = SampleTsc();
+    SleepNanos(TscCalibrationNanos);
+    const auto second = SampleTsc();
+    if (!first || !second || second->tsc <= first->tsc || second->nanos <= first->nanos) return 0;
+    return static_cast<std::uint64_t>(static_cast<unsigned __int128>(second->tsc - first->tsc) * 1000000000ULL / (second->nanos - first->nanos));
+}
+#endif
+
+static TscClock SelectTscClock() {
+    if (std::getenv("ANYPS5_LEGACY_TSC") != nullptr) {
+        APS5_LOG_CHARS_OUT("TSC: ANYPS5_LEGACY_TSC is set, reporting the 1 GHz nanosecond clock");
+        return LegacyTsc;
+    }
+#if defined(__x86_64__)
+    if (!HasInvariantTsc()) {
+        APS5_LOG_CHARS_ERR("TSC: the host CPU reports no invariant TSC, reporting the 1 GHz nanosecond clock; guest RDTSC timing may run at the wrong speed");
+        return LegacyTsc;
+    }
+    const std::uint64_t start = GetMonotonicNanos();
+    const std::uint64_t frequency = CalibrateTscFrequency();
+    const double milliseconds = static_cast<double>(GetMonotonicNanos() - start) / 1000000.0;
+    if (frequency < MinimumTscFrequency || frequency > MaximumTscFrequency) {
+        APS5_LOG_ERR("TSC: calibration measured %llu Hz, outside 100 MHz to 10 GHz, reporting the 1 GHz nanosecond clock; guest RDTSC timing may run at the wrong speed", static_cast<unsigned long long>(frequency));
+        return LegacyTsc;
+    }
+    APS5_LOG_OUT("TSC frequency %.3f MHz (calibrated over %.1f ms)", static_cast<double>(frequency) / 1000000.0, milliseconds);
+    return TscClock{true, frequency};
+#else
+    APS5_LOG_CHARS_OUT("TSC: this host has no x86-64 TSC, reporting the 1 GHz nanosecond clock");
+    return LegacyTsc;
+#endif
+}
+
+static const TscClock tscClock = SelectTscClock();
 
 static constexpr int SCE_KERNEL_ERROR_EINVAL = 0x80020016;
 
@@ -307,11 +385,14 @@ int APS5_VABI sceKernelGettimezone(KernelTimezone* tz) {
 }
 
 uint64_t APS5_VABI sceKernelReadTsc(void) {
+#if defined(__x86_64__)
+    if (tscClock.calibrated) return __rdtsc();
+#endif
     return GetMonotonicNanos();
 }
 
 uint64_t APS5_VABI sceKernelGetTscFrequency(void) {
-    return 1000000000ull;
+    return tscClock.frequency;
 }
 
 unsigned int APS5_VABI sceKernelSleep(unsigned int seconds) {
