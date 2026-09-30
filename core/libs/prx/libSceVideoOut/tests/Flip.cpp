@@ -6,11 +6,15 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver.hpp"
 #include "prx/libSceAgcDriver/Submit/include/Dcb.hpp"
 #include "prx/libc/include/Shutdown.hpp"
+#include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
+#include <optional>
 #include <string>
 #include <limits>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -160,6 +164,101 @@ void testDecode() {
     expectFailure([&] { AgcDriver::DisplayBufferSize(buffer); });
 }
 
+std::chrono::steady_clock::duration vblankTicks(std::uint64_t count) {
+    return std::chrono::duration_cast<std::chrono::steady_clock::duration>(VblankTick(static_cast<std::int64_t>(count)));
+}
+
+std::uint64_t pacedFlipVblanks(int flips, std::chrono::steady_clock::duration present) {
+    VblankClock clock(std::chrono::steady_clock::time_point{});
+    auto now = std::chrono::steady_clock::time_point{};
+    std::uint64_t vblank = 0;
+    std::uint64_t lastFlipVblank = 0;
+    std::uint64_t firstLatch = 0;
+    for (int flip = 0; flip < flips; ++flip) {
+        while (vblank < lastFlipVblank + 1) {
+            now = std::max(now, clock.Deadline());
+            vblank += clock.Advance(now);
+        }
+        const auto latch = vblank;
+        if (flip == 0) firstLatch = latch;
+        now += present;
+        while (clock.Deadline() <= now) vblank += clock.Advance(clock.Deadline());
+        lastFlipVblank = latch;
+    }
+    return lastFlipVblank - firstLatch;
+}
+
+void testPacing() {
+    constexpr std::uint64_t slow = VblankTicksAt59_94Hz;
+    constexpr std::uint64_t fast = VblankTicksAt119_88Hz;
+    constexpr std::uint64_t onTime = 60000;
+    const std::chrono::steady_clock::time_point start{};
+    VblankClock clock(start);
+    check(clock.Deadline() == start + vblankTicks(slow), "the first vblank is not one 59.94 Hz period after the start");
+    for (std::uint64_t vblank = 0; vblank < onTime; ++vblank) check(clock.Advance(clock.Deadline()) == 1, "an on-time wake did not advance the vblank count by one");
+    check(clock.Deadline() == start + vblankTicks(slow * (onTime + 1)), "the 59.94 Hz vblank grid drifted");
+    check(clock.Advance(clock.Deadline() + vblankTicks(slow * 5 / 2)) == 3, "a wake two and a half periods late did not catch up in one step");
+    check(clock.Deadline() == start + vblankTicks(slow * (onTime + 4)), "a late wake moved the vblank grid");
+    check(clock.Advance(clock.Deadline() - std::chrono::milliseconds(1)) == 1 && clock.Deadline() == start + vblankTicks(slow * (onTime + 5)), "an early wake moved the vblank grid");
+    const auto switched = start + vblankTicks(slow * (onTime + 4));
+    clock.SetTicksPerVblank(fast);
+    check(clock.Deadline() == switched + vblankTicks(fast), "119.88 Hz did not continue from the last vblank");
+    for (std::uint64_t vblank = 0; vblank < onTime; ++vblank) check(clock.Advance(clock.Deadline()) == 1, "an on-time 119.88 Hz wake did not advance the vblank count by one");
+    check(clock.Deadline() == switched + vblankTicks(fast * (onTime + 1)), "the 119.88 Hz vblank grid drifted");
+    clock.SetTicksPerVblank(fast);
+    check(clock.Deadline() == switched + vblankTicks(fast * (onTime + 1)), "keeping the rate moved the vblank grid");
+    clock.SetTicksPerVblank(slow);
+    check(clock.Deadline() == switched + vblankTicks(fast * onTime) + vblankTicks(slow), "59.94 Hz did not continue from the last vblank");
+    const auto period = vblankTicks(VblankTicksAt59_94Hz);
+    check(pacedFlipVblanks(101, period * 9 / 10) == 100, "flips whose present fits in a vblank were not shown on every vblank");
+    check(pacedFlipVblanks(101, period * 5 / 4) <= 126, "a present longer than a vblank cost the next flip an extra vblank");
+}
+
+void checkVblankRate(int handle, const std::shared_ptr<VideoOutConfig>& cfg, double rate, const char* reason) {
+    check(sceVideoOutWaitVblank(handle) == 0, "vblank wait failed");
+    const auto sample = [&] {
+        std::lock_guard lock(cfg->mutex);
+        return std::pair{cfg->vblankStatus.count, std::chrono::steady_clock::now()};
+    };
+    const auto [firstCount, firstTime] = sample();
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    const auto [lastCount, lastTime] = sample();
+    const auto expected = std::chrono::duration<double>(lastTime - firstTime).count() * rate;
+    check(std::abs(static_cast<double>(lastCount - firstCount) - expected) <= 3.0, reason);
+}
+
+void checkVblankCatchUp(int handle, const std::shared_ptr<VideoOutConfig>& cfg, const KernelEqueueRef& events) {
+    KernelEvent event{};
+    std::uint64_t stalledCount = 0;
+    std::chrono::steady_clock::time_point stalledAt;
+    {
+        std::lock_guard lock(cfg->mutex);
+        while (events->GetTriggeredEvents(&event, 1) == 1) {}
+        stalledCount = cfg->vblankStatus.count;
+        stalledAt = std::chrono::steady_clock::now();
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
+    check(sceVideoOutWaitVblank(handle) == 0 && sceVideoOutWaitVblank(handle) == 0, "vblank wait failed");
+    std::uint64_t count = 0;
+    std::chrono::steady_clock::time_point now;
+    {
+        std::lock_guard lock(cfg->mutex);
+        count = cfg->vblankStatus.count;
+        now = std::chrono::steady_clock::now();
+    }
+    const auto expected = std::chrono::duration<double>(now - stalledAt).count() * 60000.0 / 1001.0;
+    check(std::abs(static_cast<double>(count - stalledCount) - expected) <= 3.0, "the vblank count did not catch up with the vblanks a stalled vblank thread missed");
+    std::uint64_t previous = stalledCount;
+    std::uint64_t largestStep = 0;
+    while (events->GetTriggeredEvents(&event, 1) == 1) {
+        int64_t signalled = 0;
+        check(sceVideoOutGetEventId(&event) == VIDEO_OUT_EVENT_VBLANK && sceVideoOutGetEventData(&event, &signalled) == 0 && static_cast<std::uint64_t>(signalled) > previous, "vblank events after a stall are missing or out of order");
+        largestStep = std::max(largestStep, static_cast<std::uint64_t>(signalled) - previous);
+        previous = static_cast<std::uint64_t>(signalled);
+    }
+    check(largestStep >= 5, "a stalled vblank thread signalled the vblanks it missed one event at a time");
+}
+
 void testControls() {
     const auto handle = sceVideoOutOpen(255, 0, 0, nullptr);
     const auto cfg = VideoOutDriver::Get().GetConfig(handle);
@@ -186,6 +285,17 @@ void testControls() {
     for (const int flipMode : {3, VIDEO_OUT_FLIP_MODE_VSYNC_MULTI}) {
         check(expectFailure([&] { sceVideoOutSubmitFlip(handle, VIDEO_OUT_BUFFER_INDEX_BLANK, flipMode, 0); }).find("flip mode not implemented") != std::string::npos, "unimplemented flip mode was accepted");
     }
+    checkVblankRate(handle, cfg, 60000.0 / 1001.0, "the vblank count did not advance at 59.94 Hz");
+    {
+        std::lock_guard lock(cfg->mutex);
+        cfg->outputMode = VIDEO_OUT_OUTPUT_MODE_119_88HZ;
+    }
+    checkVblankRate(handle, cfg, 120000.0 / 1001.0, "the vblank count did not switch to 119.88 Hz");
+    {
+        std::lock_guard lock(cfg->mutex);
+        cfg->outputMode = VIDEO_OUT_OUTPUT_MODE_DEFAULT;
+    }
+    checkVblankRate(handle, cfg, 60000.0 / 1001.0, "the vblank count did not switch back to 59.94 Hz");
     check(sceVideoOutAddVblankEvent(queue, handle, nullptr) == 0 && sceVideoOutAddVblankEvent(queue, handle, &settings) == 0, "vblank subscription failed");
     {
         std::lock_guard lock(cfg->mutex);
@@ -193,10 +303,53 @@ void testControls() {
     }
     check(sceVideoOutWaitVblank(handle) == 0, "vblank wait failed");
     check(owner->GetTriggeredEvents(&event, 1) == 1 && event.udata == &settings && sceVideoOutGetEventId(&event) == VIDEO_OUT_EVENT_VBLANK, "vblank event or updated user data missing");
+    checkVblankCatchUp(handle, cfg, owner);
     sceVideoOutClose(handle);
     check(owner->GetTriggeredEvents(&event, 1) == 0, "closed port retained pending events");
     check(sceKernelDeleteEqueue(queue) == 0, "event queue deletion failed");
     LibcRunShutdown_nid_postfix();
+}
+
+void checkLatchedVblank(const VideoOutConfig& cfg, std::uint64_t submittedVblank, std::chrono::steady_clock::time_point submitted) {
+    check(cfg.lastFlipLatch >= submitted, "flip latched before it was submitted");
+    const auto vblanks = std::chrono::duration<double>(cfg.lastFlipLatch - submitted).count() * 60000.0 / 1001.0;
+    check(std::abs(static_cast<double>(cfg.lastFlipVblank) - static_cast<double>(submittedVblank) - vblanks) <= 3.0, "the last flip vblank is not the vblank count at which the flip latched");
+}
+
+void checkBackToBackFlips(int handle, const std::shared_ptr<VideoOutConfig>& cfg, const KernelEqueueRef& events) {
+    for (int attempt = 0; attempt < 10; ++attempt) {
+        std::uint64_t completed = 0;
+        std::uint64_t submittedVblank = 0;
+        std::chrono::steady_clock::time_point submitted;
+        {
+            std::lock_guard lock(cfg->mutex);
+            completed = cfg->flipStatus.count;
+            submittedVblank = cfg->vblankStatus.count;
+            submitted = std::chrono::steady_clock::now();
+        }
+        sceVideoOutSubmitFlip(handle, 0, VIDEO_OUT_FLIP_MODE_VSYNC, 1);
+        sceVideoOutSubmitFlip(handle, 0, VIDEO_OUT_FLIP_MODE_VSYNC, 2);
+        std::optional<std::uint64_t> firstLatch;
+        std::uint64_t secondLatch = 0;
+        {
+            std::unique_lock lock(cfg->mutex);
+            check(cfg->vblankCond.wait_for(lock, std::chrono::seconds(15), [&] {
+                if (cfg->flipStatus.count == completed + 1) firstLatch = cfg->lastFlipVblank;
+                return cfg->failure != nullptr || cfg->flipStatus.count == completed + 2;
+            }), "back-to-back flips did not complete");
+            if (cfg->failure) std::rethrow_exception(cfg->failure);
+            check(cfg->flipStatus.flipPendingNum == 0 && cfg->bufferPending[0] == 0, "back-to-back flips left pending state");
+            checkLatchedVblank(*cfg, submittedVblank, submitted);
+            secondLatch = cfg->lastFlipVblank;
+        }
+        std::array<KernelEvent, 2> flipEvents{};
+        std::array<int64_t, 2> arguments{};
+        check(events->GetTriggeredEvents(flipEvents.data(), 2) == 2 && sceVideoOutGetEventData(&flipEvents[0], &arguments[0]) == 0 && sceVideoOutGetEventData(&flipEvents[1], &arguments[1]) == 0 && arguments[0] == 1 && arguments[1] == 2, "back-to-back flip events are missing or out of order");
+        if (!firstLatch) continue;
+        check(secondLatch >= *firstLatch + 1 && secondLatch <= *firstLatch + 2, "back-to-back flips at flip rate 0 did not latch on consecutive vblanks");
+        return;
+    }
+    throw std::runtime_error("the first of two back-to-back flips was never seen complete");
 }
 
 void testPresentation(bool expectUnavailable) {
@@ -224,11 +377,15 @@ void testPresentation(bool expectUnavailable) {
     for (const auto& [index, flipMode] : flips) {
         uint64_t target;
         uint64_t previousVblank;
+        uint64_t submittedVblank;
+        std::chrono::steady_clock::time_point submitted;
         {
             std::lock_guard lock(cfg->mutex);
             if (flipMode == VIDEO_OUT_FLIP_MODE_HSYNC) cfg->lastFlipVblank = cfg->vblankStatus.count + 1000000;
             target = cfg->flipStatus.count + 1;
             previousVblank = cfg->lastFlipVblank;
+            submittedVblank = cfg->vblankStatus.count;
+            submitted = std::chrono::steady_clock::now();
         }
         sceVideoOutSubmitFlip(handle, index, flipMode, -123456789);
         std::unique_lock lock(cfg->mutex);
@@ -247,6 +404,7 @@ void testPresentation(bool expectUnavailable) {
         check(cfg->flipStatus.flipArg == -123456789 && cfg->flipStatus.currentBuffer == index && cfg->flipStatus.flipPendingNum == 0 && (index < 0 || cfg->bufferPending[index] == 0), "presentation status is wrong");
         if (flipMode == VIDEO_OUT_FLIP_MODE_HSYNC) check(cfg->lastFlipVblank < previousVblank, "immediate flip waited for the flip rate");
         else check(cfg->lastFlipVblank >= previousVblank + 3, "flip rate did not wait for its interval");
+        checkLatchedVblank(*cfg, submittedVblank, submitted);
         lock.unlock();
         KernelEvent event{};
         int64_t argument = 0;
@@ -255,6 +413,8 @@ void testPresentation(bool expectUnavailable) {
         attribute.height = 33;
         sceVideoOutSubmitChangeBufferAttribute2(handle, 0, &attribute, nullptr);
     }
+    sceVideoOutSetFlipRate(handle, 0);
+    checkBackToBackFlips(handle, cfg, owner);
     sceVideoOutUnregisterBuffers(handle, 0);
     sceVideoOutClose(handle);
     check(sceKernelDeleteEqueue(queue) == 0, "event queue deletion failed");
@@ -264,6 +424,7 @@ void testPresentation(bool expectUnavailable) {
 int run(int argc, char** argv) {
     try {
         if (argc == 2 && std::string(argv[1]) == "decode") testDecode();
+        else if (argc == 2 && std::string(argv[1]) == "pacing") testPacing();
         else if (argc == 2 && std::string(argv[1]) == "controls") testControls();
         else if (argc == 2 && std::string(argv[1]) == "present") testPresentation(false);
         else if (argc == 2 && std::string(argv[1]) == "unavailable") testPresentation(true);

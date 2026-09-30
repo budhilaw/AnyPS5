@@ -67,6 +67,43 @@ static constexpr uint64_t VIDEO_OUT_OUTPUT_MODE_119_88HZ = 0x000000000000000FULL
 static constexpr uint64_t VIDEO_OUT_REFRESH_RATE_59_94HZ = 3;
 static constexpr uint64_t VIDEO_OUT_REFRESH_RATE_119_88HZ = 13;
 
+using VblankTick = std::chrono::duration<std::int64_t, std::ratio<1001, 120000>>;
+
+inline constexpr std::uint64_t VblankTicksAt59_94Hz = 2;
+inline constexpr std::uint64_t VblankTicksAt119_88Hz = 1;
+
+class VblankClock {
+public:
+    explicit VblankClock(std::chrono::steady_clock::time_point start) : epoch(start) {}
+
+    std::chrono::steady_clock::time_point Deadline() const {
+        return epoch + since(vblanks + 1);
+    }
+
+    std::uint64_t Advance(std::chrono::steady_clock::time_point now) {
+        const auto elapsed = now > epoch ? static_cast<std::uint64_t>((now - epoch) / VblankTick(static_cast<std::int64_t>(ticksPerVblank))) : 0;
+        const auto advance = elapsed > vblanks ? elapsed - vblanks : 1;
+        vblanks += advance;
+        return advance;
+    }
+
+    void SetTicksPerVblank(std::uint64_t ticks) {
+        if (ticks == ticksPerVblank) return;
+        epoch += since(vblanks);
+        vblanks = 0;
+        ticksPerVblank = ticks;
+    }
+
+private:
+    std::chrono::steady_clock::duration since(std::uint64_t count) const {
+        return std::chrono::duration_cast<std::chrono::steady_clock::duration>(VblankTick(static_cast<std::int64_t>(count * ticksPerVblank)));
+    }
+
+    std::chrono::steady_clock::time_point epoch;
+    std::uint64_t vblanks = 0;
+    std::uint64_t ticksPerVblank = VblankTicksAt59_94Hz;
+};
+
 struct VideoOutBuffer {
     int groupIndex = -1;
     uint64_t dataAddress = 0;
@@ -106,6 +143,7 @@ struct VideoOutConfig {
     std::exception_ptr failure;
     int flipRate = 0;
     uint64_t lastFlipVblank = 0;
+    std::chrono::steady_clock::time_point lastFlipLatch{};
     AgcDriver::FrameTiming::Clock::time_point lastTimingFlip{};
     uint64_t outputMode = VIDEO_OUT_OUTPUT_MODE_DEFAULT;
     float gamma = 1.0f;
@@ -137,6 +175,8 @@ struct FlipRequest final : AgcDriver::IFlipRequest, std::enable_shared_from_this
     int flipMode = 0;
     int flipRate = 0;
     int64_t flipArg = 0;
+    std::uint64_t latchVblank = 0;
+    std::chrono::steady_clock::time_point latchTime{};
     uint32_t width = 0;
     uint32_t height = 0;
     VideoOutBuffer buffer;
@@ -185,7 +225,7 @@ private:
     bool close(int handle);
     void presentLoop(std::stop_token token);
     void vblankLoop(std::stop_token token);
-    void vblankEnd();
+    std::uint64_t vblankEnd(std::uint64_t advance);
     void processFlip(FlipRequest& req);
     void triggerEvents(VideoOutConfig& cfg, int eventKind, void* triggerData);
 

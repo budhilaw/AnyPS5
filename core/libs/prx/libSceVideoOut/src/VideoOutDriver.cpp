@@ -1,6 +1,12 @@
 #ifdef __APPLE__
 #include <pthread/qos.h>
 #endif
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 #include <cxxabi.h>
 #include <cstdio>
 #include <bit>
@@ -22,7 +28,7 @@
 #include "prx/libSceAgcDriver/Submit/include/Dcb.hpp"
 #include "prx/libc/include/Shutdown.hpp"
 #include "prx/libc/include/General.hpp"
-#include "prx/libc/include/PreciseWait.hpp"
+#include "prx/libc/include/PreciseSleep.hpp"
 
 namespace {
 
@@ -369,19 +375,23 @@ void VideoOutDriver::triggerEvents(VideoOutConfig& cfg, int eventKind, void* tri
     }
 }
 
-void VideoOutDriver::vblankEnd() {
+std::uint64_t VideoOutDriver::vblankEnd(std::uint64_t advance) {
     std::lock_guard lock(mutex);
-    for (const auto& cfg : contexts) {
+    std::uint64_t ticksPerVblank = VblankTicksAt59_94Hz;
+    for (int handle = 1; handle < VIDEO_OUT_NUM_MAX; ++handle) {
+        const auto& cfg = contexts[handle];
         if (!cfg) continue;
         std::lock_guard cfgLock(cfg->mutex);
         if (!cfg->opened || cfg->failure) continue;
-        require(cfg->vblankStatus.count != std::numeric_limits<uint64_t>::max(), "vblank counter overflow");
-        ++cfg->vblankStatus.count;
+        if (handle == VIDEO_OUT_BUS_TYPE_MAIN + 1 && cfg->outputMode == VIDEO_OUT_OUTPUT_MODE_119_88HZ) ticksPerVblank = VblankTicksAt119_88Hz;
+        require(cfg->vblankStatus.count <= std::numeric_limits<uint64_t>::max() - advance, "vblank counter overflow");
+        cfg->vblankStatus.count += advance;
         cfg->vblankStatus.processTime = sceKernelGetProcessTime();
         cfg->vblankStatus.processTimeCounter = sceKernelGetProcessTimeCounter();
         triggerEvents(*cfg, VIDEO_OUT_EVENT_VBLANK, reinterpret_cast<void*>(cfg->vblankStatus.count));
         cfg->vblankCond.notify_all();
     }
+    return ticksPerVblank;
 }
 
 void VideoOutDriver::processFlip(FlipRequest& req) {
@@ -399,6 +409,8 @@ void VideoOutDriver::processFlip(FlipRequest& req) {
         if (req.flipMode != VIDEO_OUT_FLIP_MODE_HSYNC) req.cfg->vblankCond.wait(lock, [&] { return req.cfg->vblankStatus.count >= target || req.cfg->failure || req.cfg->closing; });
         timing.Mark("vblank_wait");
         checkConfig(*req.cfg);
+        req.latchVblank = req.cfg->vblankStatus.count;
+        req.latchTime = std::chrono::steady_clock::now();
     }
     require(req.width != 0 && req.height != 0 && req.width <= static_cast<uint32_t>(std::numeric_limits<int>::max()) && req.height <= static_cast<uint32_t>(std::numeric_limits<int>::max()), "invalid window dimensions");
     window.Ensure(req.width, req.height);
@@ -451,7 +463,8 @@ void VideoOutDriver::processFlip(FlipRequest& req) {
     require(req.cfg->flipStatus.count != std::numeric_limits<uint64_t>::max(), "flip counter overflow");
     triggerEvents(*req.cfg, VIDEO_OUT_EVENT_FLIP, reinterpret_cast<void*>(req.flipArg));
     ++req.cfg->flipStatus.count;
-    req.cfg->lastFlipVblank = req.cfg->vblankStatus.count;
+    req.cfg->lastFlipVblank = req.latchVblank;
+    req.cfg->lastFlipLatch = req.latchTime;
     req.cfg->flipStatus.processTime = sceKernelGetProcessTime();
     req.cfg->flipStatus.processTimeCounter = sceKernelGetProcessTimeCounter();
     req.cfg->flipStatus.flipArg = req.flipArg;
@@ -472,6 +485,8 @@ void VideoOutDriver::processFlip(FlipRequest& req) {
 void VideoOutDriver::presentLoop(std::stop_token token) {
 #ifdef __APPLE__
     pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+#elif defined(_WIN32)
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
 #endif
     std::shared_ptr<FlipRequest> current;
     PadInput padInput;
@@ -552,17 +567,26 @@ void VideoOutDriver::presentLoop(std::stop_token token) {
 }
 
 void VideoOutDriver::vblankLoop(std::stop_token token) {
-    using Frame = std::chrono::duration<int64_t, std::ratio<1001, 60000>>;
-    const auto start = std::chrono::steady_clock::now();
+#ifdef __APPLE__
+    pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+#elif defined(_WIN32)
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+#endif
+    VblankClock clock(std::chrono::steady_clock::now());
+    std::uint64_t lateWakes = 0;
     try {
-        for (int64_t frame = 1; !token.stop_requested(); ++frame) {
-            const auto next = start + std::chrono::duration_cast<std::chrono::steady_clock::duration>(Frame(frame));
+        for (;;) {
+            const auto deadline = clock.Deadline();
+            const auto remaining = deadline - std::chrono::steady_clock::now();
+            if (remaining > std::chrono::steady_clock::duration::zero()) PreciseSleepNanos_nid_no_patch(static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(remaining).count()));
             {
-                std::unique_lock lock(flipQueue->mutex);
-                PreciseWait::Until(flipQueue->changed, lock, next, [&] { return token.stop_requested() || flipQueue->failure; });
+                std::lock_guard lock(flipQueue->mutex);
                 if (token.stop_requested() || flipQueue->failure) return;
             }
-            vblankEnd();
+            const auto now = std::chrono::steady_clock::now();
+            const auto advance = clock.Advance(now);
+            clock.SetTicksPerVblank(vblankEnd(advance));
+            if (advance > 1 && std::has_single_bit(++lateWakes)) APS5_LOG_OUT("vblank thread reached its vblank %.2f ms late and advanced the vblank count by %llu at once (late wake %llu)", std::chrono::duration<double, std::milli>(now - deadline).count(), static_cast<unsigned long long>(advance), static_cast<unsigned long long>(lateWakes));
         }
     } catch (...) {
         AgcDriverReportFailure_nid_postfix(std::current_exception());
