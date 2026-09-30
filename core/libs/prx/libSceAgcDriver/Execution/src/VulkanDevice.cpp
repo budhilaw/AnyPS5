@@ -196,6 +196,15 @@ struct VulkanDevice::State {
     void precompileComputePipeline(std::span<const Graphics::CompiledShader> shaders, VkPipelineCache cache, bool push) {
         const auto bindings = Graphics::ShaderResources::LayoutBindings(shaders);
         if (!bindings) return;
+        std::uint64_t storageBuffers = 0, sampledImages = 0, storageImages = 0, samplers = 0;
+        for (const auto& binding : *bindings) {
+            if (binding.descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER) storageBuffers += binding.descriptorCount;
+            else if (binding.descriptorType == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE) sampledImages += binding.descriptorCount;
+            else if (binding.descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE) storageImages += binding.descriptorCount;
+            else samplers += binding.descriptorCount;
+        }
+        const auto& limits = properties.limits;
+        if (storageBuffers > limits.maxPerStageDescriptorStorageBuffers || sampledImages > limits.maxPerStageDescriptorSampledImages || storageImages > limits.maxPerStageDescriptorStorageImages || samplers > limits.maxPerStageDescriptorSamplers || storageBuffers + sampledImages + storageImages + samplers > limits.maxPerStageResources) return;
         const auto key = computePipelineKey(*shaders.front().program, push, Graphics::ShaderResources::KeyOf(*bindings));
         {
             std::lock_guard lock(computePipelineMutex);
