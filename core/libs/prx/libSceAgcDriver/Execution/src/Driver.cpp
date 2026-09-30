@@ -1,9 +1,6 @@
 #include "prx/libSceAgcDriver/Execution/include/GpuJournal.hpp"
 #include "RdnaDecoder/RdnaInstructionDecoder.hpp"
 #include <cxxabi.h>
-#ifdef __APPLE__
-#include <pthread/qos.h>
-#endif
 #include <cstdio>
 #include "prx/libSceAgcDriver/Execution/include/Driver.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
@@ -25,6 +22,7 @@
 #include "prx/libc/include/PreciseSleep.hpp"
 #include "prx/libc/include/SlowOperation.hpp"
 #include "prx/libSceAgcDriver/Execution/include/ThreadSampler.hpp"
+#include "prx/libSceAgcDriver/Execution/include/DriverThread.hpp"
 #include <bit>
 #include <algorithm>
 #include <array>
@@ -95,12 +93,6 @@ struct Submission {
     FrameTiming::Clock::time_point enqueued;
     FrameTiming::Clock::time_point dequeued;
 };
-
-void preferPerformanceCores() {
-#ifdef __APPLE__
-    pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
-#endif
-}
 
 std::uint32_t readRegister(const Registers& registers, std::uint32_t offset) {
     const auto it = registers.find(offset);
@@ -252,8 +244,9 @@ private:
     }
 
     void runGraphics() noexcept {
-        preferPerformanceCores();
+        DriverThread::RaisePriority();
         ThreadSampler::Register("graphics");
+        DriverThread::CpuUsage usage("graphics thread");
         std::unique_lock lock(graphicsMutex);
         while (true) {
             graphicsChanged.wait(lock, [&] { return graphicsStopping || !graphicsJobs.empty(); });
@@ -266,6 +259,7 @@ private:
             } catch (...) {
                 ReportFailure(std::current_exception());
             }
+            usage.Sample();
             lock.lock();
             graphicsJobs.pop_front();
             graphicsBusy = false;
@@ -1397,10 +1391,12 @@ private:
     std::thread worker;
 
     void run() noexcept {
-        preferPerformanceCores();
+        DriverThread::RaisePriority();
         ThreadSampler::Register("worker");
+        DriverThread::CpuUsage usage("worker thread");
         try {
             for (;;) {
+                usage.Sample();
                 {
                     PerformanceContext timingContext(frameTiming.get());
                     PerformanceTimer timing("Driver.Worker");
