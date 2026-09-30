@@ -29,6 +29,7 @@ Build and relink as described in the README. The run folder holds the relinked `
 - `ANYPS5_DEBUG_STENCIL_PROBE=<depth address>`, `ANYPS5_DEBUG_REPORT_STENCILED=1`: stencil histograms and before/after pixel diffs.
 - `ANYPS5_DUMP_COMPUTE_SPIRV=<dir>`, `ANYPS5_DUMP_SLOW_SHADERS=<dir>`: write compute SPIR-V.
 - `ANYPS5_NO_HOST_IMPORT=1`, `ANYPS5_NO_HOST_VERTEX=1`: disable importing guest memory as GPU buffers.
+- `ANYPS5_DEPTH_COPY=1`: samples depth and stencil buffers through copies instead of read-only views of the resident depth image. With `ANYPS5_TRACE_TIMING=1`, `Graphics.TextureCache` counts `depth_view` and `depth_view_hit` for the views, `depth_copy` and `depth_hit` for copies, and `depth_feedback_copy` for draws that sample the depth buffer they render to.
 
 ## What the crash fix changed (all platforms unless noted)
 
