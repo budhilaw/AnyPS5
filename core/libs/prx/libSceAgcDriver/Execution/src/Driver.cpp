@@ -859,7 +859,18 @@ private:
         }
         auto drawParameters = Pm4::ResolveDraw(packet, queue);
         if (!drawParameters.indexed && (drawParameters.indexCount == 0 || drawParameters.instanceCount == 0)) return;
-        const auto graphics = Graphics::DecodeState(queue);
+        std::optional<Graphics::State> decoded;
+        try {
+            decoded.emplace(Graphics::DecodeState(queue));
+        } catch (const std::exception& error) {
+            if (!SkipFailedPrograms()) throw;
+            static std::mutex reportedMutex;
+            static std::set<std::string, std::less<>> reported;
+            std::lock_guard lock(reportedMutex);
+            if (reported.size() < 256 && reported.emplace(error.what()).second) std::fprintf(stderr, "AGC driver: skipping draws whose state cannot be translated: %s\n", error.what());
+            return;
+        }
+        const auto& graphics = *decoded;
         if (graphics.emptyViewport) {
             static std::once_flag reported;
             std::call_once(reported, [] { std::fprintf(stderr, "AGC driver: skipping draws with a zero-sized viewport\n"); });
