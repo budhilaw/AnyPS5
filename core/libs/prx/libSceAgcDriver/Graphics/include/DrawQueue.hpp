@@ -42,6 +42,7 @@ public:
     }
     void Wait();
     void WaitGds() { if (lastGdsSequence != 0) waitThrough(lastGdsSequence); }
+    void MarkGds();
     void WaitGpu();
     void Collect();
     void RecordMemoryBarrier(const Context& context);

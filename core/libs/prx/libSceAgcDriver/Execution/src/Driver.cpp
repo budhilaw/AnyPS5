@@ -1252,14 +1252,20 @@ private:
                             execution.cursor += count;
                             return execution.cursor >= submission.commands.size() ? Step::Finished : Step::Progressed;
                         } else if (memoryTransfer) {
-                            drainGraphics("drain gds dma");
-                            std::lock_guard gpuLock(gpuMutex);
-                            std::uint64_t destination = 0, source = 0;
-                            std::size_t destinationBytes = 0, sourceBytes = 0;
-                            Pm4::TransferRanges(packet, destination, destinationBytes, source, sourceBytes);
-                            current->ResolveGpuWrites(destination, destinationBytes);
-                            current->ResolveGpuWrites(source, sourceBytes);
-                            timing.Mark("transfer_resolve");
+                            GraphicsJob job;
+                            if (Pm4::DmaGdsSource(packet)) {
+                                const auto destination = static_cast<std::uint64_t>(packet[4]) | (static_cast<std::uint64_t>(packet[5]) << 32u);
+                                const auto bytes = static_cast<std::uint64_t>(packet[6] & 0x3ffffffu);
+                                if (bytes != 0) job.writes.emplace_back(destination, destination + bytes);
+                            }
+                            job.run = [current, frame = frameTiming, copy = std::vector<std::uint32_t>(packet.begin(), packet.end())] {
+                                PerformanceContext timingContext(frame.get());
+                                current->GdsTransfer(copy);
+                            };
+                            postGraphics(std::move(job));
+                            timing.Mark("gds_post");
+                            execution.cursor += count;
+                            return execution.cursor >= submission.commands.size() ? Step::Finished : Step::Progressed;
                         } else if (header == FlipPacketHeader && AsyncFlips()) {
                         } else {
                             const auto scope = header == FlipPacketHeader ? "Driver.FlipWait" : "Driver.ReleaseWait";

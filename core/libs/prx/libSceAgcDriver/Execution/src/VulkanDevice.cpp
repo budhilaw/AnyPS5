@@ -733,13 +733,31 @@ void VulkanDevice::ResolveGpuWrites(std::uint64_t address, std::size_t bytes) {
 }
 
 void VulkanDevice::GdsTransfer(std::span<const std::uint32_t> packet) {
+    SlowOperationTimer slowTimer("device gds transfer");
     std::lock_guard memoryLock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
     PerformanceTimer timing("Vulkan.GdsTransfer");
+    const GuestMemory::MemoryAccessScope memoryScope(this, [](void* context, std::uint64_t address, std::size_t bytes, bool writable) {
+        static_cast<VulkanDevice*>(context)->ResolveMemory(address, bytes, writable);
+    });
     const auto bytes = static_cast<std::size_t>(packet[6] & 0x3ffffffu);
     const bool toGds = Pm4::DmaGdsDestination(packet);
     const bool fromGds = Pm4::DmaGdsSource(packet);
     require(toGds || fromGds, "DMA_DATA does not involve GDS");
     require(!(toGds && fromGds), "GDS to GDS DMA_DATA is not implemented");
+    static const bool trace = std::getenv("ANYPS5_TRACE_INDIRECT") != nullptr || std::getenv("ANYPS5_TRACE_WRITEBACK") != nullptr;
+    if (toGds && !trace && Pm4::DmaImmediateSource(packet) && bytes != 0 && bytes % 4 == 0 && packet[4] % 4 == 0 && packet[4] + bytes <= state->gds->Bytes().size()) {
+        const auto context = graphicsContext();
+        state->drawQueue->RecordMemoryBarrier(context);
+        const auto commands = state->drawQueue->Begin(context);
+        state->DeviceFunction<PFN_vkCmdFillBuffer>("vkCmdFillBuffer")(commands, state->gds->Handle(), packet[4], bytes, packet[2]);
+        VkMemoryBarrier filled{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        filled.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        filled.dstAccessMask = VK_ACCESS_HOST_READ_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+        state->DeviceFunction<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &filled, 0, nullptr, 0, nullptr);
+        state->drawQueue->MarkGds();
+        timing.Mark("gpu_fill");
+        return;
+    }
     state->drawQueue->WaitGds();
     timing.Mark("draw_wait");
     auto gds = state->gds->Bytes();
@@ -761,7 +779,6 @@ void VulkanDevice::GdsTransfer(std::span<const std::uint32_t> packet) {
         const auto destination = static_cast<std::uint64_t>(packet[4]) | (static_cast<std::uint64_t>(packet[5]) << 32u);
         GuestMemory::Write(destination, gds.subspan(offset, bytes), 1);
     }
-    static const bool trace = std::getenv("ANYPS5_TRACE_INDIRECT") != nullptr || std::getenv("ANYPS5_TRACE_WRITEBACK") != nullptr;
     if (trace) {
         std::string nonzero;
         std::size_t count = 0;

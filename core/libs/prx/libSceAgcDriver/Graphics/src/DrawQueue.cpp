@@ -87,6 +87,13 @@ void DrawQueue::Enqueue(std::shared_ptr<ShaderResources> resources, std::shared_
     if (recording.entries.size() >= BatchDraws) Flush();
 }
 
+void DrawQueue::MarkGds() {
+    Require(recording.commands != nullptr, "GDS work recorded outside a batch");
+    lastGdsSequence = nextSequence;
+    recording.entries.push_back({nullptr, nullptr, nextSequence++});
+    ++drawCount;
+}
+
 void DrawQueue::EnqueueCompletion(std::function<void()> action) {
     if (recording.commands) {
         recording.completions.push_back(std::move(action));
