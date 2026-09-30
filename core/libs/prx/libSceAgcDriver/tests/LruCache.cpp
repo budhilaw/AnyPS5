@@ -118,4 +118,14 @@ void RunLruCacheTests() {
         const auto [position, inserted] = cache.Insert("only", 1, recordInto(evicted));
         Require(inserted && position != cache.End() && position->key == "only" && cache.Size() == 1 && evicted.empty(), "a zero limit evicted the pipeline being inserted");
     }
+    {
+        LruCache<std::string, int> cache(3);
+        std::vector<std::string> evicted;
+        const auto record = recordInto(evicted);
+        const auto first = cache.Insert("first", 1, record).first;
+        cache.Insert("second", 2, record);
+        cache.Erase(first);
+        Require(cache.Size() == 1 && !cache.Contains("first") && cache.Contains("second") && evicted.empty(), "erasing a pipeline through its handle removed the wrong entry or counted as an eviction");
+        Require(cache.Insert("first", 3, record).second && cache.Find("first")->value == 3, "an erased pipeline key could not be inserted again");
+    }
 }

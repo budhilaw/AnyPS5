@@ -5,7 +5,13 @@
 #include "prx/libSceAgcDriver/Graphics/include/TextureDetiler.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/VertexInput.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Draw.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/DrawQueue.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/GpuColorTransfer.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/GraphicsPipelineCache.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/GuestBufferMemory.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/RenderCache.hpp"
+#include "prx/libc/include/GuestMemoryBacking.hpp"
+#include "prx/libc/include/GuestMemoryTracking.hpp"
 #include "IntermediateRepresentation/IrProgram.hpp"
 #include <spirv/unified1/spirv.hpp>
 #include <algorithm>
@@ -15,6 +21,8 @@
 #include <initializer_list>
 #include <iostream>
 #include <map>
+#include <random>
+#include <set>
 #include <string_view>
 #include <type_traits>
 #include <vector>
@@ -371,6 +379,8 @@ struct MockVulkan {
     std::vector<VkDescriptorSetLayoutBinding> layoutBindings;
     std::vector<VkDescriptorPoolSize> poolSizes;
     std::uint32_t poolMaxSets = 0;
+    std::uint32_t poolCreateCount = 0;
+    std::uint32_t submitCount = 0;
     std::vector<MockDescriptorWrite> writes;
     std::uint32_t boundSets = 0;
     std::uint32_t boundFirst = 0;
@@ -458,6 +468,7 @@ VKAPI_ATTR VkResult VKAPI_CALL mockCreateDescriptorPool(VkDevice, const VkDescri
     *pool = makeHandle<VkDescriptorPool>();
     mock.poolSizes.assign(info->pPoolSizes, info->pPoolSizes + info->poolSizeCount);
     mock.poolMaxSets = info->maxSets;
+    ++mock.poolCreateCount;
     ++mock.live;
     return VK_SUCCESS;
 }
@@ -559,6 +570,7 @@ VKAPI_ATTR void VKAPI_CALL mockDestroyFence(VkDevice, VkFence, const VkAllocatio
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL mockQueueSubmit(VkQueue, std::uint32_t, const VkSubmitInfo*, VkFence) {
+    ++mock.submitCount;
     return VK_SUCCESS;
 }
 
@@ -690,6 +702,36 @@ PFN_vkVoidFunction VKAPI_CALL mockProc(VkDevice, const char* name) {
     };
     const auto it = table.find(name);
     return it == table.end() ? nullptr : it->second;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL mockCreateUnspecializedComputePipelines(VkDevice, VkPipelineCache, std::uint32_t count, const VkComputePipelineCreateInfo*, const VkAllocationCallbacks*, VkPipeline* pipelines) {
+    for (std::uint32_t i = 0; i < count; ++i) {
+        pipelines[i] = makeHandle<VkPipeline>();
+        ++mock.live;
+    }
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL mockCmdCopyImage(VkCommandBuffer, VkImage, VkImageLayout, VkImage, VkImageLayout, std::uint32_t, const VkImageCopy*) {}
+
+VKAPI_ATTR void VKAPI_CALL mockCmdCopyImageToBuffer(VkCommandBuffer, VkImage, VkImageLayout, VkBuffer, std::uint32_t, const VkBufferImageCopy*) {}
+
+VKAPI_ATTR void VKAPI_CALL mockCmdCopyBuffer(VkCommandBuffer, VkBuffer, VkBuffer, std::uint32_t, const VkBufferCopy*) {}
+
+VKAPI_ATTR VkResult VKAPI_CALL mockInvalidateMappedMemoryRanges(VkDevice, std::uint32_t, const VkMappedMemoryRange*) {
+    return VK_SUCCESS;
+}
+
+PFN_vkVoidFunction VKAPI_CALL renderTargetProc(VkDevice device, const char* name) {
+    static const std::map<std::string_view, PFN_vkVoidFunction> table{
+        {"vkCreateComputePipelines", reinterpret_cast<PFN_vkVoidFunction>(mockCreateUnspecializedComputePipelines)},
+        {"vkCmdCopyImage", reinterpret_cast<PFN_vkVoidFunction>(mockCmdCopyImage)},
+        {"vkCmdCopyImageToBuffer", reinterpret_cast<PFN_vkVoidFunction>(mockCmdCopyImageToBuffer)},
+        {"vkCmdCopyBuffer", reinterpret_cast<PFN_vkVoidFunction>(mockCmdCopyBuffer)},
+        {"vkInvalidateMappedMemoryRanges", reinterpret_cast<PFN_vkVoidFunction>(mockInvalidateMappedMemoryRanges)}
+    };
+    const auto it = table.find(name);
+    return it == table.end() ? mockProc(device, name) : it->second;
 }
 
 AgcDriver::Graphics::Context mockContext() {
@@ -1577,6 +1619,288 @@ void validationTests() {
     }
 }
 
+void descriptorRegistryTests() {
+    using AgcDriver::Graphics::DescriptorCache;
+    mock = MockVulkan{};
+    const auto context = mockContext();
+    const std::array<VkDescriptorSetLayoutBinding, 2> bindings{{{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2, VK_SHADER_STAGE_COMPUTE_BIT, nullptr}, {1, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 3, VK_SHADER_STAGE_COMPUTE_BIT, nullptr}}};
+    const std::array<VkDescriptorPoolSize, 2> sizes{{{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2}, {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 3}}};
+    const std::array<VkDescriptorSetLayoutBinding, 1> otherBindings{{{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr}}};
+    const std::array<VkDescriptorPoolSize, 1> otherSizes{{{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2}}};
+    const auto key = AgcDriver::Graphics::ShaderResources::KeyOf(bindings);
+    const auto otherKey = AgcDriver::Graphics::ShaderResources::KeyOf(otherBindings);
+    {
+        DescriptorCache cache;
+        const auto first = cache.Take(context, key, bindings, sizes);
+        Require(mock.poolCreateCount == 1 && mock.poolMaxSets == DescriptorCache::PoolSets && mock.poolSizes.size() == 2 && mock.poolSizes[0].descriptorCount == 2 * DescriptorCache::PoolSets && mock.poolSizes[1].descriptorCount == 3 * DescriptorCache::PoolSets, "a descriptor pool must hold a whole pool of sets of its layout");
+        const auto second = cache.Take(context, std::vector<std::uint32_t>(key), bindings, sizes);
+        Require(first.layout != VK_NULL_HANDLE && second.layout == first.layout && cache.Layouts() == 1, "equal layout keys must share one descriptor set layout");
+        Require(first.set != VK_NULL_HANDLE && second.set != VK_NULL_HANDLE && second.set != first.set, "a descriptor set in use was handed out again");
+        const auto other = cache.Take(context, otherKey, otherBindings, otherSizes);
+        Require(other.layout != first.layout && other.set != first.set && other.set != second.set && cache.Layouts() == 2, "a different layout key shared a layout or a descriptor set");
+        cache.Put(first);
+        const auto recycled = cache.Take(context, key, bindings, sizes);
+        Require(recycled.set == first.set && recycled.layout == first.layout, "a released descriptor set was not recycled");
+        const auto fresh = cache.Take(context, key, bindings, sizes);
+        Require(fresh.set != first.set && fresh.set != second.set, "a descriptor set was recycled before its release");
+        std::vector<DescriptorCache::Allocation> held{recycled, second, fresh};
+        const auto pools = mock.poolCreateCount;
+        while (held.size() < DescriptorCache::PoolSets + 1) held.push_back(cache.Take(context, key, bindings, sizes));
+        std::set<VkDescriptorSet> distinct;
+        for (const auto& allocation : held) distinct.insert(allocation.set);
+        Require(distinct.size() == held.size() && mock.poolCreateCount == pools + 1, "sets beyond a full pool must come from one new pool without reusing a set in use");
+        for (const auto& allocation : held) cache.Put(allocation);
+        cache.Put(other);
+        const auto again = cache.Take(context, key, bindings, sizes);
+        Require(again.layout == first.layout && distinct.contains(again.set) && mock.poolCreateCount == pools + 1, "released sets were not reused before the pools grew");
+        cache.Put(again);
+        const auto empty = cache.Take(context, {}, {}, {});
+        Require(empty.layout != VK_NULL_HANDLE && empty.set == VK_NULL_HANDLE && cache.Layouts() == 3 && mock.poolCreateCount == pools + 1, "a layout without bindings must have no descriptor set or pool");
+        cache.Put(empty);
+    }
+    Require(mock.live == 0, "the descriptor registry leaked layouts or pools");
+}
+
+void pipelineKeyTests() {
+    using AgcDriver::Graphics::GraphicsPipelineCache;
+    mock = MockVulkan{};
+    const auto context = mockContext();
+    const auto state = AgcDriver::Graphics::DecodeState(makeState());
+    ShaderRecompiler::RecompileResult vertex;
+    vertex.spirv = makeModule({});
+    vertex.spirvHash = 0x1111;
+    ShaderRecompiler::RecompileResult fragment;
+    fragment.spirv = makeModule({.fragment = true});
+    fragment.spirvHash = 0x2222;
+    const std::array<AgcDriver::Graphics::CompiledShader, 2> shaders{{{ShaderRecompiler::ShaderStage::Vertex, &vertex, 0}, {ShaderRecompiler::ShaderStage::Fragment, &fragment, 0}}};
+    const std::vector<std::uint32_t> layout{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT, 5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT};
+    const auto view = makeHandle<VkImageView>();
+    const auto key = [&](const AgcDriver::Graphics::State& candidate, VkImageView target, std::span<const VkImageView> extras, std::vector<std::uint64_t>& words) {
+        return GraphicsPipelineCache::Key(context, candidate, target, extras, VK_NULL_HANDLE, layout, shaders, words);
+    };
+    std::vector<std::uint64_t> words;
+    std::vector<std::uint64_t> repeated;
+    const auto reference = key(state, view, {}, words);
+    Require(key(state, view, {}, repeated) == reference && repeated == words, "equal pipeline state produced different keys");
+    const auto differs = [&](auto mutate, const char* field) {
+        auto changed = state;
+        mutate(changed.blend);
+        std::vector<std::uint64_t> changedWords;
+        Require(key(changed, view, {}, changedWords) != reference && changedWords != words, std::string("a pipeline key ignored the blend ") + field);
+    };
+    differs([](VkPipelineColorBlendAttachmentState& blend) { blend.blendEnable = blend.blendEnable ? VK_FALSE : VK_TRUE; }, "enable");
+    differs([](VkPipelineColorBlendAttachmentState& blend) { blend.srcColorBlendFactor = static_cast<VkBlendFactor>(blend.srcColorBlendFactor + 1); }, "source color factor");
+    differs([](VkPipelineColorBlendAttachmentState& blend) { blend.dstColorBlendFactor = static_cast<VkBlendFactor>(blend.dstColorBlendFactor + 1); }, "destination color factor");
+    differs([](VkPipelineColorBlendAttachmentState& blend) { blend.colorBlendOp = static_cast<VkBlendOp>(blend.colorBlendOp + 1); }, "color operation");
+    differs([](VkPipelineColorBlendAttachmentState& blend) { blend.srcAlphaBlendFactor = static_cast<VkBlendFactor>(blend.srcAlphaBlendFactor + 1); }, "source alpha factor");
+    differs([](VkPipelineColorBlendAttachmentState& blend) { blend.dstAlphaBlendFactor = static_cast<VkBlendFactor>(blend.dstAlphaBlendFactor + 1); }, "destination alpha factor");
+    differs([](VkPipelineColorBlendAttachmentState& blend) { blend.alphaBlendOp = static_cast<VkBlendOp>(blend.alphaBlendOp + 1); }, "alpha operation");
+    differs([](VkPipelineColorBlendAttachmentState& blend) { blend.colorWriteMask ^= VK_COLOR_COMPONENT_A_BIT; }, "write mask");
+    {
+        auto changed = state;
+        changed.blendConstants[2] += 0.25f;
+        Require(key(changed, view, {}, repeated) != reference, "a pipeline key ignored the blend constants");
+        Require(key(state, makeHandle<VkImageView>(), {}, repeated) != reference, "a pipeline key ignored the color target view");
+    }
+    auto extra = state;
+    extra.extraColors.push_back(state.color);
+    extra.extraBlends.push_back(state.blend);
+    const std::array<VkImageView, 1> extraViews{makeHandle<VkImageView>()};
+    std::vector<std::uint64_t> extraWords;
+    const auto extraReference = key(extra, view, extraViews, extraWords);
+    Require(extraReference != reference && key(extra, view, extraViews, repeated) == extraReference, "an extra color target did not produce its own stable pipeline key");
+    extra.extraBlends[0].dstAlphaBlendFactor = static_cast<VkBlendFactor>(extra.extraBlends[0].dstAlphaBlendFactor + 1);
+    Require(key(extra, view, extraViews, repeated) != extraReference, "a pipeline key ignored the blend state of an extra color target");
+    vertex.spirvHash = 0;
+    const auto unhashed = key(state, view, {}, repeated);
+    vertex.spirv.Edit().back() ^= 1u;
+    Require(key(state, view, {}, repeated) != unhashed, "a pipeline key without a SPIR-V hash ignored the shader code");
+}
+
+void writeIntervalTests() {
+    struct Range {
+        std::uint64_t begin;
+        std::uint64_t end;
+        bool copied;
+    };
+    std::mt19937_64 random(0x1d10u);
+    const auto pick = [&](std::uint64_t limit) { return random() % limit; };
+    AgcDriver::Graphics::WriteIntervals index;
+    for (int round = 0; round < 300; ++round) {
+        const auto writerCount = pick(24);
+        std::vector<std::vector<Range>> writers(writerCount);
+        index.Clear();
+        for (std::uint64_t writer = 0; writer < writerCount; ++writer) {
+            const auto count = 1 + pick(3);
+            for (std::uint64_t item = 0; item < count; ++item) {
+                Range range{};
+                if (writer != 0 && pick(4) == 0) {
+                    const auto& earlier = writers[pick(writer)];
+                    range = earlier[pick(earlier.size())];
+                    if (pick(2) == 0) range.copied = !range.copied;
+                } else {
+                    range.begin = 0x10000 + pick(4096);
+                    range.end = range.begin + 1 + pick(700);
+                    range.copied = pick(2) == 0;
+                }
+                writers[writer].push_back(range);
+                index.Add(range.begin, range.end, writer + 1, range.copied);
+            }
+        }
+        index.Build();
+        for (int query = 0; query < 200; ++query) {
+            const auto address = 0x10000 - 64 + pick(4096 + 896);
+            const std::size_t bytes = pick(5) == 0 ? 0 : 1 + pick(1024);
+            const auto overlaps = [&](const Range& range) { return address < range.end && range.begin < address + bytes; };
+            const auto writes = [&](std::uint64_t writer, bool copiedOnly) { return std::any_of(writers[writer].begin(), writers[writer].end(), [&](const Range& range) { return overlaps(range) && (range.copied || !copiedOnly); }); };
+            for (const bool ordered : {false, true}) {
+                std::uint64_t last = 0;
+                for (std::uint64_t writer = 0; writer < writerCount; ++writer) {
+                    if (writer + 1 > last && writes(writer, ordered)) last = writer + 1;
+                }
+                Require(index.Latest(address, bytes, ordered) == last, "the write interval index disagrees with a scan of every writer when resolving");
+            }
+            for (const auto adoptedBefore : {std::uint64_t{0}, std::uint64_t{1}, 1 + pick(writerCount + 1), writerCount + 1}) {
+                bool pending = false;
+                for (std::uint64_t writer = 0; writer < writerCount; ++writer) pending = pending || writes(writer, writer + 1 < adoptedBefore);
+                Require(index.Pending(address, bytes, adoptedBefore) == pending, "the write interval index disagrees with a scan of every writer when checking for pending writes");
+            }
+        }
+    }
+}
+
+void drawQueueWriterTests() {
+    mock = MockVulkan{};
+    const auto context = mockContext();
+    const auto address = reinterpret_cast<std::uint64_t>(guestThird.data());
+    {
+        AgcDriver::Graphics::DrawQueue queue;
+        ShaderRecompiler::RecompileResult compute;
+        compute.bindings.push_back(makeBinding(Role::GuestBuffers, 3, 1, vsharp(guestThird.data(), 8)));
+        const AgcDriver::Graphics::CompiledShader shader{ShaderRecompiler::ShaderStage::Compute, &compute, 0};
+        const auto initial = queue.WriterEpoch();
+        Require(!queue.WritesPending(address, 8), "an empty draw queue reported pending writes");
+        queue.Begin(context);
+        auto resources = std::make_shared<AgcDriver::Graphics::ShaderResources>(context, shader);
+        queue.Enqueue(resources, std::make_shared<int>(0));
+        const auto enqueued = queue.WriterEpoch();
+        Require(enqueued != initial, "enqueuing a writer did not change the writer epoch");
+        Require(queue.WritesPending(address, 8) && queue.WritesPending(address + 7, 1) && !queue.WritesPending(address + 8, 8) && !queue.WritesPending(address - 8, 8), "pending writes do not cover exactly the written range");
+        Require(queue.WritesPending(address, 8, queue.NextSequence()), "a write copied back after the GPU work was treated as already adopted");
+        queue.Resolve(address + 8, 8);
+        Require(queue.HasPending() && queue.WritesPending(address, 8) && queue.WriterEpoch() == enqueued, "resolving memory no writer touches waited for a writer");
+        queue.Resolve(address, 4, true);
+        Require(!queue.HasPending() && !queue.WritesPending(address, 8) && queue.WriterEpoch() != enqueued, "resolving written memory did not retire its writer");
+    }
+    Require(mock.live == 0, "draw queue writers leaked Vulkan objects");
+}
+
+void renderCacheTests() {
+    using AgcDriver::Graphics::ColorTarget;
+    using AgcDriver::Graphics::ColorTileMode;
+    mock = MockVulkan{};
+    auto context = mockContext();
+    context.device = makeHandle<VkDevice>();
+    context.deviceProc = renderTargetProc;
+    context.memory.memoryTypes[0].propertyFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
+    context.formatProperties = [](VkPhysicalDevice, VkFormat, VkFormatProperties* properties) {
+        *properties = {};
+        properties->optimalTilingFeatures = VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT | VK_FORMAT_FEATURE_TRANSFER_SRC_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
+    };
+    context.imageFormatProperties = [](VkPhysicalDevice, VkFormat, VkImageType, VkImageTiling, VkImageUsageFlags, VkImageCreateFlags, VkImageFormatProperties* properties) {
+        *properties = {};
+        properties->maxExtent = {16384, 16384, 1};
+        properties->maxMipLevels = 1;
+        properties->maxArrayLayers = 1;
+        properties->sampleCounts = VK_SAMPLE_COUNT_1_BIT;
+        properties->maxResourceSize = VkDeviceSize{1} << 32u;
+        return VK_SUCCESS;
+    };
+    context.limits.maxFramebufferWidth = 16384;
+    context.limits.maxFramebufferHeight = 16384;
+    context.limits.maxComputeWorkGroupCount[0] = 65535;
+    context.limits.maxComputeWorkGroupCount[1] = 65535;
+    context.limits.maxComputeWorkGroupCount[2] = 65535;
+    context.limits.maxStorageBufferRange = 1u << 20u;
+    const auto pageSize = GuestMemoryTracking::GuestMemoryTrackingPageSize_nid_postfix();
+    const std::size_t mapped = 128 * pageSize;
+    void* memory = GuestMemoryBacking::GuestMemoryBackingMap_nid_postfix(nullptr, mapped, 1u << 16u, 3);
+    const auto base = reinterpret_cast<std::uint64_t>(memory);
+    const auto commands = reinterpret_cast<VkCommandBuffer>(std::uintptr_t{1});
+    {
+        AgcDriver::Graphics::GpuColorTransfer transfer(context);
+        context.colorTransfer = &transfer;
+        {
+            AgcDriver::Graphics::DrawQueue queue;
+            context.drawQueue = &queue;
+            AgcDriver::Graphics::RenderCache cache(context);
+            const ColorTarget written{base + 16 * pageSize, {64, 4}, VK_FORMAT_R8G8B8A8_UNORM, 1024, 0xe4, ColorTileMode::Linear, 4, false};
+            const ColorTarget gpuOnly{base + 64 * pageSize, {64, 4}, VK_FORMAT_R16G16B16A16_SFLOAT, 2048, 0xe4, ColorTileMode::Linear, 8, true};
+            std::memset(reinterpret_cast<void*>(written.address), 0xab, written.bytes);
+            const auto initial = cache.Epoch();
+            auto resident = cache.Get(written, false);
+            Require(resident->Watched() && cache.Epoch() != initial, "creating a resident target did not change the render cache epoch");
+            Require(cache.Get(written, false) == resident, "an identical render target was not found again");
+            const auto unwatched = cache.UnwatchedRanges(written.address + 2 * written.bytes, written.address + 2 * pageSize);
+            Require(unwatched.size() == 1 && unwatched[0].first == written.address + pageSize && unwatched[0].second == written.address + 2 * pageSize, "unwatched ranges starting past a target's bytes inside its page did not exclude that page");
+            ShaderRecompiler::RecompileResult compute;
+            compute.bindings.push_back(makeBinding(Role::GuestBuffers, 3, 1, vsharp(reinterpret_cast<const void*>(gpuOnly.address), 64)));
+            const AgcDriver::Graphics::CompiledShader shader{ShaderRecompiler::ShaderStage::Compute, &compute, 0};
+            queue.Begin(context);
+            queue.Enqueue(std::make_shared<AgcDriver::Graphics::ShaderResources>(context, shader), std::make_shared<int>(0));
+            Require(queue.WritesPending(gpuOnly.address, gpuOnly.bytes), "a buffer write under a GPU-only target is not pending");
+            auto gpu = cache.Get(gpuOnly, false);
+            Require(queue.HasPending() && queue.WritesPending(gpuOnly.address, gpuOnly.bytes), "creating a GPU-only target waited for guest memory writes it never reads");
+            gpu->Begin(commands);
+            Require(cache.Find(gpuOnly.address) == gpu && queue.HasPending(), "looking up a GPU-only target waited for guest memory writes it never reads");
+            gpu->MarkWritten();
+            const auto submits = mock.submitCount;
+            cache.Resolve(gpuOnly.address, 64, false);
+            Require(gpu->Dirty() && mock.submitCount == submits && queue.HasPending(), "reading memory under a GPU-only target drained the device");
+            cache.Resolve(gpuOnly.address, 64, true);
+            Require(!gpu->Dirty() && mock.submitCount == submits && queue.HasPending(), "writing memory under a GPU-only target drained the device or kept the target from eviction");
+            gpu->MarkWritten();
+            cache.DiscardCovered(gpuOnly.address + 8, gpuOnly.bytes);
+            Require(gpu->Dirty(), "a range that does not cover a target discarded it");
+            cache.DiscardCovered(gpuOnly.address - 256, gpuOnly.bytes + 512);
+            Require(!gpu->Dirty(), "a range that covers a target did not discard it");
+            gpu->MarkWritten();
+            cache.DiscardCovered(gpuOnly.address, gpuOnly.bytes - 1);
+            Require(gpu->Dirty(), "a range that ends inside a target discarded it");
+            cache.DiscardCovered(gpuOnly.address, gpuOnly.bytes);
+            Require(!gpu->Dirty(), "a range that starts at a target and covers it did not discard it");
+            const ColorTarget large{base + 96 * pageSize, {64, static_cast<std::uint32_t>(3 * pageSize / 256)}, VK_FORMAT_R8G8B8A8_UNORM, 3 * pageSize, 0xe4, ColorTileMode::Linear, 4, false};
+            std::memset(reinterpret_cast<void*>(large.address), 0xcd, large.bytes);
+            auto big = cache.Get(large, false);
+            big->Adopt(commands, makeHandle<VkImage>());
+            cache.Resolve(large.address + 2 * pageSize + 16, 16, false);
+            const auto* largeBytes = reinterpret_cast<const unsigned char*>(large.address);
+            Require(!big->Dirty() && big->Valid() && std::all_of(largeBytes, largeBytes + large.bytes, [](unsigned char value) { return value == 0; }), "reading memory near the end of a target larger than a page did not write the target back");
+            gpu->MarkWritten();
+            resident->Adopt(commands, makeHandle<VkImage>());
+            Require(resident->Dirty(), "an adopted target is not dirty");
+            cache.Flush();
+            Require(!resident->Dirty() && !resident->Valid() && !gpu->Dirty() && !queue.HasPending(), "Flush did not write back and release every dirty render target");
+            const auto* bytes = reinterpret_cast<const unsigned char*>(written.address);
+            Require(std::all_of(bytes, bytes + written.bytes, [](unsigned char value) { return value == 0; }), "Flush did not write the render target back to guest memory");
+        }
+        {
+            auto pageContext = context;
+            pageContext.drawQueue = nullptr;
+            AgcDriver::Graphics::RenderCache cache(pageContext);
+            const ColorTarget low{base + 32 * pageSize, {64, 1}, VK_FORMAT_R8G8B8A8_UNORM, 256, 0xe4, ColorTileMode::Linear, 4, false};
+            const ColorTarget high{low.address + pageSize / 2, {64, 1}, VK_FORMAT_R8G8B8A8_UNORM, 256, 0xe4, ColorTileMode::Linear, 4, false};
+            auto lower = cache.Get(low, false);
+            const auto before = cache.Epoch();
+            auto upper = cache.Get(high, false);
+            Require(!lower->Watched() && upper->Watched() && cache.Epoch() != before, "a target sharing its page with a lower target did not release it");
+        }
+        context.drawQueue = nullptr;
+        context.colorTransfer = nullptr;
+    }
+    GuestMemoryBacking::GuestMemoryBackingUnmap_nid_postfix(memory, mapped);
+    Require(mock.live == 0, "render cache tests leaked Vulkan objects");
+}
 
 }
 
@@ -1618,6 +1942,11 @@ int main() {
         nullTextureClassTests();
         validationTests();
         rectListTests();
+        descriptorRegistryTests();
+        pipelineKeyTests();
+        writeIntervalTests();
+        drawQueueWriterTests();
+        renderCacheTests();
         mock = MockVulkan{};
         auto bdaContext = mockContext();
         bdaContext.bufferDeviceAddress = true;
