@@ -1,6 +1,7 @@
 #include "prx/libc/include/GuestMemoryBacking.hpp"
 #include "prx/libc/include/MemoryBackingPlatform.hpp"
 #include "prx/libc/include/GuestMemoryTracking.hpp"
+#include "prx/libc/include/SlowOperation.hpp"
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -127,14 +128,18 @@ void unmapPhysical(Allocation& allocation, std::uint64_t address, std::size_t by
 
 void* GuestMemoryBackingMap_nid_postfix(void* address, std::size_t bytes, std::size_t alignment, int protection) {
     validateMapping(address, bytes, alignment, protection);
+    SlowOperationTimer timer("backing map");
     std::lock_guard lock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
+    timer.Split("backing lock wait");
     collectRetired();
     return registerMapping(Platform::Map(address, bytes, alignment, protection), bytes);
 }
 
 void* GuestMemoryBackingMapPhysical_nid_postfix(void* address, std::size_t bytes, std::size_t alignment, int protection, std::uint64_t physicalOffset) {
     validateMapping(address, bytes, alignment, protection);
+    SlowOperationTimer timer("backing map physical");
     std::lock_guard lock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
+    timer.Split("backing lock wait");
     collectRetired();
     return registerMapping(Platform::MapPhysical(address, bytes, alignment, protection, physicalOffset), bytes);
 }
@@ -143,7 +148,9 @@ void GuestMemoryBackingUnmap_nid_postfix(void* pointer, std::size_t bytes) {
     const auto address = reinterpret_cast<std::uintptr_t>(pointer);
     const auto pageSize = GuestMemoryTracking::GuestMemoryTrackingPageSize_nid_postfix();
     if (address % pageSize != 0 || bytes % pageSize != 0) throw std::invalid_argument("misaligned guest backing unmap");
+    SlowOperationTimer timer("backing unmap");
     std::lock_guard lock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
+    timer.Split("backing lock wait");
     auto& allocation = find(address, bytes);
     GuestMemoryTracking::GuestMemoryTrackingInvalidate_nid_postfix(address, bytes);
     if (allocation.mapping.physical) {

@@ -2,6 +2,7 @@
 #include <cstdio>
 #include "prx/libc/include/GuestAllocations.hpp"
 #include "prx/libc/include/GuestMemoryTracking.hpp"
+#include "prx/libc/include/SlowOperation.hpp"
 #include <limits>
 #include <iterator>
 #include <map>
@@ -44,6 +45,7 @@ void require(bool condition, const char* reason) {
 std::atomic<std::uint64_t>& guestMapEpoch();
 
 void* GuestAllocationsBegin_nid_postfix() {
+    SlowOperationTimer timer("allocations lock wait");
     return new std::unique_lock<std::recursive_mutex>(registry().mutex);
 }
 
@@ -157,6 +159,7 @@ void GuestAllocationsRequireUnpinned_nid_postfix(void*, const void* pointer, std
         return false;
     };
     if (!pinned()) return;
+    SlowOperationTimer timer("unpin release hooks");
     const auto hooks = registry().releaseHooks;
     for (const auto& [context, release] : hooks) release(context);
     require(!pinned(), "guest allocation is owned by an active GPU command");

@@ -2,6 +2,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/GuestBufferCache.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/DrawQueue.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
+#include "prx/libc/include/SlowOperation.hpp"
 #include <limits>
 #include <cstdio>
 #include <stdexcept>
@@ -47,6 +48,7 @@ bool ResidentColor::SharesPages(const ColorTarget& other) const {
 
 void ResidentColor::resolveCpuAccess(GuestMemoryTracking::Access access) {
     PerformanceTimer timing("Graphics.RenderMemory.CpuAccess");
+    SlowOperationTimer slowTimer(access == GuestMemoryTracking::Access::Invalidate ? "render target invalidate" : "render target cpu access");
     Require(memoryWatch != nullptr && context.drawQueue != nullptr, "render target memory resolver is unavailable");
     if (dirty || access == GuestMemoryTracking::Access::Invalidate) {
         context.drawQueue->WaitGpu();

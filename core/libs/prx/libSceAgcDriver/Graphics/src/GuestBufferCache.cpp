@@ -1,5 +1,6 @@
 #include "prx/libSceAgcDriver/Graphics/include/GuestBufferCache.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ReleaseQueue.hpp"
+#include "prx/libc/include/SlowOperation.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
 #include "prx/libc/include/General.hpp"
@@ -48,6 +49,7 @@ GuestBufferCache::Chunk& GuestBufferCache::chunk(std::uint64_t address) {
 }
 
 void GuestBufferCache::resolve(void* owner, GuestMemoryTracking::Access access) {
+    SlowOperationTimer slowTimer("buffer cache cpu access");
     auto* self = static_cast<Owner*>(owner);
     auto& cache = *self->cache;
     std::lock_guard lock(cache.mutex);

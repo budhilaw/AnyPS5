@@ -28,6 +28,7 @@
 #include <chrono>
 #include "prx/libc/include/General.hpp"
 #include "prx/libc/include/PreciseSleep.hpp"
+#include "prx/libc/include/SlowOperation.hpp"
 #include "prx/libSceAgcDriver/Execution/include/VulkanLibrary.hpp"
 #include <SDL_loadso.h>
 #include <SDL_error.h>
@@ -1103,7 +1104,9 @@ Graphics::Context VulkanDevice::graphicsContext() const {
 }
 
 void VulkanDevice::ResolveMemory(std::uint64_t address, std::size_t bytes, bool writable) {
+    SlowOperationTimer slowTimer("device resolve memory");
     std::lock_guard memoryLock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
+    slowTimer.Split("device resolve lock wait");
     state->drawQueue->Resolve(address, bytes);
     state->renderCache->Resolve(address, bytes, writable);
     state->PublishHostRanges();
@@ -1130,7 +1133,9 @@ void VulkanDevice::ValidateDraw(const Graphics::State& graphics, std::span<const
 }
 
 void VulkanDevice::EnqueueDraw(const Graphics::State& graphics, const Pm4::DrawParameters& draw, std::span<const Graphics::CompiledShader> shaders, std::span<const Graphics::GuestMemorySnapshot> snapshots) {
+    SlowOperationTimer slowTimer("device draw");
     std::lock_guard memoryLock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
+    slowTimer.Split("device draw lock wait");
     const GuestMemory::MemoryAccessScope memoryScope(this, [](void* context, std::uint64_t address, std::size_t bytes, bool writable) {
         static_cast<VulkanDevice*>(context)->ResolveMemory(address, bytes, writable);
     });
@@ -1152,7 +1157,9 @@ void VulkanDevice::EnqueueDraw(const Graphics::State& graphics, const Pm4::DrawP
 }
 
 void VulkanDevice::Dispatch(const ShaderRecompiler::RecompileResult& shader, std::uint32_t x, std::uint32_t y, std::uint32_t z, std::span<const Graphics::GuestMemorySnapshot> snapshots) {
+    SlowOperationTimer slowTimer("device dispatch");
     std::lock_guard memoryLock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
+    slowTimer.Split("device dispatch lock wait");
     PerformanceTimer timing("Vulkan.Dispatch");
     const GuestMemory::MemoryAccessScope memoryScope(this, [](void* context, std::uint64_t address, std::size_t bytes, bool writable) {
         static_cast<VulkanDevice*>(context)->ResolveMemory(address, bytes, writable);

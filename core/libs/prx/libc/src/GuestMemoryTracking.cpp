@@ -5,6 +5,7 @@
 #include "prx/libc/include/GuestMemoryTracking.hpp"
 #include "prx/libc/include/MemoryTrackingPlatform.hpp"
 #include "prx/libc/include/GuestMemoryBacking.hpp"
+#include "prx/libc/include/SlowOperation.hpp"
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -133,7 +134,9 @@ std::vector<std::shared_ptr<Entry>> overlapping(std::uint64_t address, std::size
 
 bool fault(std::uint64_t address, bool writable) {
     if (address == 0) return false;
+    SlowOperationTimer timer(writable ? "tracking fault write" : "tracking fault read");
     std::lock_guard lock(registry().mutex);
+    timer.Split("tracking fault lock wait");
     const auto entries = overlapping(address, 1);
     if (entries.empty()) return false;
     bool handled = false;
@@ -212,7 +215,9 @@ void GuestMemoryTrackingProtect_nid_postfix(void* handle, Protection protection)
 void GuestMemoryTrackingResolve_nid_postfix(std::uint64_t address, std::size_t bytes, bool writable) {
     if (bytes == 0) return;
     if (!pagesRestricted(address, checkedEnd(address, bytes), writable)) return;
+    SlowOperationTimer timer(writable ? "tracking resolve write" : "tracking resolve read");
     std::lock_guard lock(registry().mutex);
+    timer.Split("tracking resolve lock wait");
     for (const auto& entry : overlapping(address, bytes)) {
         if (entry->protection == Protection::None || (writable && entry->protection == Protection::Read)) resolve(entry, writable ? Access::Write : Access::Read);
     }
@@ -220,7 +225,9 @@ void GuestMemoryTrackingResolve_nid_postfix(std::uint64_t address, std::size_t b
 
 void GuestMemoryTrackingInvalidate_nid_postfix(std::uint64_t address, std::size_t bytes) {
     if (bytes == 0) return;
+    SlowOperationTimer timer("tracking invalidate");
     std::lock_guard lock(registry().mutex);
+    timer.Split("tracking invalidate lock wait");
     for (const auto& entry : overlapping(address, bytes)) {
         resolve(entry, Access::Invalidate);
         entry->active = false;
@@ -252,7 +259,9 @@ void GuestMemoryTrackingValidate_nid_postfix(std::uint64_t address, std::size_t 
         } catch (const std::exception&) {
         }
     }
+    SlowOperationTimer timer("tracking validate");
     std::lock_guard lock(registry().mutex);
+    timer.Split("tracking validate lock wait");
     for (const auto& entry : overlapping(address, bytes)) {
         if (address < entry->address) validate(address, static_cast<std::size_t>(entry->address - address));
         const auto first = std::max(address, entry->address);
