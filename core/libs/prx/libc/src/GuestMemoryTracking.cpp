@@ -188,8 +188,10 @@ void GuestMemoryTrackingDestroy_nid_postfix(void* handle) noexcept {
     std::lock_guard lock(registry().mutex);
     std::unique_ptr<std::shared_ptr<Entry>> owner(static_cast<std::shared_ptr<Entry>*>(handle));
     const auto& entry = **owner;
-    Platform::Restore(entry.original);
-    if (entry.protection != Protection::ReadWrite) markPages(entry.address, entry.bytes, Protection::ReadWrite);
+    if (entry.protection != Protection::ReadWrite) {
+        Platform::Restore(entry.original);
+        markPages(entry.address, entry.bytes, Protection::ReadWrite);
+    }
     registry().entries.erase(entry.address);
 }
 
@@ -202,7 +204,6 @@ void GuestMemoryTrackingProtect_nid_postfix(void* handle, Protection protection)
     if (tightening) markPages(entry.address, entry.bytes, protection);
     if (protection == Protection::ReadWrite) {
         Platform::Restore(entry.original);
-        entry.original.clear();
     } else {
         if (entry.original.empty()) entry.original = Platform::Query(entry.address, entry.bytes);
         Platform::Protect(entry.address, entry.bytes, protection);
@@ -230,6 +231,7 @@ void GuestMemoryTrackingInvalidate_nid_postfix(std::uint64_t address, std::size_
     timer.Split("tracking invalidate lock wait");
     for (const auto& entry : overlapping(address, bytes)) {
         resolve(entry, Access::Invalidate);
+        entry->original.clear();
         entry->active = false;
     }
 }
