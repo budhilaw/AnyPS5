@@ -8,6 +8,7 @@
 #include "prx/libSceAgcDriver/Execution/include/MemoryAccessScope.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
 #include "prx/libSceAgcDriver/Execution/include/CallerSymbol.hpp"
+#include "prx/libc/include/SlowOperation.hpp"
 #include <cstdlib>
 #include <limits>
 #include <algorithm>
@@ -221,6 +222,7 @@ std::shared_ptr<ResidentColor> RenderCache::Get(const ColorTarget& color, bool b
         timing.Mark("shared_pages");
     }
     if (entries.size() >= 160) {
+        SlowOperationTimer full("render target cache full");
         Flush();
         std::vector<std::map<std::uint64_t, std::shared_ptr<ResidentColor>>::iterator> candidates;
         for (auto it = entries.begin(); it != entries.end(); ++it) {
@@ -234,6 +236,7 @@ std::shared_ptr<ResidentColor> RenderCache::Get(const ColorTarget& color, bool b
             it->second->ReleaseMemory();
             retire(it->second);
             entries.erase(it);
+            SlowOperationRecord_nid_no_patch("render target evict", 0);
         }
         timing.Mark("evict");
     }
