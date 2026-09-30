@@ -108,6 +108,42 @@ void testRegisters() {
     expectFailure([&] { AgcDriver::Pm4::Validate(makePacket(0x9f, {0, 0, 0x80000000, 0}), 0x20); }, "compute");
 }
 
+bool sameRegisters(const AgcDriver::QueueState& left, const AgcDriver::QueueState& right) {
+    return left.context == right.context && left.shader == right.shader && left.userConfig == right.userConfig && left.indexType == right.indexType;
+}
+
+void testRegisterPairs() {
+    const AgcDriver::QueueState initial{};
+    const std::array<std::uint32_t, 10> list{0x10, 41, 0x0bad0011, 99, 0x80000011, 42, 0x243, 2, 0x10, 43};
+    const std::array<std::uint32_t, 8> wellFormed{0x10, 41, 0x80000011, 42, 0x243, 2, 0x10, 43};
+    for (const auto opcode : {0x9fu, 0x63u, 0x64u}) {
+        AgcDriver::QueueState applied;
+        AgcDriver::Pm4::ApplyRegisterPairs(applied, opcode, list);
+        const auto& bank = opcode == 0x9f ? applied.context : opcode == 0x63 ? applied.shader : applied.userConfig;
+        check(bank.at(0x10) == 43 && bank.at(0x11) == 42 && bank.at(0x243) == 2, "register pairs lost their order, their bit-31 offset or their bank");
+        check((opcode == 0x9f || applied.context == initial.context) && (opcode == 0x63 || applied.shader == initial.shader) && (opcode == 0x64 || applied.userConfig == initial.userConfig), "register pairs wrote the bank of another opcode");
+        check(applied.indexType == (opcode == 0x64 ? 2u : initial.indexType), "only the user-config list may set the index type");
+        AgcDriver::QueueState executed;
+        execute(executed, makePacket(opcode, {low(list.data()), high(list.data()), 0x80000000, 5}));
+        check(sameRegisters(applied, executed), "register pairs changed other registers than the packet executor");
+        auto filtered = list;
+        const auto kept = AgcDriver::Pm4::FilterRegisterPairs(filtered);
+        check(kept.has_value() && kept->data() == filtered.data() && std::equal(kept->begin(), kept->end(), wellFormed.begin(), wellFormed.end()), "the submit filter did not drop exactly the malformed pairs in place");
+        AgcDriver::QueueState prefiltered;
+        AgcDriver::Pm4::ApplyRegisterPairs(prefiltered, opcode, *kept);
+        check(sameRegisters(prefiltered, executed), "a filtered register list changed other registers than the packet executor");
+    }
+    auto unpadded = wellFormed;
+    const auto whole = AgcDriver::Pm4::FilterRegisterPairs(unpadded);
+    check(whole.has_value() && whole->data() == unpadded.data() && whole->size() == unpadded.size() && unpadded == wellFormed, "the submit filter changed a list without malformed pairs");
+    std::array<std::uint32_t, 4> padding{0x0bad0000, 1, 0x7fff0010, 2};
+    const auto empty = AgcDriver::Pm4::FilterRegisterPairs(padding);
+    check(empty.has_value() && empty->empty(), "the submit filter kept a malformed pair");
+    std::array<std::uint32_t, 6> sentinel{0x0bad0000, 1, 0x10, 2, 0xffffffffu, 3};
+    const auto original = sentinel;
+    check(!AgcDriver::Pm4::FilterRegisterPairs(sentinel).has_value() && sentinel == original, "a list with a register the executor rejects was filtered instead of left to the executor");
+}
+
 void testContextAndBases() {
     AgcDriver::QueueState state;
     execute(state, makePacket(0x69, {0x10, 17}));
@@ -619,6 +655,7 @@ int main(int argc, char** argv) {
         }
         testCatalog();
         testRegisters();
+        testRegisterPairs();
         testContextAndBases();
         testIndexedDraw();
         testAutoDraw();
@@ -634,7 +671,7 @@ int main(int argc, char** argv) {
         testWorkerWatchdog();
         testDeviceOcclusionDump();
         LibcRunShutdown_nid_postfix();
-        std::puts("PM4 catalog, registers, state, memory, occlusion dump, submission, driver thread, worker watchdog and device occlusion dump tests passed");
+        std::puts("PM4 catalog, registers, register pairs, state, memory, occlusion dump, submission, driver thread, worker watchdog and device occlusion dump tests passed");
         return 0;
     } catch (const std::exception& error) {
         std::fprintf(stderr, "%s\n", error.what());

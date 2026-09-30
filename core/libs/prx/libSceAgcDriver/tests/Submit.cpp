@@ -1,15 +1,19 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver.hpp"
+#include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Presentation.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PublishedPointer.hpp"
 #include "prx/libSceAgcDriver/Execution/include/QueueState.hpp"
+#include "prx/libSceAgcDriver/Execution/include/VideoOutput.hpp"
 #include "prx/libc/include/Shutdown.hpp"
 #include "prx/libSceAgcDriver/Submit/include/Dcb.hpp"
 #include "prx/libSceAgcDriver/Submit/include/Acb.hpp"
 #include "prx/libSceAgcDriver/Eq/include/Query.hpp"
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <exception>
 #include <future>
 #include <limits>
@@ -18,6 +22,14 @@
 #include <string>
 #include <thread>
 #include <vector>
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <sys/mman.h>
+#endif
 
 static_assert(sizeof(Packet) == 16);
 static_assert(offsetof(Packet, addr) == 0);
@@ -289,6 +301,135 @@ std::string testGraphicsFailure() {
     return "intentional graphics failure";
 }
 
+std::vector<std::uint32_t> indirectRegisters(std::uint32_t opcode, const std::uint32_t* pairs, std::uint32_t count) {
+    const auto address = reinterpret_cast<std::uintptr_t>(pairs);
+    return {0xc0030000u | (opcode << 8u), static_cast<std::uint32_t>(address), static_cast<std::uint32_t>(address >> 32u), 0x80000000u, count};
+}
+
+void testIndirectContextRegisters() {
+    const std::array<std::uint32_t, 6> pairs{0x80000202u, 0x00cc0010u, 0x0bad0202u, 0x00cc0010u, 0x202u, 0x00cc0040u};
+    const auto markerAddress = reinterpret_cast<std::uintptr_t>(&marker);
+    auto commands = indirectRegisters(0x9f, pairs.data(), 3);
+    commands.insert(commands.end(), {0xc0012d00u, 3, 2, 0xc0033700u, 0x100, static_cast<std::uint32_t>(markerAddress), static_cast<std::uint32_t>(markerAddress >> 32u), 1, 0xc0001200u, 0});
+    Packet packet{commands.data(), static_cast<std::uint32_t>(commands.size()), 0, {}};
+    check(sceAgcDriverSubmitDcb(&packet) == 0, "context register list submission was not accepted");
+    AgcDriverWaitIdle_nid_postfix();
+    check(marker == 1, "a draw after a context register list saw other context registers than the list set");
+    marker = 0;
+}
+
+const std::array<std::uint32_t, 10> shaderRegisterPairs{0x20cu, 0x11u, 0x0bad020eu, 0x99u, 0x8000020eu, 0x22u, 0x20fu, 0x33u, 0x20eu, 0x44u};
+
+std::string expectListedShaderRegisters(const char* reason) {
+    const auto message = expectFailure([] { AgcDriverWaitIdle_nid_postfix(); });
+    check(message.find("written neighbours: 0x20c=0x11 0x20e=0x44 0x20f=0x33") != std::string::npos, reason);
+    return message;
+}
+
+std::vector<std::uint32_t> shaderRegisterDispatch(const std::uint32_t* pairs) {
+    auto commands = labelWait();
+    const auto list = indirectRegisters(0x63, pairs, static_cast<std::uint32_t>(shaderRegisterPairs.size() / 2));
+    commands.insert(commands.end(), list.begin(), list.end());
+    commands.insert(commands.end(), {0xc0031500u, 1, 1, 1, 0x41});
+    return commands;
+}
+
+std::string testIndirectRegistersFromCopy() {
+    auto pairs = shaderRegisterPairs;
+    submitCompute(shaderRegisterDispatch(pairs.data()));
+    pairs.fill(0x20du);
+    label = 1;
+    return expectListedShaderRegisters("a register list was not applied from its copy taken at submission");
+}
+
+std::uint32_t* allocatePage() {
+#ifdef _WIN32
+    return static_cast<std::uint32_t*>(VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+#else
+    auto* page = mmap(nullptr, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    return page == MAP_FAILED ? nullptr : static_cast<std::uint32_t*>(page);
+#endif
+}
+
+void protectPage(void* page, bool readable) {
+#ifdef _WIN32
+    DWORD previous = 0;
+    check(VirtualProtect(page, 4096, readable ? PAGE_READWRITE : PAGE_NOACCESS, &previous) != 0, "VirtualProtect failed");
+#else
+    check(mprotect(page, 4096, readable ? PROT_READ | PROT_WRITE : PROT_NONE) == 0, "mprotect failed");
+#endif
+}
+
+void releasePage(void* page) {
+#ifdef _WIN32
+    VirtualFree(page, 0, MEM_RELEASE);
+#else
+    munmap(page, 4096);
+#endif
+}
+
+std::string testIndirectRegistersInPlace() {
+    auto* pairs = allocatePage();
+    check(pairs != nullptr, "register list page allocation failed");
+    std::copy(shaderRegisterPairs.begin(), shaderRegisterPairs.end(), pairs);
+    protectPage(pairs, false);
+    submitCompute(shaderRegisterDispatch(pairs));
+    protectPage(pairs, true);
+    label = 1;
+    const auto message = expectListedShaderRegisters("a register list that could not be copied at submission was not read in place when it executed");
+    releasePage(pairs);
+    return message;
+}
+
+std::string testIndirectRegisterSentinel() {
+    const std::array<std::uint32_t, 4> pairs{0x20cu, 0x11u, 0xffffffffu, 0};
+    auto commands = indirectRegisters(0x63, pairs.data(), 2);
+    commands.insert(commands.end(), {0xc0031500u, 1, 1, 1, 0x41});
+    submitCompute(commands);
+    const auto message = expectFailure([] { AgcDriverWaitIdle_nid_postfix(); });
+    check(message.find("indirect register sentinel semantics are not implemented: indirect register packet") != std::string::npos, "a register list the packet executor rejects did not fail with its report");
+    return message;
+}
+
+std::shared_ptr<AgcDriver::FrameTiming> flippedFrame;
+
+class FrameCapture final : public AgcDriver::IFlipRequest {
+public:
+    void GpuReady(const std::shared_ptr<AgcDriver::FrameTiming>& timing) override { flippedFrame = timing; }
+    void Fail(std::exception_ptr) noexcept override {}
+};
+
+class FrameCaptureOutput final : public AgcDriver::IVideoOutput {
+public:
+    std::shared_ptr<AgcDriver::IFlipRequest> Reserve(const AgcDriver::FlipInfo&) override { return std::make_shared<FrameCapture>(); }
+    void Fail(std::exception_ptr) noexcept override {}
+};
+
+void testIndirectRegisterTiming() {
+#ifdef _WIN32
+    check(_putenv_s("ANYPS5_TRACE_TIMING", "1") == 0, "frame timing could not be enabled");
+#else
+    check(setenv("ANYPS5_TRACE_TIMING", "1", 1) == 0, "frame timing could not be enabled");
+#endif
+    const auto output = std::make_shared<FrameCaptureOutput>();
+    AgcDriverRegisterVideoOutput_nid_postfix(7, output);
+    const std::array<std::uint32_t, 4> contextPairs{0x202u, 0x00cc0010u, 0x203u, 0};
+    const std::array<std::uint32_t, 2> userConfigPairs{0x243u, 1};
+    std::vector<std::uint32_t> commands;
+    const auto append = [&](const std::vector<std::uint32_t>& words) { commands.insert(commands.end(), words.begin(), words.end()); };
+    append(indirectRegisters(0x9f, contextPairs.data(), 2));
+    append(indirectRegisters(0x63, shaderRegisterPairs.data(), static_cast<std::uint32_t>(shaderRegisterPairs.size() / 2)));
+    append(indirectRegisters(0x64, userConfigPairs.data(), 1));
+    append({0xc004105cu, 7, 0xfffffffeu, 1, 0, 0});
+    Packet packet{commands.data(), static_cast<std::uint32_t>(commands.size()), 0, {}};
+    check(sceAgcDriverSubmitDcb(&packet) == 0, "register lists before a flip were not accepted");
+    AgcDriverWaitIdle_nid_postfix();
+    AgcDriverUnregisterVideoOutput_nid_postfix(7, output);
+    check(flippedFrame != nullptr, "the flip after the register lists did not hand over its frame timing");
+    check(flippedFrame->Get("Driver.Packet", "register_list")->count == 3 && flippedFrame->Get("Driver.Packet", "pm4_execute")->count == 0, "register lists copied at submission went through the packet executor instead of being applied from their copies");
+    flippedFrame.reset();
+}
+
 }
 
 int main(int argc, char** argv) {
@@ -298,11 +439,18 @@ int main(int argc, char** argv) {
         if (mode == "shader-after-submit") expected = testShaderRegisteredAfterSubmit();
         else if (mode == "shader-before-submit") expected = testShaderRegisteredBeforeSubmit();
         else if (mode == "graphics-failure") expected = testGraphicsFailure();
-        else {
+        else if (mode == "indirect-registers") expected = testIndirectRegistersFromCopy();
+        else if (mode == "indirect-registers-in-place") expected = testIndirectRegistersInPlace();
+        else if (mode == "indirect-register-sentinel") expected = testIndirectRegisterSentinel();
+        else if (mode == "indirect-register-timing") {
+            testIndirectRegisterTiming();
+            testWorkerFailure();
+        } else {
             testEvents();
             testValidation();
             testClearState();
             testSubmissions();
+            testIndirectContextRegisters();
             testPublishedPointer();
             testWorkerFailure();
         }
