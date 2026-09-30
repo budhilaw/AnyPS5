@@ -7,6 +7,8 @@
 #include <spirv/unified1/GLSL.std.450.h>
 #include <spirv/unified1/spirv.hpp>
 #include <bit>
+#include <cstdint>
+#include <cstdio>
 #include <stdexcept>
 #include <string>
 #include <SpirvBackend/SpirvEmitterInstructions.hpp>
@@ -15,8 +17,14 @@ namespace ShaderRecompiler {
 
 namespace {
 
+std::string HashText(std::uint64_t hash) {
+    char text[17];
+    std::snprintf(text, sizeof(text), "%016llx", static_cast<unsigned long long>(hash));
+    return text;
+}
+
 [[noreturn]] void FailProgram(const IrProgram& program, const char* reason) {
-    throw std::runtime_error("SPIR-V emission failed: hash=0x" + std::to_string(program.Resources().shaderHash) + " stage=" + std::to_string(static_cast<unsigned>(program.Resources().stage)) + " reason=" + reason);
+    throw std::runtime_error("SPIR-V emission failed: hash=0x" + HashText(program.Resources().shaderHash) + " stage=" + std::to_string(static_cast<unsigned>(program.Resources().stage)) + " reason=" + reason);
 }
 
 const ShaderWorkgroupInputInfo* ShaderWorkgroupInputFor(const SpirvEmitterState& state) {
@@ -204,7 +212,7 @@ std::uint32_t SpirvValueEmitContext::Label(const IrBlock* block) const {
 }
 
 [[noreturn]] void SpirvValueEmitContext::Fail(const IrValue& inst, const char* reason) const {
-    throw std::runtime_error("SPIR-V emission failed: hash=0x" + std::to_string(state.program.Resources().shaderHash) + " stage=" + std::to_string(static_cast<unsigned>(state.program.Resources().stage)) + " opcode=" + std::string(IrOpcodeName(inst.Opcode())) + " reason=" + reason);
+    throw std::runtime_error("SPIR-V emission failed: hash=0x" + HashText(state.program.Resources().shaderHash) + " stage=" + std::to_string(static_cast<unsigned>(state.program.Resources().stage)) + " opcode=" + std::string(IrOpcodeName(inst.Opcode())) + " reason=" + reason);
 }
 
 std::vector<std::uint32_t> SpirvEmitter::Emit(const IrProgram& program, const BindingAllocationResult& bindings, const SpirvTargetOptions& target) const {

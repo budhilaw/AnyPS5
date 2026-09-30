@@ -78,6 +78,7 @@ IrProgram PrepareResourceProgram(const RecompileRequest& request, bool expandInd
 
     TranslateOptions translateOptions {};
     translateOptions.stage = stageKind;
+    translateOptions.shaderHash = request.shader.codeHash;
     translateOptions.waveSize = request.context.waveSize;
     translateOptions.userDataBaseRegister = request.context.userDataBaseRegister;
     translateOptions.userDataCount = static_cast<std::uint32_t>(request.context.userData.size());

@@ -4,6 +4,7 @@
 #include "SpirvBackend/SpirvEmitterHelpers.hpp"
 #include <spirv/unified1/spirv.hpp>
 #include <algorithm>
+#include <cstdio>
 #include <stdexcept>
 #include <string>
 
@@ -33,7 +34,9 @@ constexpr RdnaImageDimensionInfo ImageDimensions[] = {
 }
 
 [[noreturn]] void ExitDescriptorBindingFailure(const SpirvEmitterState& state, DescriptorBindingKind kind, std::uint32_t resource, const char* reason) {
-    throw std::runtime_error("shader binding resolution failed during SPIR-V emit: hash=" + std::to_string(state.program.Resources().shaderHash) + " stage=" + std::to_string(static_cast<std::uint32_t>(StageOf(state))) + " resource=" + std::to_string(resource) + " binding_kind=" + std::to_string(static_cast<std::uint32_t>(kind)) + " reason=" + reason);
+    char hash[17];
+    std::snprintf(hash, sizeof(hash), "%016llx", static_cast<unsigned long long>(state.program.Resources().shaderHash));
+    throw std::runtime_error("shader binding resolution failed during SPIR-V emit: hash=0x" + std::string(hash) + " stage=" + std::to_string(static_cast<std::uint32_t>(StageOf(state))) + " resource=" + std::to_string(resource) + " binding_kind=" + std::to_string(static_cast<std::uint32_t>(kind)) + " reason=" + reason);
 }
 
 std::uint32_t ResourceForDescriptor(const SpirvEmitterState& state, DescriptorBindingKind kind, std::uint32_t resource) {
