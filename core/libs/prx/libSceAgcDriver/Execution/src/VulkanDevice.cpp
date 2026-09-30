@@ -1256,6 +1256,7 @@ void VulkanDevice::EnqueueDraw(const Graphics::State& graphics, const Pm4::DrawP
         state->drawQueue->Wait();
     }
     Graphics::Draw(context, graphics, draw, shaders, snapshots);
+    slowTimer.Split("device draw record");
     if (slowGpu != nullptr) {
         state->drawQueue->Flush();
         const auto start = std::chrono::steady_clock::now();
@@ -1264,6 +1265,7 @@ void VulkanDevice::EnqueueDraw(const Graphics::State& graphics, const Pm4::DrawP
         if (milliseconds >= std::atof(slowGpu)) APS5_LOG_OUT("[slow-gpu] draw program 0x%llx %u indices x%u into 0x%llx %ux%u took %.1f ms", static_cast<unsigned long long>(GpuJournal::CurrentProgram), draw.indexCount, draw.instanceCount, static_cast<unsigned long long>(graphics.hasColorTarget ? graphics.color.address : 0), graphics.renderExtent.width, graphics.renderExtent.height, milliseconds);
     }
     state->PublishHostRanges();
+    slowTimer.Split("device draw publish");
 }
 
 void VulkanDevice::Dispatch(const ShaderRecompiler::RecompileResult& shader, std::uint32_t x, std::uint32_t y, std::uint32_t z, std::span<const Graphics::GuestMemorySnapshot> snapshots) {
@@ -1298,6 +1300,7 @@ void VulkanDevice::Dispatch(const ShaderRecompiler::RecompileResult& shader, std
     try {
         auto resources = std::make_shared<Graphics::ShaderResources>(context, shaders[0], snapshots);
         timing.Mark("shader_resources");
+        slowTimer.Split("device dispatch resources");
         static const bool journalAllTextures = std::getenv("ANYPS5_JOURNAL_TEXTURES") != nullptr;
         if (journalAllTextures) GpuJournal::Record("  dispatch textures:" + resources->DescribeTextures());
         static const char* debugGdsInputsValue = std::getenv("ANYPS5_DEBUG_GDS_INPUTS");
@@ -1395,6 +1398,7 @@ void VulkanDevice::Dispatch(const ShaderRecompiler::RecompileResult& shader, std
         download.dstAccessMask = VK_ACCESS_HOST_READ_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_INDEX_READ_BIT | VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_UNIFORM_READ_BIT;
         state->DeviceFunction<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(commands, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &download, 0, nullptr, 0, nullptr);
         timing.Mark("command_record");
+        slowTimer.Split("device dispatch record");
         bool debugPost = false;
         for (const auto& texture : resources->Textures()) debugPost = debugPost || (texture->Extent().width >= 240 && texture->GuestFormat() == VK_FORMAT_B10G11R11_UFLOAT_PACK32);
         const auto debugResources = debugGdsInputs && (debugPost || (x == 8 && y == 8 && z == 8)) ? resources : nullptr;
@@ -1415,7 +1419,9 @@ void VulkanDevice::Dispatch(const ShaderRecompiler::RecompileResult& shader, std
             }
         }
         timing.Mark("enqueue");
+        slowTimer.Split("device dispatch enqueue");
         state->PublishHostRanges();
+        slowTimer.Split("device dispatch publish");
     } catch (...) {
         throw;
     }
