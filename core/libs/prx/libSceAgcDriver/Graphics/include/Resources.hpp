@@ -103,14 +103,18 @@ public:
 
 private:
     void release() noexcept;
+    void beginTimestamps();
+    void readTimestamps();
     Context context;
     VkCommandBuffer commands = VK_NULL_HANDLE;
     VkFence fence = VK_NULL_HANDLE;
+    VkQueryPool timestamps = VK_NULL_HANDLE;
     bool pending = false;
     bool submitted = false;
 public:
     std::chrono::nanoseconds submittedAt{};
     std::chrono::nanoseconds completedAt{};
+    std::chrono::nanoseconds gpuTime{};
 private:
 };
 

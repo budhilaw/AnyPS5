@@ -309,6 +309,8 @@ private:
         const bool queuedWrite = self.graphicsMayWrite(address, bytes);
         const bool recorded = !queuedWrite && current->NeedsResolve(address, bytes);
         if (!writable && !queuedWrite && !recorded) return;
+        PerformanceTimer timing("Driver.HostResolve");
+        timing.Mark(queuedWrite ? "queued_write" : recorded ? "recorded_write" : "host_write");
         if (static const bool trace = std::getenv("ANYPS5_TRACE_DRAINS") != nullptr; trace) {
             static int reported = 0;
             if (reported++ < 400) {
@@ -324,7 +326,9 @@ private:
             }
         }
         self.drainGraphics();
+        timing.Mark("drain");
         current->ResolveMemory(address, bytes, writable);
+        timing.Mark("resolve");
     }
     static bool quietForHost(void* context, std::uint64_t address, std::size_t bytes) {
         auto& self = *static_cast<Driver*>(context);

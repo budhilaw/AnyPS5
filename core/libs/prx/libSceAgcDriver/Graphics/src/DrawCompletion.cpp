@@ -14,6 +14,7 @@ void DrawQueue::retire(Batch batch) {
     if (auto* frame = PerformanceContext::Current(); frame != nullptr && batch.commands) {
         const auto begin = std::max(batch.commands->submittedAt, lastCompletion);
         if (batch.commands->completedAt > begin) frame->Add(frame->Get("Graphics.GpuEstimate", "busy"), std::chrono::duration_cast<FrameTiming::Clock::duration>(batch.commands->completedAt - begin));
+        if (batch.commands->gpuTime.count() > 0) frame->Add(frame->Get("Graphics.GpuTime", "execute"), std::chrono::duration_cast<FrameTiming::Clock::duration>(batch.commands->gpuTime));
         lastCompletion = std::max(lastCompletion, batch.commands->completedAt);
     }
     PerformanceTimer timing("Graphics.DrawQueue.Retire");

@@ -11,6 +11,7 @@ bool CommandBatch::IsComplete() {
     Check(result, "vkGetFenceStatus graphics");
     pending = false;
     completedAt = FrameTiming::Clock::now().time_since_epoch();
+    readTimestamps();
     return true;
 }
 

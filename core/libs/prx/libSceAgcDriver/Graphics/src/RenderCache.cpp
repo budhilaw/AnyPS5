@@ -189,10 +189,12 @@ void RenderCache::retire(std::shared_ptr<ResidentColor> entry) {
 }
 
 std::shared_ptr<ResidentColor> RenderCache::Get(const ColorTarget& color, bool blending) {
+    PerformanceTimer timing("Graphics.RenderCache.Get");
     Require(color.address != 0 && color.bytes != 0 && color.bytes <= std::numeric_limits<std::uint64_t>::max() - color.address, "invalid resident color range");
     if (context.drawQueue && context.drawQueue->WritesPending(color.address, color.bytes)) {
         const bool ordered = !color.gpuOnly && context.guestBufferCache != nullptr && context.guestBufferCache->HostImportable(color.address, color.bytes);
         context.drawQueue->Resolve(color.address, color.bytes, ordered);
+        timing.Mark("pending_writes");
     }
     if (blending) {
         VkFormatProperties properties{};
@@ -207,6 +209,7 @@ std::shared_ptr<ResidentColor> RenderCache::Get(const ColorTarget& color, bool b
         }
         if (previous.address == color.address && previous.bytes == color.bytes && previous.extent.width == color.extent.width && previous.extent.height == color.extent.height && previous.format == color.format && previous.tileMode == color.tileMode) {
             it->second->lastUse = ++useCounter;
+            timing.Mark("hit");
             return it->second;
         }
         static const bool traceTargets = std::getenv("ANYPS5_TRACE_TARGETS") != nullptr;
@@ -215,6 +218,7 @@ std::shared_ptr<ResidentColor> RenderCache::Get(const ColorTarget& color, bool b
         it->second->ReleaseMemory();
         retire(it->second);
         it = entries.erase(it);
+        timing.Mark("shared_pages");
     }
     if (entries.size() >= 160) {
         Flush();
@@ -231,10 +235,12 @@ std::shared_ptr<ResidentColor> RenderCache::Get(const ColorTarget& color, bool b
             retire(it->second);
             entries.erase(it);
         }
+        timing.Mark("evict");
     }
     auto entry = std::make_shared<ResidentColor>(context, color);
     entry->lastUse = ++useCounter;
     entries.emplace(color.address, entry);
+    timing.Mark("create");
     return entry;
 }
 
