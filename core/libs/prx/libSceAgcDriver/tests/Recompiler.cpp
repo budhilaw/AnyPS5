@@ -42,6 +42,20 @@ constexpr std::uint32_t OpImageSampleExplicitLod = 88u;
 constexpr std::uint32_t OpBitcast = 124u;
 constexpr std::uint32_t ImageOperandsLod = 2u;
 
+constexpr std::uint32_t BufferLoadFormatX = 0xe0002000u;
+constexpr std::uint32_t BufferLoadFormatXy = 0xe0042000u;
+constexpr std::uint32_t BufferLoadDword = 0xe0302000u;
+constexpr std::uint32_t BufferStoreDword = 0xe0702000u;
+constexpr std::uint32_t BufferStoreDwordx2 = 0xe0742000u;
+constexpr std::uint32_t InputOperands = 0x80000100u;
+constexpr std::uint32_t OutputOperands = 0x80010100u;
+constexpr std::uint32_t EndProgram = 0xbf810000u;
+constexpr std::uint32_t InputBufferAddress = 0x40000u;
+constexpr std::uint32_t Format16Float = 13u;
+constexpr std::uint32_t Format16x2Float = 29u;
+constexpr std::uint32_t Format32Float = 22u;
+constexpr std::size_t VariantLimit = 16u;
+
 constexpr TextureDescriptor NullTexture{};
 constexpr TextureDescriptor Texture1D{0x00000050u, 56u << 20u, 0u, 0x80000facu, 0u, 0u, 0u, 0u};
 constexpr TextureDescriptor Texture2D{0x00000020u, 56u << 20u, 0u, 0x90000facu, 0u, 0u, 0u, 0u};
@@ -160,6 +174,69 @@ std::uint32_t sampledLodBits(const RecompileResult& result) {
     throw std::runtime_error("the shader has no explicit-LOD sample");
 }
 
+using BufferDescriptor = std::array<std::uint32_t, 4>;
+
+constexpr std::uint32_t selectors(std::uint32_t x, std::uint32_t y, std::uint32_t z, std::uint32_t w) {
+    return x | (y << 3u) | (z << 6u) | (w << 9u);
+}
+
+constexpr BufferDescriptor bufferDescriptor(std::uint32_t stride, std::uint32_t format, std::uint32_t swizzle) {
+    return {InputBufferAddress, stride << 16u, 64u, (format << 12u) | swizzle};
+}
+
+constexpr std::array<std::uint32_t, 5> bufferProgram(std::uint32_t load, std::uint32_t store, std::uint32_t storeOffset) {
+    return {load, InputOperands, store | storeOffset, OutputOperands, EndProgram};
+}
+
+RecompileResult compileBuffer(std::span<const std::uint32_t> code, const BufferDescriptor& input) {
+    const std::array<std::uint32_t, 8> userData{input[0], input[1], input[2], input[3], OutputBuffer[0], OutputBuffer[1], OutputBuffer[2], OutputBuffer[3]};
+    auto request = computeRequest(code, userData, {});
+    request.useCache = true;
+    return Recompile(request);
+}
+
+void requireTwoVariants(std::span<const std::uint32_t> code, const BufferDescriptor& firstInput, const BufferDescriptor& secondInput, const std::string& field) {
+    const auto first = compileBuffer(code, firstInput);
+    const auto second = compileBuffer(code, secondInput);
+    require(!second.cacheHit, field + " reused a variant compiled for another value");
+    require(!(first.spirv == second.spirv), field + " did not change the compiled program");
+}
+
+void formattedLoadKeepsAVariantPerSelectorItReads() {
+    const auto code = bufferProgram(BufferLoadFormatX, BufferStoreDword, 0x10u);
+    requireTwoVariants(code, bufferDescriptor(4u, Format32Float, selectors(4u, 5u, 6u, 7u)), bufferDescriptor(4u, Format32Float, selectors(1u, 5u, 6u, 7u)), "the X selector of a buffer read with buffer_load_format_x");
+}
+
+void formattedPairLoadKeepsAVariantPerSelectorItReads() {
+    const auto code = bufferProgram(BufferLoadFormatXy, BufferStoreDwordx2, 0x20u);
+    requireTwoVariants(code, bufferDescriptor(4u, Format16x2Float, selectors(4u, 5u, 6u, 7u)), bufferDescriptor(4u, Format16x2Float, selectors(4u, 0u, 6u, 7u)), "the Y selector of a buffer read with buffer_load_format_xy");
+}
+
+void formattedLoadKeepsAVariantPerFormat() {
+    const auto code = bufferProgram(BufferLoadFormatX, BufferStoreDword, 0x30u);
+    requireTwoVariants(code, bufferDescriptor(4u, Format32Float, selectors(4u, 5u, 6u, 7u)), bufferDescriptor(4u, Format16Float, selectors(4u, 5u, 6u, 7u)), "the format of a buffer read with buffer_load_format_x");
+}
+
+void variantLimitEvictsTheLeastRecentlyUsedVariant() {
+    const auto code = bufferProgram(BufferLoadDword, BufferStoreDword, 0x40u);
+    const auto compileStride = [&code](std::uint32_t stride) {
+        return compileBuffer(code, bufferDescriptor(stride, 0u, selectors(4u, 5u, 6u, 7u)));
+    };
+    std::vector<RecompileResult> first;
+    for (std::uint32_t variant = 1; variant <= VariantLimit; ++variant) {
+        first.push_back(compileStride(4u * variant));
+        require(!first.back().cacheHit, "a new buffer stride reused a variant");
+    }
+    require(compileStride(4u).cacheHit, "a resident variant was compiled again");
+    require(!compileStride(4u * (VariantLimit + 1u)).cacheHit, "a buffer stride past the variant limit reused a variant");
+    require(compileStride(4u).cacheHit, "the most recently used variant was evicted");
+    const auto recompiled = compileStride(8u);
+    require(!recompiled.cacheHit, "the least recently used variant was not evicted");
+    require(recompiled.spirv == first[1].spirv && recompiled.spirvHash == first[1].spirvHash, "compiling an evicted variant again changed its SPIR-V");
+    require(!compileStride(12u).cacheHit, "the next least recently used variant was not evicted");
+    require(compileStride(20u).cacheHit, "a variant used after the evicted ones was evicted");
+}
+
 void skippedLightingProgramsCompile() {
     for (const auto request : SkippedLightingRequests) {
         const auto result = RecompileSerialized(request);
@@ -232,7 +309,7 @@ void planeSampleOfVolumeTextureKeepsTheInstructionShape() {
 }
 
 int main() {
-    const std::array<std::pair<const char*, void (*)()>, 12> tests{{
+    const std::array<std::pair<const char*, void (*)()>, 16> tests{{
         {"skipped lighting programs from run 27 compile", &skippedLightingProgramsCompile},
         {"a 2D sample of a cube-majority table binds its 2D entry", &planeSampleOfCubeMajorityTableBindsItsPlaneEntry},
         {"a cube sample of a cube-majority table binds a cube entry", &cubeSampleOfCubeMajorityTableBindsACubeEntry},
@@ -245,6 +322,10 @@ int main() {
         {"a 3D sample of a 2D or 2D-array texture keeps a 2D shape", &volumeSampleOfPlaneTexturesKeepsThePlaneShape},
         {"a 2D sample of a cube texture keeps the instruction shape", &planeSampleOfCubeTextureKeepsTheInstructionShape},
         {"a 2D sample of a 3D texture keeps the instruction shape", &planeSampleOfVolumeTextureKeepsTheInstructionShape},
+        {"buffer_load_format_x keeps a variant per selector it reads", &formattedLoadKeepsAVariantPerSelectorItReads},
+        {"buffer_load_format_xy keeps a variant per selector it reads", &formattedPairLoadKeepsAVariantPerSelectorItReads},
+        {"buffer_load_format_x keeps a variant per descriptor format", &formattedLoadKeepsAVariantPerFormat},
+        {"the variant limit evicts the least recently used variant", &variantLimitEvictsTheLeastRecentlyUsedVariant},
     }};
     int failures = 0;
     for (const auto& [name, test] : tests) {
@@ -260,6 +341,6 @@ int main() {
         std::printf("%d recompiler test(s) failed\n", failures);
         return 1;
     }
-    std::printf("Recompiler image dimension tests passed\n");
+    std::printf("Recompiler tests passed\n");
     return 0;
 }
