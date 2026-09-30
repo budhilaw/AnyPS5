@@ -148,9 +148,118 @@ std::uint64_t PrepareStack(std::uint64_t top, FiberObject* fiber) {
     return reinterpret_cast<std::uint64_t>(frame);
 }
 
+#elif defined(__x86_64__) && defined(_WIN32)
+
+[[gnu::naked]] void SwapStack(std::uint64_t*, std::uint64_t) {
+    __asm__(
+        "pushq %rbp\n\t"
+        "pushq %rbx\n\t"
+        "pushq %rdi\n\t"
+        "pushq %rsi\n\t"
+        "pushq %r12\n\t"
+        "pushq %r13\n\t"
+        "pushq %r14\n\t"
+        "pushq %r15\n\t"
+        "pushq %gs:0x8\n\t"
+        "pushq %gs:0x10\n\t"
+        "subq $168, %rsp\n\t"
+        "movups %xmm6, 0(%rsp)\n\t"
+        "movups %xmm7, 16(%rsp)\n\t"
+        "movups %xmm8, 32(%rsp)\n\t"
+        "movups %xmm9, 48(%rsp)\n\t"
+        "movups %xmm10, 64(%rsp)\n\t"
+        "movups %xmm11, 80(%rsp)\n\t"
+        "movups %xmm12, 96(%rsp)\n\t"
+        "movups %xmm13, 112(%rsp)\n\t"
+        "movups %xmm14, 128(%rsp)\n\t"
+        "movups %xmm15, 144(%rsp)\n\t"
+        "stmxcsr 160(%rsp)\n\t"
+        "fnstcw 164(%rsp)\n\t"
+        "movq %rsp, (%rcx)\n\t"
+        "movq %rdx, %rsp\n\t"
+        "movups 0(%rsp), %xmm6\n\t"
+        "movups 16(%rsp), %xmm7\n\t"
+        "movups 32(%rsp), %xmm8\n\t"
+        "movups 48(%rsp), %xmm9\n\t"
+        "movups 64(%rsp), %xmm10\n\t"
+        "movups 80(%rsp), %xmm11\n\t"
+        "movups 96(%rsp), %xmm12\n\t"
+        "movups 112(%rsp), %xmm13\n\t"
+        "movups 128(%rsp), %xmm14\n\t"
+        "movups 144(%rsp), %xmm15\n\t"
+        "ldmxcsr 160(%rsp)\n\t"
+        "fldcw 164(%rsp)\n\t"
+        "addq $168, %rsp\n\t"
+        "popq %rax\n\t"
+        "movq %rax, %gs:0x10\n\t"
+        "popq %rax\n\t"
+        "movq %rax, %gs:0x8\n\t"
+        "popq %r15\n\t"
+        "popq %r14\n\t"
+        "popq %r13\n\t"
+        "popq %r12\n\t"
+        "popq %rsi\n\t"
+        "popq %rdi\n\t"
+        "popq %rbx\n\t"
+        "popq %rbp\n\t"
+        "retq");
+}
+
+[[gnu::naked]] void StartTrampoline() {
+    __asm__(
+        "subq $32, %rsp\n\t"
+        "movq %r12, %rcx\n\t"
+        "callq *%r13\n\t"
+        "ud2");
+}
+
+std::uint64_t StackPointer() {
+    std::uint64_t pointer;
+    __asm__ volatile("movq %%rsp, %0" : "=r"(pointer));
+    return pointer;
+}
+
+[[noreturn]] void FiberStart(FiberObject* fiber) {
+    Run* run = ActiveRun();
+    FinishSwitch(run);
+    fiber->entry(fiber->arg_on_initialize, run->argOnRunTo);
+    run = ActiveRun();
+    run->entryReturned = true;
+    std::uint64_t discarded = 0;
+    SwapStack(&discarded, run->threadStack);
+    __builtin_unreachable();
+}
+
+std::uint64_t PrepareStack(std::uint64_t top, FiberObject* fiber) {
+    auto* frame = reinterpret_cast<std::uint64_t*>((top & ~std::uint64_t{15}) - 256 - 32);
+    std::uint32_t mxcsr = 0x9fc0;
+    std::uint16_t controlWord = 0x037f;
+    if ((fiber->flags & SetFpuRegisters) == 0) {
+        __asm__ volatile("stmxcsr %0" : "=m"(mxcsr));
+        __asm__ volatile("fnstcw %0" : "=m"(controlWord));
+    }
+    std::uint64_t stackBase = 0;
+    std::uint64_t stackLimit = 0;
+    if (fiber->addr_context != nullptr) {
+        stackBase = top;
+        stackLimit = reinterpret_cast<std::uint64_t>(fiber->addr_context);
+    } else {
+        __asm__ volatile("movq %%gs:0x8, %0" : "=r"(stackBase));
+        __asm__ volatile("movq %%gs:0x10, %0" : "=r"(stackLimit));
+    }
+    std::memset(frame, 0, 256);
+    frame[20] = mxcsr | (static_cast<std::uint64_t>(controlWord) << 32);
+    frame[21] = stackLimit;
+    frame[22] = stackBase;
+    frame[26] = reinterpret_cast<std::uint64_t>(fiber);
+    frame[25] = reinterpret_cast<std::uint64_t>(&FiberStart);
+    frame[31] = reinterpret_cast<std::uint64_t>(&StartTrampoline);
+    return reinterpret_cast<std::uint64_t>(frame);
+}
+
 #else
 
-[[noreturn]] void SwapStack(std::uint64_t*, std::uint64_t) { throw std::runtime_error("fiber stack switching is only implemented for x86-64 POSIX hosts"); }
+[[noreturn]] void SwapStack(std::uint64_t*, std::uint64_t) { throw std::runtime_error("fiber stack switching is only implemented for x86-64 hosts"); }
 std::uint64_t StackPointer() { return reinterpret_cast<std::uint64_t>(__builtin_frame_address(0)); }
 std::uint64_t PrepareStack(std::uint64_t, FiberObject*) { return 0; }
 
