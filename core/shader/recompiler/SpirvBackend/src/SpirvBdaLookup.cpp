@@ -16,6 +16,14 @@ void DefineGetBdaPointer(SpirvEmitterState& state) {
         state.module.AddFunction(spv::OpLoad, u32, value, pointer);
         return value;
     };
+    const auto cachePointer = TypePointer(state, spv::StorageClassPrivate, u64);
+    const auto zero = BdaConstant(state, 0u);
+    state.bdaCacheBegin = state.module.DefineInitializedGlobalVariable(cachePointer, spv::StorageClassPrivate, zero);
+    state.bdaCacheEnd = state.module.DefineInitializedGlobalVariable(cachePointer, spv::StorageClassPrivate, zero);
+    state.bdaCacheBase = state.module.DefineInitializedGlobalVariable(cachePointer, spv::StorageClassPrivate, zero);
+    state.module.AddName(state.bdaCacheBegin, "bda_cache_begin");
+    state.module.AddName(state.bdaCacheEnd, "bda_cache_end");
+    state.module.AddName(state.bdaCacheBase, "bda_cache_base");
     state.bdaPointerFunction = state.module.AllocateId();
     state.module.AddName(state.bdaPointerFunction, "get_bda_pointer");
     state.module.AddFunction(spv::OpFunction, u64, state.bdaPointerFunction, spv::FunctionControlMaskNone, state.module.Type(spv::OpTypeFunction, u64, u64, u32, u32));
@@ -31,6 +39,25 @@ void DefineGetBdaPointer(SpirvEmitterState& state) {
     const auto pointer = TypePointer(state, spv::StorageClassFunction, u32);
     state.module.AddFunction(spv::OpVariable, pointer, low, spv::StorageClassFunction);
     state.module.AddFunction(spv::OpVariable, pointer, high, spv::StorageClassFunction);
+    {
+        const auto loadCache = [&](std::uint32_t variable) {
+            const auto value = state.module.AllocateId();
+            state.module.AddFunction(spv::OpLoad, u64, value, variable);
+            return value;
+        };
+        const auto cachedBegin = loadCache(state.bdaCacheBegin);
+        const auto cachedEnd = loadCache(state.bdaCacheEnd);
+        const auto accessEnd = binary(spv::OpIAdd, u64, address, Unary(state, spv::OpUConvert, u64, bytes));
+        const auto inside = binary(spv::OpLogicalAnd, boolean, binary(spv::OpUGreaterThanEqual, boolean, address, cachedBegin), binary(spv::OpULessThanEqual, boolean, accessEnd, cachedEnd));
+        const auto hit = binary(spv::OpLogicalAnd, boolean, inside, binary(spv::OpUGreaterThan, boolean, accessEnd, address));
+        const auto hitLabel = state.module.AllocateId();
+        const auto missLabel = state.module.AllocateId();
+        state.module.AddFunction(spv::OpSelectionMerge, missLabel, spv::SelectionControlMaskNone);
+        state.module.AddFunction(spv::OpBranchConditional, hit, hitLabel, missLabel);
+        EmitLabel(state, hitLabel);
+        state.module.AddFunction(spv::OpReturnValue, binary(spv::OpIAdd, u64, loadCache(state.bdaCacheBase), binary(spv::OpISub, u64, address, cachedBegin)));
+        EmitLabel(state, missLabel);
+    }
     const auto fail = [&](std::uint32_t condition, BdaAbi::FaultReason reason) { ReturnBdaFailureIf(state, condition, address, bytes, instruction, reason); };
     const auto length = state.module.AllocateId();
     state.module.AddFunction(spv::OpArrayLength, u32, length, state.bdaPagetableVariable, 0u);
@@ -90,6 +117,9 @@ void DefineGetBdaPointer(SpirvEmitterState& state) {
     fail(binary(spv::OpULessThan, boolean, result, base), BdaAbi::FaultReason::Overflow);
     const auto deviceEnd = binary(spv::OpIAdd, u64, result, Unary(state, spv::OpUConvert, u64, bytes));
     fail(binary(spv::OpULessThanEqual, boolean, deviceEnd, result), BdaAbi::FaultReason::Overflow);
+    state.module.AddFunction(spv::OpStore, state.bdaCacheBegin, begin);
+    state.module.AddFunction(spv::OpStore, state.bdaCacheEnd, finish);
+    state.module.AddFunction(spv::OpStore, state.bdaCacheBase, base);
     state.module.AddFunction(spv::OpReturnValue, result);
     state.module.AddFunction(spv::OpFunctionEnd);
 }

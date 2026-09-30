@@ -85,6 +85,9 @@ struct SpirvEmitterState {
     std::uint32_t bdaPagetableVariable = 0;
     std::uint32_t faultBufferVariable = 0;
     std::uint32_t bdaPointerFunction = 0;
+    std::uint32_t bdaCacheBegin = 0;
+    std::uint32_t bdaCacheEnd = 0;
+    std::uint32_t bdaCacheBase = 0;
     std::uint32_t gdsVariable = 0;
     std::uint32_t gdsLength = 0;
     std::uint32_t pushConstantVariable = 0;

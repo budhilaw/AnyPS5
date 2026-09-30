@@ -36,8 +36,15 @@ void RunBdaContractTests() {
     reject([&] { ValidateBdaTarget(program, target); }, "extension");
     target.supportedExtensions = extensions;
     auto& block = program.CreateBlock();
-    block.AppendInstruction(&program.CreateValue(IrOpcode::Barrier, IrType::Void));
+    auto& barrier = program.CreateValue(IrOpcode::Barrier, IrType::Void);
+    block.AppendInstruction(&barrier);
     program.BlockOrder().push_back(&block);
+    ValidateBdaTarget(program, target);
+    auto& read = program.CreateValue(IrOpcode::LoadAddressU32, IrType::U32);
+    block.AppendInstruction(&read);
+    ValidateBdaTarget(program, target);
+    block.RemoveInstruction(&read);
+    block.InsertInstructionBefore(&barrier, &read);
     reject([&] { ValidateBdaTarget(program, target); }, "workgroup barrier");
     RecompileRequest request{};
     request.target.bdaAbiVersion = BdaAbi::Version;

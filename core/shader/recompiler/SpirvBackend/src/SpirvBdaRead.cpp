@@ -2,7 +2,9 @@
 #include "SpirvBackend/SpirvMemory/SpirvTypes.hpp"
 #include "SpirvBackend/SpirvMemory/SpirvConstants.hpp"
 #include <algorithm>
+#include <format>
 #include <limits>
+#include <unordered_map>
 #include <stdexcept>
 
 namespace ShaderRecompiler {
@@ -26,9 +28,32 @@ void ValidateBdaTarget(const IrProgram& program, const SpirvTargetOptions& targe
         if (std::find(target.supportedExtensions.begin(), target.supportedExtensions.end(), extension) == target.supportedExtensions.end()) throw std::runtime_error(std::string("BDA requires unsupported extension ") + extension);
     }
     if (program.Resources().stage == IrShaderStage::Mesh || program.Resources().stage == IrShaderStage::TessellationControl) throw std::runtime_error("BDA fault termination requires a barrier-safe mesh or tessellation-control execution protocol");
+    std::unordered_map<const IrBlock*, bool> reachesBarrier;
     for (const auto* block : program.BlockOrder()) {
-        for (const auto* instruction : block->Instructions()) {
-            if (instruction->Opcode() == IrOpcode::Barrier) throw std::runtime_error("BDA fault termination cannot bypass a workgroup barrier");
+        reachesBarrier[block] = std::ranges::any_of(block->Instructions(), [](const IrValue* instruction) { return instruction->Opcode() == IrOpcode::Barrier; });
+    }
+    for (bool changed = true; changed;) {
+        changed = false;
+        for (const auto* block : program.BlockOrder()) {
+            if (reachesBarrier[block]) continue;
+            if (std::ranges::any_of(block->Successors(), [&](const IrBlock* successor) { return reachesBarrier[successor]; })) {
+                reachesBarrier[block] = true;
+                changed = true;
+            }
+        }
+    }
+    for (const auto* block : program.BlockOrder()) {
+        bool barrierAfter = std::ranges::any_of(block->Successors(), [&](const IrBlock* successor) { return reachesBarrier[successor]; });
+        for (auto it = block->Instructions().rbegin(); it != block->Instructions().rend(); ++it) {
+            if ((*it)->Opcode() == IrOpcode::Barrier) barrierAfter = true;
+            else if (barrierAfter && AddressOpcodeInfoOf((*it)->Opcode()).access != AddressAccess::None) {
+                const auto flags = (*it)->Flags<MemoryFlags>();
+                if (flags.index < program.Resources().memoryInfo.size()) {
+                    const auto& memory = program.Resources().memoryInfo[flags.index];
+                    if (memory.planningOnly || memory.kind == ResourceKind::Scratch) continue;
+                }
+                throw std::runtime_error("BDA fault termination cannot bypass a workgroup barrier (read at pc 0x" + std::format("{:x}", flags.pc) + ")");
+            }
         }
     }
 }
@@ -43,6 +68,28 @@ std::uint32_t EmitBdaRead(SpirvValueEmitContext& ctx, const IrValue& inst, std::
     StopBdaInvocationIf(state, overflow);
     const auto byteType = state.module.Type(spv::OpTypeInt, 8u, 0u);
     const auto bytePointer = TypePointer(state, spv::StorageClassPhysicalStorageBuffer, byteType);
+    std::uint32_t fastValue = 0;
+    std::uint32_t fastEnd = 0;
+    std::uint32_t merge = 0;
+    if (bits == 32u) {
+        const auto aligned = Binary(state, spv::OpIEqual, TypeBool(state), Binary(state, spv::OpBitwiseAnd, TypeScalarU64(state), address, BdaConstant(state, 3u)), BdaConstant(state, 0u));
+        const auto fast = state.module.AllocateId();
+        const auto slow = state.module.AllocateId();
+        merge = state.module.AllocateId();
+        state.module.AddFunction(spv::OpSelectionMerge, merge, spv::SelectionControlMaskNone);
+        state.module.AddFunction(spv::OpBranchConditional, aligned, fast, slow);
+        EmitLabel(state, fast);
+        const auto physical = state.module.AllocateId();
+        state.module.AddFunction(spv::OpFunctionCall, TypeScalarU64(state), physical, state.bdaPointerFunction, address, ConstantU32(state, 4u), instruction);
+        StopBdaInvocationIf(state, Binary(state, spv::OpIEqual, TypeBool(state), physical, BdaConstant(state, 0u)));
+        const auto pointer = state.module.AllocateId();
+        state.module.AddFunction(spv::OpConvertUToPtr, TypePointer(state, spv::StorageClassPhysicalStorageBuffer, TypeU32(state)), pointer, physical);
+        fastValue = state.module.AllocateId();
+        state.module.AddFunction(spv::OpLoad, TypeU32(state), fastValue, pointer, spv::MemoryAccessAlignedMask, 4u);
+        fastEnd = state.currentLabel;
+        state.module.AddFunction(spv::OpBranch, merge);
+        EmitLabel(state, slow);
+    }
     auto result = ConstantU32(state, 0u);
     for (std::uint32_t byte = 0; byte < bits / 8u; ++byte) {
         const auto guest = Binary(state, spv::OpIAdd, TypeScalarU64(state), address, BdaConstant(state, byte));
@@ -56,7 +103,13 @@ std::uint32_t EmitBdaRead(SpirvValueEmitContext& ctx, const IrValue& inst, std::
         const auto value = Unary(state, spv::OpUConvert, TypeU32(state), loaded);
         result = Binary(state, spv::OpBitwiseOr, TypeU32(state), result, Binary(state, spv::OpShiftLeftLogical, TypeU32(state), value, ConstantU32(state, byte * 8u)));
     }
-    return result;
+    if (merge == 0u) return result;
+    const auto slowEnd = state.currentLabel;
+    state.module.AddFunction(spv::OpBranch, merge);
+    EmitLabel(state, merge);
+    const auto merged = state.module.AllocateId();
+    state.module.AddFunction(spv::OpPhi, TypeU32(state), merged, fastValue, fastEnd, result, slowEnd);
+    return merged;
 }
 
 }

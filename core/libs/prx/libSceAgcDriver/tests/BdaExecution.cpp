@@ -96,12 +96,15 @@ void RunBdaExecutionTests(const Context& context) {
     first.Bytes()[2] = std::byte{0x33};
     second.Bytes()[0] = std::byte{0x44};
     second.Bytes()[1] = std::byte{0x55};
+    Buffer third(context, 8, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
+    for (std::size_t i = 0; i < 8; ++i) third.Bytes()[i] = static_cast<std::byte>(0x10 + i);
     constexpr std::uint64_t guest = 0x7fff12340001ULL;
-    std::array<Abi::Range, 2> ranges{{{guest, guest + 3, first.DeviceAddress(), Abi::Read, 0}, {guest + 3, guest + 5, second.DeviceAddress(), Abi::Read, 0}}};
+    constexpr std::uint64_t aligned = 0x7fff12350000ULL;
+    std::array<Abi::Range, 3> ranges{{{guest, guest + 3, first.DeviceAddress(), Abi::Read, 0}, {guest + 3, guest + 5, second.DeviceAddress(), Abi::Read, 0}, {aligned, aligned + 8, third.DeviceAddress(), Abi::Read, 0}}};
     Buffer table(context, sizeof(Abi::Header) + sizeof(ranges), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
     Buffer fault(context, sizeof(Abi::Fault), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
     Buffer output(context, 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-    const auto run = [&](std::uint64_t address, std::uint32_t bits, std::uint32_t expected, Abi::FaultReason reason, std::uint32_t count = 2, std::uint32_t groups = 1, std::int64_t offset = 0) {
+    const auto run = [&](std::uint64_t address, std::uint32_t bits, std::uint32_t expected, Abi::FaultReason reason, std::uint32_t count = 3, std::uint32_t groups = 1, std::int64_t offset = 0) {
         const Abi::Header header{Abi::Version, count, sizeof(Abi::Range), 0};
         std::memcpy(table.Bytes().data(), &header, sizeof(header));
         std::memcpy(table.Bytes().data() + sizeof(header), ranges.data(), sizeof(ranges));
@@ -115,7 +118,7 @@ void RunBdaExecutionTests(const Context& context) {
         std::memcpy(&report, fault.Bytes().data(), sizeof(report));
         std::memcpy(&result, output.Bytes().data(), sizeof(result));
         if (static_cast<std::uint32_t>(reason) == 0) {
-            Require(report.state == Abi::FaultState::Empty && result == expected, "BDA GPU read produced incorrect data or a fault");
+            Require(report.state == Abi::FaultState::Empty && result == expected, "BDA GPU read produced incorrect data or a fault: address " + std::to_string(address) + " bits " + std::to_string(bits) + " result " + std::to_string(result) + " fault state " + std::to_string(static_cast<std::uint32_t>(report.state)) + " reason " + std::to_string(static_cast<std::uint32_t>(report.reason)));
         } else {
             Require(report.state == Abi::FaultState::Ready && report.reason == reason && report.instruction == 0x1234, "BDA GPU fault was not published correctly");
             Require(result == sentinel, "faulting BDA shader continued to output a substitute value");
@@ -124,12 +127,16 @@ void RunBdaExecutionTests(const Context& context) {
     run(guest, 8, 0x11, static_cast<Abi::FaultReason>(0));
     run(guest + 1, 16, 0x3322, static_cast<Abi::FaultReason>(0));
     run(guest + 1, 32, 0x55443322, static_cast<Abi::FaultReason>(0));
-    run(guest + 5, 8, 0, Abi::FaultReason::Unmapped, 2, 64);
+    run(aligned, 32, 0x13121110, static_cast<Abi::FaultReason>(0));
+    run(aligned + 4, 32, 0x17161514, static_cast<Abi::FaultReason>(0), 3, 64);
+    run(aligned + 6, 32, 0, Abi::FaultReason::Unmapped);
+    run(aligned + 8, 32, 0, Abi::FaultReason::Unmapped);
+    run(guest + 5, 8, 0, Abi::FaultReason::Unmapped, 3, 64);
     run(guest - 1, 8, 0, Abi::FaultReason::Unmapped);
     run(std::numeric_limits<std::uint64_t>::max() - 1, 32, 0, Abi::FaultReason::Overflow);
-    run(guest, 8, 0, Abi::FaultReason::InvalidTable, 3);
-    run(std::numeric_limits<std::uint64_t>::max() - 2, 8, 0, Abi::FaultReason::Overflow, 2, 1, 4);
-    run(1, 8, 0, Abi::FaultReason::Overflow, 2, 1, -4);
+    run(guest, 8, 0, Abi::FaultReason::InvalidTable, 4);
+    run(std::numeric_limits<std::uint64_t>::max() - 2, 8, 0, Abi::FaultReason::Overflow, 3, 1, 4);
+    run(1, 8, 0, Abi::FaultReason::Overflow, 3, 1, -4);
     ranges[0].permissions = 0;
     run(guest, 8, 0, Abi::FaultReason::Permission);
 }
