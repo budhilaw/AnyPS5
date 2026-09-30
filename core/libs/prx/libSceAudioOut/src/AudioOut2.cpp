@@ -11,6 +11,7 @@
 #include <thread>
 #include <vector>
 #include <prx/libc/include/General.hpp>
+#include <prx/libc/include/PreciseSleep.hpp>
 #include "SDL.h"
 #include "SceTypes.hpp"
 
@@ -324,10 +325,11 @@ int APS5_VABI sceAudioOut2ContextPush(AudioOut2ContextHandle ctx, uint32_t block
     if (device != 0 && audible) {
         while (queuedFloats() > output.targetGrains.load() * grainFloats) {
             if (blocking == 0) break;
-            std::this_thread::sleep_for(std::chrono::microseconds(500));
+            PreciseSleepNanos_nid_no_patch(500000);
         }
     } else if (blocking != 0) {
-        std::this_thread::sleep_until(due);
+        const auto remaining = due - std::chrono::steady_clock::now();
+        if (remaining.count() > 0) PreciseSleepNanos_nid_no_patch(static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(remaining).count()));
     }
     return 0;
 }
