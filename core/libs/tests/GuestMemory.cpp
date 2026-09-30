@@ -1,5 +1,7 @@
 #include "prx/libc/include/general/VabiMacros.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
+#include "prx/libc/include/GuestMemoryBacking.hpp"
+#include "prx/libc/include/GuestMemoryTracking.hpp"
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -53,6 +55,55 @@ static void RequirePhysicalAliasing() {
     Require(sceKernelReleaseDirectMemory(physical, 8 * mebibyte) == 0);
 }
 
+struct TrackingProbe {
+    GuestMemoryTracking::Watch* watch = nullptr;
+    int reads = 0;
+    int writes = 0;
+};
+
+static void TrackingResolver(void* context, GuestMemoryTracking::Access access) {
+    auto& probe = *static_cast<TrackingProbe*>(context);
+    if (access == GuestMemoryTracking::Access::Read) ++probe.reads;
+    else ++probe.writes;
+    probe.watch->Protect(access == GuestMemoryTracking::Access::Read ? GuestMemoryTracking::Protection::Read : GuestMemoryTracking::Protection::ReadWrite);
+}
+
+static void RequireTrackingFastPath() {
+    using namespace GuestMemoryTracking;
+    const auto pageSize = GuestMemoryTrackingPageSize_nid_postfix();
+    constexpr std::size_t mapped = 1u << 20;
+    void* memory = GuestMemoryBacking::GuestMemoryBackingMap_nid_postfix(nullptr, mapped, 1u << 16, 3);
+    const auto base = reinterpret_cast<std::uint64_t>(memory);
+    {
+        TrackingProbe probe;
+        Watch watch(base + pageSize, 2 * pageSize, &probe, &TrackingResolver);
+        probe.watch = &watch;
+        GuestMemoryTrackingResolve_nid_postfix(base + pageSize, 4, true);
+        Require(probe.reads == 0 && probe.writes == 0);
+        watch.Protect(Protection::Read);
+        GuestMemoryTrackingResolve_nid_postfix(base + pageSize, 4, false);
+        GuestMemoryTrackingResolve_nid_postfix(base, pageSize, true);
+        GuestMemoryTrackingResolve_nid_postfix(base + 3 * pageSize, 4, true);
+        Require(probe.reads == 0 && probe.writes == 0);
+        GuestMemoryTrackingResolve_nid_postfix(base + 2 * pageSize + 8, 4, true);
+        Require(probe.reads == 0 && probe.writes == 1);
+        GuestMemoryTrackingResolve_nid_postfix(base + pageSize, 4, true);
+        Require(probe.writes == 1);
+        watch.Protect(Protection::None);
+        GuestMemoryTrackingResolve_nid_postfix(base, 2 * pageSize, false);
+        Require(probe.reads == 1 && probe.writes == 1);
+        GuestMemoryTrackingResolve_nid_postfix(base + pageSize, 4, false);
+        Require(probe.reads == 1);
+        *reinterpret_cast<volatile std::uint32_t*>(base + pageSize + 16) = 7;
+        Require(probe.writes == 2 && *reinterpret_cast<volatile std::uint32_t*>(base + pageSize + 16) == 7);
+        watch.Protect(Protection::Read);
+    }
+    GuestMemoryTrackingResolve_nid_postfix(base + pageSize, 4, true);
+    *reinterpret_cast<volatile std::uint32_t*>(base + pageSize + 16) = 9;
+    Require(*reinterpret_cast<volatile std::uint32_t*>(base + pageSize + 16) == 9);
+    GuestMemoryBacking::GuestMemoryBackingUnmap_nid_postfix(memory, mapped);
+}
+
 int main() {
     constexpr std::size_t page = 0x4000;
     const auto failed = reinterpret_cast<void*>(static_cast<std::uintptr_t>(-1));
@@ -103,4 +154,5 @@ int main() {
         Require(munmap_nid_postfix(mapped, 1) == 0);
     }
     RequirePhysicalAliasing();
+    RequireTrackingFastPath();
 }

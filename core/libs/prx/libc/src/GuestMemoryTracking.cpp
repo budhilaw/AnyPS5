@@ -6,6 +6,7 @@
 #include "prx/libc/include/MemoryTrackingPlatform.hpp"
 #include "prx/libc/include/GuestMemoryBacking.hpp"
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <exception>
 #include <limits>
@@ -29,19 +30,14 @@ struct Entry {
     bool active = false;
 };
 
-struct ProtectedRange {
-    std::uint64_t begin;
-    std::uint64_t end;
-    Protection protection;
-};
+constexpr unsigned PageBlockShift = 30;
+constexpr std::uint64_t PageStateLimit = std::uint64_t{1} << 48;
 
 struct Registry {
     std::recursive_mutex mutex;
     std::map<std::uint64_t, std::shared_ptr<Entry>> entries;
     bool installed = false;
-    std::mutex publishedMutex;
-    std::shared_ptr<const std::vector<ProtectedRange>> published = std::make_shared<const std::vector<ProtectedRange>>();
-    std::atomic<bool> stale{true};
+    std::array<std::atomic<std::atomic<std::uint8_t>*>, (PageStateLimit >> PageBlockShift)> pageStates{};
 };
 
 Registry& registry() {
@@ -49,19 +45,50 @@ Registry& registry() {
     return *value;
 }
 
-void publish() {
-    registry().stale.store(false, std::memory_order_release);
-    auto ranges = std::make_shared<std::vector<ProtectedRange>>();
-    for (const auto& [address, entry] : registry().entries) {
-        if (entry->protection == Protection::None) ranges->push_back({entry->address, entry->address + entry->bytes, entry->protection});
-    }
-    std::lock_guard lock(registry().publishedMutex);
-    registry().published = std::move(ranges);
+std::uint8_t restriction(Protection protection) {
+    return protection == Protection::None ? 2 : protection == Protection::Read ? 1 : 0;
 }
 
-std::shared_ptr<const std::vector<ProtectedRange>> published() {
-    std::lock_guard lock(registry().publishedMutex);
-    return registry().published;
+void markPages(std::uint64_t address, std::size_t bytes, Protection protection) {
+    const auto value = restriction(protection);
+    const auto pageSize = Platform::PageSize();
+    const auto end = address + bytes;
+    auto cursor = address;
+    while (cursor < end) {
+        if (cursor >= PageStateLimit) throw std::runtime_error("tracked guest memory lies beyond the page state table");
+        const auto block = cursor >> PageBlockShift;
+        const auto blockEnd = std::min(end, (block + 1) << PageBlockShift);
+        auto* states = registry().pageStates[block].load(std::memory_order_acquire);
+        if (states == nullptr) {
+            if (value == 0) {
+                cursor = blockEnd;
+                continue;
+            }
+            states = new std::atomic<std::uint8_t>[(std::uint64_t{1} << PageBlockShift) / pageSize]();
+            registry().pageStates[block].store(states, std::memory_order_release);
+        }
+        for (auto page = (cursor - (block << PageBlockShift)) / pageSize; cursor < blockEnd; cursor += pageSize, ++page) states[page].store(value, std::memory_order_release);
+    }
+}
+
+bool pagesRestricted(std::uint64_t address, std::uint64_t end, bool writable) {
+    const auto pageSize = Platform::PageSize();
+    const std::uint8_t threshold = writable ? 1 : 2;
+    auto cursor = address - address % pageSize;
+    while (cursor < end) {
+        if (cursor >= PageStateLimit) return true;
+        const auto block = cursor >> PageBlockShift;
+        const auto blockEnd = std::min(end, (block + 1) << PageBlockShift);
+        const auto* states = registry().pageStates[block].load(std::memory_order_acquire);
+        if (states == nullptr) {
+            cursor = blockEnd;
+            continue;
+        }
+        for (auto page = (cursor - (block << PageBlockShift)) / pageSize; cursor < blockEnd; cursor += pageSize, ++page) {
+            if (states[page].load(std::memory_order_acquire) >= threshold) return true;
+        }
+    }
+    return false;
 }
 
 std::uint64_t checkedEnd(std::uint64_t address, std::size_t bytes) {
@@ -159,9 +186,8 @@ void GuestMemoryTrackingDestroy_nid_postfix(void* handle) noexcept {
     std::unique_ptr<std::shared_ptr<Entry>> owner(static_cast<std::shared_ptr<Entry>*>(handle));
     const auto& entry = **owner;
     Platform::Restore(entry.original);
-    const bool inaccessible = entry.protection == Protection::None;
+    if (entry.protection != Protection::ReadWrite) markPages(entry.address, entry.bytes, Protection::ReadWrite);
     registry().entries.erase(entry.address);
-    if (inaccessible) publish();
 }
 
 void GuestMemoryTrackingProtect_nid_postfix(void* handle, Protection protection) {
@@ -169,7 +195,6 @@ void GuestMemoryTrackingProtect_nid_postfix(void* handle, Protection protection)
     std::lock_guard lock(registry().mutex);
     auto& entry = **static_cast<std::shared_ptr<Entry>*>(handle);
     if (entry.protection == protection) return;
-    const bool inaccessibleChanged = entry.protection == Protection::None || protection == Protection::None;
     if (protection == Protection::ReadWrite) {
         Platform::Restore(entry.original);
         entry.original.clear();
@@ -179,30 +204,13 @@ void GuestMemoryTrackingProtect_nid_postfix(void* handle, Protection protection)
         entry.active = true;
     }
     entry.protection = protection;
-    if (inaccessibleChanged) publish();
+    markPages(entry.address, entry.bytes, protection);
 }
 
 void GuestMemoryTrackingResolve_nid_postfix(std::uint64_t address, std::size_t bytes, bool writable) {
     if (bytes == 0) return;
-    if (!writable && !registry().stale.load(std::memory_order_acquire)) {
-        const auto end = checkedEnd(address, bytes);
-        const auto ranges = published();
-        if (std::none_of(ranges->begin(), ranges->end(), [&](const ProtectedRange& range) { return range.begin < end && address < range.end; })) return;
-    }
+    if (!pagesRestricted(address, checkedEnd(address, bytes), writable)) return;
     std::lock_guard lock(registry().mutex);
-    if (registry().stale.load(std::memory_order_acquire)) publish();
-    {
-        const auto end = checkedEnd(address, bytes);
-        const auto& entries = registry().entries;
-        auto it = entries.upper_bound(address);
-        if (it != entries.begin()) --it;
-        bool needed = false;
-        for (; it != entries.end() && it->first < end && !needed; ++it) {
-            const auto& entry = *it->second;
-            needed = it->first + entry.bytes > address && (entry.protection == Protection::None || (writable && entry.protection == Protection::Read));
-        }
-        if (!needed) return;
-    }
     for (const auto& entry : overlapping(address, bytes)) {
         if (entry->protection == Protection::None || (writable && entry->protection == Protection::Read)) resolve(entry, writable ? Access::Write : Access::Read);
     }
