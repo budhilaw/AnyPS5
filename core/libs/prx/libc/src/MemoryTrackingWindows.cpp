@@ -1,9 +1,16 @@
 #include "prx/libc/include/MemoryTrackingPlatform.hpp"
+#include "prx/libc/include/SlowOperation.hpp"
 #include "prx/libc/include/specifics/windows/NativeProtection.hpp"
 #include <algorithm>
+#include <chrono>
+#include <cstdio>
 #include <exception>
+#include <mutex>
 #include <stdexcept>
 #include <system_error>
+#include <unordered_map>
+#include <utility>
+#include <vector>
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -14,11 +21,58 @@ namespace {
 
 FaultHandler faultHandler = nullptr;
 
+struct FaultSite {
+    std::uint64_t count = 0;
+    std::uint64_t lastAddress = 0;
+    bool write = false;
+};
+
+void describeCode(std::uint64_t address, char* text, std::size_t size) {
+    HMODULE module = nullptr;
+    char path[MAX_PATH];
+    if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCSTR>(address), &module) || module == nullptr || GetModuleFileNameA(module, path, MAX_PATH) == 0) {
+        std::snprintf(text, size, "?+0x%llx", static_cast<unsigned long long>(address));
+        return;
+    }
+    const char* name = path;
+    for (const char* cursor = path; *cursor != 0; ++cursor) {
+        if (*cursor == '\\' || *cursor == '/') name = cursor + 1;
+    }
+    std::snprintf(text, size, "%s+0x%llx", name, static_cast<unsigned long long>(address - reinterpret_cast<std::uintptr_t>(module)));
+}
+
+void recordFault(std::uint64_t instruction, std::uint64_t address, bool write) {
+    static std::mutex mutex;
+    static auto* sites = new std::unordered_map<std::uint64_t, FaultSite>;
+    static auto reported = std::chrono::steady_clock::now();
+    std::lock_guard lock(mutex);
+    auto& site = (*sites)[instruction];
+    ++site.count;
+    site.lastAddress = address;
+    site.write = write;
+    const auto now = std::chrono::steady_clock::now();
+    if (now - reported < std::chrono::seconds(5)) return;
+    reported = now;
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> sorted;
+    for (const auto& [code, entry] : *sites) sorted.emplace_back(entry.count, code);
+    std::sort(sorted.rbegin(), sorted.rend());
+    for (std::size_t index = 0; index < sorted.size() && index < 12; ++index) {
+        const auto& entry = sites->at(sorted[index].second);
+        char where[160];
+        describeCode(sorted[index].second, where, sizeof(where));
+        std::fprintf(stderr, "[faults] %llu %s %s last 0x%llx\n", static_cast<unsigned long long>(entry.count), entry.write ? "write" : "read", where, static_cast<unsigned long long>(entry.lastAddress));
+    }
+    sites->clear();
+}
+
 LONG CALLBACK handleException(EXCEPTION_POINTERS* exception) {
     const auto* record = exception->ExceptionRecord;
     if (record->ExceptionCode != EXCEPTION_ACCESS_VIOLATION || record->NumberParameters < 2 || record->ExceptionInformation[0] > 1) return EXCEPTION_CONTINUE_SEARCH;
     try {
-        if (faultHandler(record->ExceptionInformation[1], record->ExceptionInformation[0] == 1)) return EXCEPTION_CONTINUE_EXECUTION;
+        if (faultHandler(record->ExceptionInformation[1], record->ExceptionInformation[0] == 1)) {
+            if (SlowOperationEnabled_nid_no_patch()) recordFault(exception->ContextRecord->Rip, record->ExceptionInformation[1], record->ExceptionInformation[0] == 1);
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
     } catch (...) {
         std::terminate();
     }
