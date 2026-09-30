@@ -5,8 +5,10 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
+#include "prx/libSceAgcDriver/Execution/include/ProgramFailures.hpp"
 #include "prx/libSceAgcDriver/Execution/include/ShaderMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/ShaderWarmup.hpp"
+#include "prx/libSceAgcDriver/Execution/include/WorkerWatchdog.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Pm4.hpp"
 #include "prx/libSceAgcDriver/Execution/include/QueueState.hpp"
 #include "prx/libSceAgcDriver/Execution/include/VulkanDevice.hpp"
@@ -42,6 +44,7 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 #include <functional>
@@ -117,10 +120,23 @@ std::uint32_t readUserData(const Registers& registers, std::uint32_t offset) {
     return 0;
 }
 
+void WriteError(std::string_view text) {
+    std::fwrite(text.data(), 1, text.size(), stderr);
+    std::fflush(stderr);
+}
+
+void WriteError(const char* text, int length) {
+    if (length > 0) WriteError(std::string_view(text, static_cast<std::size_t>(length)));
+}
+
+double MillisecondsSince(std::chrono::steady_clock::time_point start) {
+    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+}
+
 struct ProgramError : std::runtime_error {
-    ProgramError(const std::string& message, std::uint64_t program, std::uint64_t hash) : std::runtime_error(message), address(program), codeHash(hash) {}
-    std::uint64_t address;
-    std::uint64_t codeHash;
+    ProgramError(const std::string& message, ProgramFailures::Key failure, double elapsed) : std::runtime_error(message), key(std::move(failure)), milliseconds(elapsed) {}
+    ProgramFailures::Key key;
+    double milliseconds;
 };
 
 bool SkipFailedPrograms() {
@@ -128,37 +144,65 @@ bool SkipFailedPrograms() {
     return skip;
 }
 
-std::mutex failedProgramsMutex;
-std::set<std::pair<std::uint64_t, std::uint64_t>> failedPrograms;
-
-bool KnownFailedProgram(std::uint64_t address, std::uint64_t codeHash) {
-    if (!SkipFailedPrograms()) return false;
-    std::lock_guard lock(failedProgramsMutex);
-    return failedPrograms.contains({address, codeHash});
-}
-
-ProgramError ProgramFailure(const char* kind, const ShaderRecompiler::ShaderBinary& shader, const std::exception& error) {
-    if (const char* dumpDirectory = std::getenv("ANYPS5_DUMP_GDS_SHADERS"); dumpDirectory != nullptr) {
-        char name[64];
-        std::snprintf(name, sizeof(name), "/failed_%s_%llx.bin", kind, static_cast<unsigned long long>(shader.codeAddress));
+void DumpFailedProgram(const char* kind, const ShaderRecompiler::ShaderBinary& shader) {
+    const char* dumpDirectory = std::getenv("ANYPS5_DUMP_GDS_SHADERS");
+    if (dumpDirectory == nullptr) return;
+    char name[64];
+    std::snprintf(name, sizeof(name), "/failed_%s_%llx.bin", kind, static_cast<unsigned long long>(shader.codeAddress));
+    if (FILE* file = std::fopen((std::string(dumpDirectory) + name).c_str(), "wb")) {
+        std::fwrite(shader.code.data(), sizeof(std::uint32_t), shader.code.size(), file);
+        std::fclose(file);
+    }
+    try {
+        constexpr ShaderRecompiler::RdnaInstructionDecoder decoder;
+        const auto text = ShaderRecompiler::RdnaProgramToString(decoder.Decode(shader.code));
+        std::snprintf(name, sizeof(name), "/failed_%s_%llx.rdna.txt", kind, static_cast<unsigned long long>(shader.codeAddress));
         if (FILE* file = std::fopen((std::string(dumpDirectory) + name).c_str(), "wb")) {
-            std::fwrite(shader.code.data(), sizeof(std::uint32_t), shader.code.size(), file);
+            std::fwrite(text.data(), 1, text.size(), file);
             std::fclose(file);
         }
-        try {
-            constexpr ShaderRecompiler::RdnaInstructionDecoder decoder;
-            const auto text = ShaderRecompiler::RdnaProgramToString(decoder.Decode(shader.code));
-            std::snprintf(name, sizeof(name), "/failed_%s_%llx.rdna.txt", kind, static_cast<unsigned long long>(shader.codeAddress));
-            if (FILE* file = std::fopen((std::string(dumpDirectory) + name).c_str(), "wb")) {
-                std::fwrite(text.data(), 1, text.size(), file);
-                std::fclose(file);
-            }
-        } catch (const std::exception&) {
-        }
+    } catch (const std::exception&) {
     }
+}
+
+ProgramError ProgramFailure(const char* kind, const ShaderRecompiler::ShaderBinary& shader, const std::exception& error, ProgramFailures::Key key, double milliseconds) {
     char where[96];
     std::snprintf(where, sizeof(where), "%s program 0x%llx hash 0x%016llx (stage %u): ", kind, static_cast<unsigned long long>(shader.codeAddress), static_cast<unsigned long long>(shader.codeHash), static_cast<unsigned>(shader.stage));
-    return ProgramError(where + std::string(error.what()), shader.codeAddress, shader.codeHash);
+    return ProgramError(where + std::string(error.what()), std::move(key), milliseconds);
+}
+
+void ReportProgramFailure(const ProgramError& error) {
+    char outcome[160];
+    int length = 0;
+    switch (error.key.stage) {
+    case ProgramFailures::Stage::Plan:
+        length = std::snprintf(outcome, sizeof(outcome), "preparation failed after %.1f ms; work with the same code and context is skipped", error.milliseconds);
+        break;
+    case ProgramFailures::Stage::Compile:
+        length = std::snprintf(outcome, sizeof(outcome), "compilation failed after %.1f ms; work with the same code, context, resources and layout is skipped", error.milliseconds);
+        break;
+    case ProgramFailures::Stage::Capture:
+        length = std::snprintf(outcome, sizeof(outcome), "failed after %.1f ms on values outside the shader cache key; it is attempted again on every use", error.milliseconds);
+        break;
+    case ProgramFailures::Stage::Validate:
+        length = std::snprintf(outcome, sizeof(outcome), "draw validation failed; it is attempted again on every draw");
+        break;
+    }
+    std::string text = "AGC driver: skipping work of a program that cannot be prepared (";
+    if (length > 0) text.append(outcome, std::min(static_cast<std::size_t>(length), sizeof(outcome) - 1));
+    text += "): ";
+    text += error.what();
+    text += '\n';
+    WriteError(text);
+    if (ProgramFailures::Skipping(error.key) && SlowOperationEnabled_nid_no_patch()) SlowOperationRecord_nid_no_patch("worker program compile", static_cast<std::uint64_t>(error.milliseconds * 1e6));
+}
+
+void ReportCompile(const char* kind, const ShaderRecompiler::ShaderBinary& shader, double milliseconds) {
+    if (!SlowOperationEnabled_nid_no_patch()) return;
+    SlowOperationRecord_nid_no_patch("worker program compile", static_cast<std::uint64_t>(milliseconds * 1e6));
+    char text[160];
+    const int length = std::snprintf(text, sizeof(text), "[slow-ops] %s program 0x%llx (stage %u) compiled in %.1f ms\n", kind, static_cast<unsigned long long>(shader.codeAddress), static_cast<unsigned>(shader.stage), milliseconds);
+    WriteError(text, std::min(length, static_cast<int>(sizeof(text)) - 1));
 }
 
 void ReportUnresolvedImages(const char* kind, std::uint64_t address, const ShaderRecompiler::RecompileResult& result) {
@@ -186,20 +230,6 @@ bool StorageImageWrites(const ShaderRecompiler::DescriptorBinding& binding, std:
         }
     }
     return true;
-}
-
-template<typename Work>
-void SkippingFailedPrograms(Work&& work) {
-    if (!SkipFailedPrograms()) {
-        work();
-        return;
-    }
-    try {
-        work();
-    } catch (const ProgramError& error) {
-        std::lock_guard lock(failedProgramsMutex);
-        if (failedPrograms.insert({error.address, error.codeHash}).second) { std::fprintf(stderr, "AGC driver: skipping work of a program that cannot be prepared: %s\n", error.what()); std::fflush(stderr); }
-    }
 }
 
 class Driver {
@@ -240,7 +270,28 @@ private:
         }
         graphicsChanged.notify_all();
         if (graphicsThread.joinable()) graphicsThread.join();
+        {
+            std::lock_guard lock(watchdogMutex);
+            watchdogStopping = true;
+        }
+        watchdogChanged.notify_all();
+        if (watchdogThread.joinable()) watchdogThread.join();
         warmup.Stop();
+    }
+
+    void runWatchdog() noexcept {
+        std::unique_lock lock(watchdogMutex);
+        while (!watchdogChanged.wait_for(lock, std::chrono::milliseconds(100), [&] { return watchdogStopping; })) {
+            const auto stall = watchdog.Check(WorkerWatchdog::Clock::now());
+            if (!stall) continue;
+            try {
+                const auto name = stall->header == 0 ? std::string("suspend") : Pm4::Name(stall->header);
+                char text[256];
+                const int length = std::snprintf(text, sizeof(text), "[slow-ops] worker stall: no packet completed for %.1f s; queue 0x%x, packet 0x%02x %s, stage %s\n", std::chrono::duration<double>(stall->elapsed).count(), stall->queue, (stall->header >> 8u) & 0xffu, name.c_str(), stall->stage != nullptr ? stall->stage : "between packets");
+                WriteError(text, std::min(length, static_cast<int>(sizeof(text)) - 1));
+            } catch (...) {
+            }
+        }
     }
 
     void runGraphics() noexcept {
@@ -273,7 +324,11 @@ private:
         if (job.writesUnknown) postedUnknownWrites = graphicsPosted + 1;
         ++graphicsPosted;
         std::unique_lock lock(graphicsMutex);
-        graphicsChanged.wait(lock, [&] { return graphicsJobs.size() < MaxGraphicsJobs || graphicsStopping; });
+        if (graphicsJobs.size() >= MaxGraphicsJobs && !graphicsStopping) {
+            const auto stage = watchdog.Stage("graphics_queue_full");
+            graphicsChanged.wait(lock, [&] { return graphicsJobs.size() < MaxGraphicsJobs || graphicsStopping; });
+            watchdog.Stage(stage);
+        }
         require(!graphicsStopping, "graphics work after shutdown");
         graphicsJobs.push_back(std::move(job));
         graphicsChanged.notify_all();
@@ -293,8 +348,12 @@ private:
     void waitGraphics(std::uint64_t number, const char* reason) {
         SlowOperationTimer slowTimer(reason);
         PerformanceTimer timing("Driver.GraphicsDrain");
-        std::unique_lock lock(graphicsMutex);
-        graphicsChanged.wait(lock, [&] { return graphicsCompleted.load(std::memory_order_acquire) >= number; });
+        const auto stage = watchdog.Stage(reason);
+        {
+            std::unique_lock lock(graphicsMutex);
+            graphicsChanged.wait(lock, [&] { return graphicsCompleted.load(std::memory_order_acquire) >= number; });
+        }
+        watchdog.Stage(stage);
     }
 
     std::uint64_t graphicsWriter(std::uint64_t address, std::size_t bytes) {
@@ -339,7 +398,9 @@ private:
         }
         if (queuedWrite) self.waitGraphics(writer, "drain host resolve");
         timing.Mark("drain");
+        const auto stage = self.watchdog.Stage("host resolve");
         current->ResolveMemory(address, bytes, writable);
+        self.watchdog.Stage(stage);
         timing.Mark("resolve");
     }
     static bool quietForHost(void* context, std::uint64_t address, std::size_t bytes) {
@@ -461,7 +522,7 @@ public:
     }
 
     void ReportFailure(std::exception_ptr error) {
-        try { if (error) std::rethrow_exception(error); } catch (const std::exception& e) { std::fprintf(stderr, "AGC driver failed: %s\n", e.what()); } catch (...) { const auto* type = abi::__cxa_current_exception_type(); std::fprintf(stderr, "AGC driver failed: exception of type %s\n", type ? type->name() : "?"); }
+        try { if (error) std::rethrow_exception(error); } catch (const std::exception& e) { WriteError("AGC driver failed: " + std::string(e.what()) + "\n"); } catch (...) { const auto* type = abi::__cxa_current_exception_type(); std::fprintf(stderr, "AGC driver failed: exception of type %s\n", type ? type->name() : "?"); std::fflush(stderr); }
         GpuJournal::Dump("AGC driver: last GPU work before the failure, oldest first:");
         require(error != nullptr, "null asynchronous failure");
         {
@@ -590,9 +651,15 @@ private:
     std::atomic<std::uint64_t> graphicsCompleted{0};
     bool graphicsStopping = false;
     ShaderWarmup warmup;
+    ProgramFailures failures;
+    WorkerWatchdog watchdog{SlowOperationEnabled_nid_no_patch()};
+    std::mutex watchdogMutex;
+    std::condition_variable watchdogChanged;
+    bool watchdogStopping = false;
 
     Driver() : graphicsThread([this] { runGraphics(); }), worker([this] { run(); }) {
         try {
+            if (watchdog.Enabled()) watchdogThread = std::thread([this] { runWatchdog(); });
             LibcRegisterShutdown_nid_postfix([] { Driver::Get().Shutdown(); });
         } catch (...) {
             stop();
@@ -685,6 +752,29 @@ private:
         }
     }
 
+    ProgramError programFailure(const char* kind, const ShaderRecompiler::RecompileRequest& request, const ShaderMemory& shaderMemory, bool memoryCaptured, const std::exception& error, std::chrono::steady_clock::time_point started) {
+        const auto milliseconds = MillisecondsSince(started);
+        auto key = memoryCaptured ? ProgramFailures::CompileKey(request, shaderMemory.Specialization()) : shaderMemory.Source() == nullptr ? ProgramFailures::PlanKey(request) : ProgramFailures::ProgramKey(ProgramFailures::Stage::Capture, request.shader.codeHash);
+        if (!failures.Contains(key)) DumpFailedProgram(kind, request.shader);
+        return ProgramFailure(kind, request.shader, error, std::move(key), milliseconds);
+    }
+
+    template<typename Work>
+    bool skippingFailedPrograms(Work&& work) {
+        if (!SkipFailedPrograms()) {
+            work();
+            return true;
+        }
+        try {
+            work();
+            return true;
+        } catch (const ProgramError& error) {
+            watchdog.Stage("program_failure");
+            if (failures.Record(error.key)) ReportProgramFailure(error);
+            return false;
+        }
+    }
+
     void dispatch(QueueState& queue, std::span<const std::uint32_t> packet, const Submission& submission, std::uint64_t indirectArguments = 0) {
         PerformanceTimer timing("Driver.Dispatch");
         if (indirectArguments == 0 && (packet[1] == 0 || packet[2] == 0 || packet[3] == 0)) {
@@ -698,7 +788,6 @@ private:
         const auto& snapshot = *it->second;
         require(address - snapshot.codeAddress < snapshot.code.size() * sizeof(std::uint32_t), "compute program is outside registered shader code");
         require(snapshot.type == 0, "compute program refers to a non-compute shader");
-        if (KnownFailedProgram(address, snapshot.CodeHash((address - snapshot.codeAddress) / sizeof(std::uint32_t)))) return;
         const auto userCount = (readRegister(queue.shader, 0x213) >> 1u) & 0x1fu;
         std::vector<std::uint32_t> userData;
         for (std::uint32_t i = 0; i < userCount; ++i) {
@@ -723,26 +812,44 @@ private:
             current->Target(),
             {0, 0, 0, 128}
         };
+        if (failures.Skips(request)) {
+            timing.Mark("known_failure");
+            return;
+        }
         auto shaderMemoryOwner = std::make_unique<ShaderMemory>(memory, std::vector<std::shared_ptr<const void>>{it->second});
         auto& shaderMemory = *shaderMemoryOwner;
         timing.Mark("prepare");
         std::remove_cvref_t<decltype(shaderMemory.Regions())> captured;
-        auto compiled = [&] {
-            try {
-                shaderMemory.Capture(request);
-                timing.Mark("shader_memory_capture");
-                captured = shaderMemory.Regions();
-                request.context.memory = captured;
-                request.materializedSnapshot = &shaderMemory.Snapshot();
-                request.materializedSpecialization = &shaderMemory.Specialization();
-                request.source = shaderMemory.Source();
-                timing.Mark("request_memory");
-                return ShaderRecompiler::Recompile(request);
-            } catch (const std::exception& error) {
-                throw ProgramFailure("compute", request.shader, error);
+        ShaderRecompiler::RecompileResult compiled;
+        const auto started = std::chrono::steady_clock::now();
+        bool memoryCaptured = false;
+        try {
+            watchdog.Stage("dispatch capture");
+            shaderMemory.Capture(request);
+            memoryCaptured = true;
+            timing.Mark("shader_memory_capture");
+            captured = shaderMemory.Regions();
+            request.context.memory = captured;
+            request.materializedSnapshot = &shaderMemory.Snapshot();
+            request.materializedSpecialization = &shaderMemory.Specialization();
+            request.source = shaderMemory.Source();
+            timing.Mark("request_memory");
+            if (failures.Skips(request, shaderMemory.Specialization())) {
+                timing.Mark("known_failure");
+                return;
             }
-        }();
-        if (!compiled.cacheHit) warmup.Record(request);
+            watchdog.Stage("dispatch compile");
+            compiled = ShaderRecompiler::Recompile(request);
+        } catch (const std::exception& error) {
+            timing.Mark("shader_failure");
+            throw programFailure("compute", request, shaderMemory, memoryCaptured, error, started);
+        }
+        watchdog.Stage("dispatch");
+        if (!compiled.cacheHit) {
+            const auto milliseconds = MillisecondsSince(started);
+            warmup.Record(request);
+            ReportCompile("compute", request.shader, milliseconds);
+        }
         ReportUnresolvedImages("compute", address, compiled);
         timing.Mark(compiled.cacheHit ? "shader_cache_hit" : "shader_compile");
         if (static const char* spirvDirectory = std::getenv("ANYPS5_DUMP_COMPUTE_SPIRV"); spirvDirectory != nullptr) {
@@ -1016,9 +1123,6 @@ private:
         results.reserve(programs.size() + (graphics.rectList ? 2u : 0u));
         stages.reserve(programs.size());
         std::uint32_t pushCursorBytes = 0;
-        for (const auto& program : programs) {
-            if (KnownFailedProgram(program.binary.codeAddress, program.binary.codeHash)) return;
-        }
         for (std::size_t i = 0; i < programs.size(); ++i) {
             if (roles[i] == Role::GeometryBack) continue;
             const auto& program = programs[i];
@@ -1037,9 +1141,17 @@ private:
                 {0, 0, pushCursorBytes, Graphics::PipelinePushConstantBytes - pushCursorBytes},
                 ShaderRecompiler::GraphicsCompileContext{program.firstUserSgpr, linked, graphics.stages.mesh, graphics.stages.tessellation, {drawParameters.indexAddress, drawParameters.indexCount, drawParameters.indexSize, drawParameters.instanceCount}}
             };
+            if (failures.Skips(request)) {
+                timing.Mark("known_failure");
+                return;
+            }
             PerformanceTimer shaderTiming("Driver.GraphicsShader");
+            const auto started = std::chrono::steady_clock::now();
+            bool memoryCaptured = false;
             try {
+                watchdog.Stage("draw capture");
                 shaderMemory.Capture(request);
+                memoryCaptured = true;
                 shaderTiming.Mark("memory_capture");
                 memory = shaderMemory.Regions();
                 request.context.memory = memory;
@@ -1047,11 +1159,23 @@ private:
                 request.materializedSpecialization = &shaderMemory.Specialization();
                 request.source = shaderMemory.Source();
                 shaderTiming.Mark("request_memory");
+                if (failures.Skips(request, shaderMemory.Specialization())) {
+                    shaderTiming.Mark("known_failure");
+                    timing.Mark("known_failure");
+                    return;
+                }
+                watchdog.Stage("draw compile");
                 results.push_back(ShaderRecompiler::Recompile(request));
             } catch (const std::exception& error) {
-                throw ProgramFailure("graphics", request.shader, error);
+                shaderTiming.Mark("failure");
+                throw programFailure("graphics", request, shaderMemory, memoryCaptured, error, started);
             }
-            if (!results.back().cacheHit) warmup.Record(request);
+            watchdog.Stage("draw");
+            if (!results.back().cacheHit) {
+                const auto milliseconds = MillisecondsSince(started);
+                warmup.Record(request);
+                ReportCompile("graphics", program.binary, milliseconds);
+            }
             ReportUnresolvedImages("graphics", program.binary.codeAddress, results.back());
             shaderTiming.Mark(results.back().cacheHit ? "cache_hit" : "compile");
             const auto& result = results.back();
@@ -1081,8 +1205,12 @@ private:
         try {
             current->ValidateDraw(graphics, stages);
         } catch (const std::exception& error) {
-            for (std::size_t i = 0; i + 1 < programs.size(); ++i) static_cast<void>(ProgramFailure("graphics", programs[i].binary, error));
-            throw ProgramFailure("graphics", programs.back().binary, error);
+            auto key = ProgramFailures::ProgramKey(ProgramFailures::Stage::Validate, programs.back().binary.codeHash);
+            for (const auto& program : programs) key.source.push_back(program.binary.codeHash);
+            if (!failures.Contains(key)) {
+                for (const auto& program : programs) DumpFailedProgram("graphics", program.binary);
+            }
+            throw ProgramFailure("graphics", programs.back().binary, error, std::move(key), 0.0);
         }
         std::vector<Graphics::GuestMemorySnapshot> snapshots;
         snapshots.reserve(memory.size());
@@ -1184,6 +1312,7 @@ private:
             includeSubmission(submission, true);
         }
         if (submission.suspend) {
+            watchdog.Enter(submission.queue, 0, "suspend");
             PerformanceContext timingContext(frameTiming.get());
             PerformanceTimer timing("Driver.Suspend");
             drainGraphics("drain suspend");
@@ -1205,6 +1334,7 @@ private:
             const auto count = static_cast<std::size_t>((header >> 16u) & 0x3fffu) + 2;
             const auto packet = std::span(submission.commands).subspan(cursor, count);
             const auto opcode = (header >> 8u) & 0xffu;
+            watchdog.Enter(submission.queue, header, "failure_check");
             {
                 PerformanceContext timingContext(frameTiming.get());
                 PerformanceTimer timing("Driver.Packet");
@@ -1214,17 +1344,27 @@ private:
                 std::uint32_t writeBytes = 0;
                 bool writeKnown = false;
                 const auto current = currentDevice();
+                const auto pendingWork = [&] {
+                    if (graphicsPending()) return true;
+                    const auto stage = watchdog.Stage("pending_work");
+                    const bool pending = current->HasPendingWork();
+                    watchdog.Stage(stage);
+                    timing.Mark("pending_work");
+                    return pending;
+                };
                 if (current != nullptr && opcode == 0x49 && ((packet[2] >> 29u) & 7u) == 0 && ((packet[2] >> 24u) & 7u) != 4) {
+                    watchdog.Stage("release_event");
                     const auto interrupt = (packet[2] >> 24u) & 7u;
                     const auto interruptId = packet.size() > 7 ? packet[7] & 0x7ffffffu : 0u;
                     if (interrupt == 0) postGraphics({[current] { current->RecordBarrier(); }, {}, false});
-                    else if (graphicsPending() || current->HasPendingWork()) postGraphics({[current, interruptId] { current->Defer([interruptId] { AgcDriver::Eq::Trigger(interruptId); }); }, {}, false});
+                    else if (pendingWork()) postGraphics({[current, interruptId] { current->Defer([interruptId] { AgcDriver::Eq::Trigger(interruptId); }); }, {}, false});
                     else AgcDriver::Eq::Trigger(interruptId);
                     timing.Mark("release_event");
                     execution.cursor += count;
                     return Step::Progressed;
                 }
-                if (current != nullptr && (opcode == 0x37 || opcode == 0x40 || opcode == 0x50 || opcode == 0x49) && Pm4::DeferrableWrite(packet, writeAddress, writeBytes, writeValue, writeKnown) && (graphicsPending() || current->HasPendingWork())) {
+                if (current != nullptr && (opcode == 0x37 || opcode == 0x40 || opcode == 0x50 || opcode == 0x49) && Pm4::DeferrableWrite(packet, writeAddress, writeBytes, writeValue, writeKnown) && pendingWork()) {
+                    watchdog.Stage("deferred_write");
                     const auto id = ++deferredSerial;
                     {
                         std::lock_guard lock(deferredMutex);
@@ -1294,6 +1434,7 @@ private:
                         } else {
                             const auto scope = header == FlipPacketHeader ? "Driver.FlipWait" : "Driver.ReleaseWait";
                             PerformanceTimer waitTiming(scope);
+                            watchdog.Stage("device_idle_wait");
                             drainGraphics("drain release wait");
                             std::lock_guard gpuLock(gpuMutex);
                             current->WaitIdle();
@@ -1302,6 +1443,7 @@ private:
                     }
                 }
                 if (header == RenderingWaitPacketHeader) {
+                    watchdog.Stage("rendering_wait");
                     submission.renderingWaits.at(cursor)->Wait();
                     timing.Mark("rendering_wait");
                 } else if (header == FlipPacketHeader) {
@@ -1313,20 +1455,29 @@ private:
                         std::fprintf(stderr, "[label] wait 0x%llx function %u reference 0x%llx (queue 0x%x)\n", static_cast<unsigned long long>(static_cast<std::uint64_t>(packet[2]) | (static_cast<std::uint64_t>(packet[3]) << 32u)), packet[1] & 7u, static_cast<unsigned long long>(((packet[0] >> 8u) & 0xffu) == 0x93 ? (static_cast<std::uint64_t>(packet[4]) | (static_cast<std::uint64_t>(packet[5]) << 32u)) : packet[4]), submission.queue);
                         std::fflush(stderr);
                     }
-                    if (!Pm4::TryWait(packet, [this](std::uint64_t address, std::uint32_t bytes, std::uint64_t& value) { return lookupDeferred(address, bytes, value); })) return Step::Blocked;
+                    watchdog.Stage("label_wait");
+                    if (!Pm4::TryWait(packet, [this](std::uint64_t address, std::uint32_t bytes, std::uint64_t& value) { return lookupDeferred(address, bytes, value); })) {
+                        timing.Mark("label_blocked");
+                        return Step::Blocked;
+                    }
                     execution.waitTraced = false;
                     timing.Mark("label_wait");
                 } else if (opcode == 0x15) {
-                    SkippingFailedPrograms([&] { dispatch(queue, packet, submission); });
+                    watchdog.Stage("dispatch");
+                    timing.Mark(skippingFailedPrograms([&] { dispatch(queue, packet, submission); }) ? "dispatch" : "program_failure");
                 } else if (opcode == 0x16) {
+                    watchdog.Stage("dispatch");
                     const auto arguments = Pm4::DispatchIndirectAddress(packet, queue);
                     const std::array<std::uint32_t, 5> direct{0xc0031500u, 0, 0, 0, packet.back()};
                     journalIndirect = true;
-                    SkippingFailedPrograms([&] { dispatch(queue, direct, submission, arguments); });
+                    const bool prepared = skippingFailedPrograms([&] { dispatch(queue, direct, submission, arguments); });
                     journalIndirect = false;
+                    timing.Mark(prepared ? "dispatch" : "program_failure");
                 } else if (opcode == 0x35 || opcode == 0x2d || opcode == 0x27 || opcode == 0x24 || opcode == 0x25) {
-                    SkippingFailedPrograms([&] { draw(queue, packet, submission); });
+                    watchdog.Stage("draw");
+                    timing.Mark(skippingFailedPrograms([&] { draw(queue, packet, submission); }) ? "draw" : "program_failure");
                 } else if (opcode == 0x50 && (Pm4::DmaGdsDestination(packet) || Pm4::DmaGdsSource(packet))) {
+                    watchdog.Stage("gds_transfer");
                     drainGraphics("drain gds transfer");
                     std::lock_guard gpuLock(gpuMutex);
                     require(device != nullptr, "GDS transfer without a device");
@@ -1336,6 +1487,7 @@ private:
                     device->GdsTransfer(packet);
                     timing.Mark("gds_transfer");
                 } else if (opcode != 0x42 && opcode != 0x58 && (opcode != 0x46 || Pm4::EventWritesMemory(packet))) {
+                    watchdog.Stage("pm4_execute");
                     graphicsDevice = currentDevice();
                     const GuestMemory::MemoryAccessScope memoryScope(this, &Driver::resolveForHost, &Driver::quietForHost);
                     Pm4::Execute(packet, queue);
@@ -1389,6 +1541,7 @@ private:
     bool gpuPending = false;
     std::thread graphicsThread;
     std::thread worker;
+    std::thread watchdogThread;
 
     void run() noexcept {
         DriverThread::RaisePriority();
@@ -1404,6 +1557,7 @@ private:
                     timing.Mark("queue_mutex_wait");
                     const bool haveWork = std::any_of(queued.begin(), queued.end(), [](const auto& entry) { return !entry.second.empty(); });
                     if (!haveWork) {
+                        watchdog.Idle();
                         if (!gpuPending) changed.wait(lock, [&] { return failure || stopping || !pending.empty(); });
                         else if (!failure && !stopping && pending.empty()) {
                             lock.unlock();
@@ -1441,12 +1595,14 @@ private:
                     auto& execution = fifo.front();
                     const auto result = step(execution);
                     if (result == Step::Finished) {
+                        watchdog.Progress();
                         if (const auto current = currentDevice(); current != nullptr && graphicsPosted != 0) postGraphics({[current] { current->FlushDraws(); }, {}, false});
                         Submission finished = std::move(execution.submission);
                         fifo.pop_front();
                         complete(finished);
                         progressed = true;
                     } else if (result == Step::Progressed) {
+                        watchdog.Progress();
                         execution.blocked = false;
                         progressed = true;
                     } else {
@@ -1468,6 +1624,7 @@ private:
             device.reset();
             graphicsDevice.reset();
         } catch (...) {
+            watchdog.Idle();
             const auto error = std::current_exception();
             for (auto& [id, fifo] : queued) for (auto& execution : fifo) for (const auto& [offset, flip] : execution.submission.flips) flip->Fail(error);
             ReportFailure(error);
@@ -1492,7 +1649,7 @@ void Submit(const Packet* packets, std::uint32_t count, std::uint32_t queue) {
     try {
         Driver::Get().Submit(packets, count, queue);
     } catch (const std::exception& error) {
-        std::fprintf(stderr, "AGC driver: submission failed on the title's thread: %s\n", error.what());
+        WriteError("AGC driver: submission failed on the title's thread: " + std::string(error.what()) + "\n");
         GpuJournal::Dump("AGC driver: last GPU work before the failure, oldest first:");
         throw;
     }
