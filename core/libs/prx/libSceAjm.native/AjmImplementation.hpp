@@ -96,6 +96,22 @@ void initialize(InstanceState& state, const std::uint8_t* config, std::size_t by
     if (reported++ < 64) APS5_LOG_OUT("ajm: ATRAC9 %d channels %d Hz, superframe %d bytes of %d frames (config %02x%02x%02x%02x)", state.info.channels, state.info.samplingRate, state.info.superframeSize, state.info.framesInSuperframe, config[0], config[1], config[2], config[3]);
 }
 
+std::size_t riffHeaderBytes(const std::vector<std::uint8_t>& input, std::size_t offset, std::size_t bytes) {
+    const auto word = [&](std::size_t at) {
+        std::uint32_t value = 0;
+        std::memcpy(&value, input.data() + at, sizeof(value));
+        return value;
+    };
+    if (bytes - offset < 12 || std::memcmp(input.data() + offset, "RIFF", 4) != 0 || std::memcmp(input.data() + offset + 8, "WAVE", 4) != 0) return 0;
+    for (auto chunk = offset + 12; bytes - chunk >= 8;) {
+        if (std::memcmp(input.data() + chunk, "data", 4) == 0) return chunk + 8 - offset;
+        const auto size = static_cast<std::size_t>(word(chunk + 4));
+        if (size > bytes - chunk - 8) break;
+        chunk += 8 + size + (size & 1u);
+    }
+    return 0;
+}
+
 std::pair<std::size_t, std::size_t> decode(InstanceState& state, const std::vector<std::uint8_t>& input, std::size_t bytes, const std::vector<std::pair<std::uint8_t*, std::size_t>>& output) {
     const std::size_t sampleBytes = state.format == 0 ? 2 : 4;
     const auto& info = state.info;
@@ -108,6 +124,10 @@ std::pair<std::size_t, std::size_t> decode(InstanceState& state, const std::vect
         std::vector<std::uint8_t> frame(frameBytes);
         std::vector<std::uint8_t> superframe(superframeBytes + 16, 0);
         while (bytes - consumed >= superframeBytes && state.pendingPcm.size() < room) {
+            if (const auto header = riffHeaderBytes(input, consumed, bytes); header != 0) {
+                consumed += header;
+                continue;
+            }
             std::copy_n(input.begin() + static_cast<std::ptrdiff_t>(consumed), superframeBytes, superframe.begin());
             consumed += superframeBytes;
             std::size_t used = 0;
@@ -121,7 +141,9 @@ std::pair<std::size_t, std::size_t> decode(InstanceState& state, const std::vect
                 if (status != 0 || frameUsed <= 0) {
                     static int reported = 0;
                     if (reported++ < 16) {
-                        APS5_LOG_OUT("ajm: ATRAC9 frame %d of a superframe failed (%d) on instance %u at byte %zu of %zu; the decoder restarts. Its last jobs:", index, status, state.id, consumed - superframeBytes, bytes);
+                        std::string head;
+                        for (std::size_t i = 0; i < 16; ++i) { char item[4]; std::snprintf(item, sizeof(item), "%02x", superframe[used + i < superframe.size() ? used + i : 0]); head += item; }
+                        APS5_LOG_OUT("ajm: ATRAC9 frame %d of a superframe failed (%d) on instance %u at byte %zu of %zu [%s]; the decoder restarts. Its last jobs:", index, status, state.id, consumed - superframeBytes, bytes, head.c_str());
                         for (std::size_t i = 0; i < state.recent.size(); ++i) {
                             const auto& line = state.recent[(state.nextRecent + i) % state.recent.size()];
                             if (!line.empty()) APS5_LOG_OUT("ajm:   %s", line.c_str());
@@ -156,9 +178,10 @@ void complete(const Job& job) {
         std::size_t inputTotal = job.inputSize;
         for (const auto& buffer : job.inputs) inputTotal += buffer.size;
         char line[160];
-        const auto* in = static_cast<const std::uint8_t*>(job.input);
+        const auto* in = static_cast<const std::uint8_t*>(job.input != nullptr ? job.input : !job.inputs.empty() ? job.inputs.front().ptr : nullptr);
+        const auto inSize = job.input != nullptr ? job.inputSize : !job.inputs.empty() ? job.inputs.front().size : 0;
         std::snprintf(line, sizeof(line), "kind %u flags 0x%llx input %zu (%zu buffers) head %02x%02x%02x%02x output %zu, %zu samples bytes waiting", static_cast<unsigned>(job.kind), static_cast<unsigned long long>(job.flags), inputTotal, job.inputs.size(),
-            in != nullptr && job.inputSize >= 4 ? in[0] : 0, in != nullptr && job.inputSize >= 4 ? in[1] : 0, in != nullptr && job.inputSize >= 4 ? in[2] : 0, in != nullptr && job.inputSize >= 4 ? in[3] : 0, job.outputSize, state.pendingPcm.size());
+            in != nullptr && inSize >= 4 ? in[0] : 0, in != nullptr && inSize >= 4 ? in[1] : 0, in != nullptr && inSize >= 4 ? in[2] : 0, in != nullptr && inSize >= 4 ? in[3] : 0, job.outputSize, state.pendingPcm.size());
         state.recent[state.nextRecent++ % state.recent.size()] = line;
     }
     static const bool trace = std::getenv("ANYPS5_TRACE_AJM") != nullptr;
