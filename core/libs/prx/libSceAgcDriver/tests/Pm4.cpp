@@ -7,6 +7,7 @@
 #include "prx/libSceAgcDriver/Execution/include/WorkerWatchdog.hpp"
 #include "prx/libSceAgcDriver/Submit/include/Dcb.hpp"
 #include "prx/libc/include/Shutdown.hpp"
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <exception>
@@ -314,6 +315,116 @@ void testEventWrite() {
     expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x46, {0x0d}), 0); }, "event type 13");
 }
 
+void testOcclusionDump() {
+    constexpr std::uint64_t valid = 1ull << 63u;
+    constexpr std::uint64_t visible = 1ull << 20u;
+    constexpr std::uint64_t untouched = 0x5a5a5a5a5a5a5a5aull;
+    check(AgcDriver::Pm4::OcclusionRenderBackends == 16 && AgcDriver::Pm4::OcclusionDumpBytes == 15 * 16 + 8, "occlusion dump layout changed");
+    AgcDriver::QueueState state;
+    for (const bool end : {false, true}) {
+        alignas(256) std::array<std::uint64_t, 34> direct{};
+        alignas(256) std::array<std::uint64_t, 34> executed{};
+        direct.fill(untouched);
+        executed.fill(untouched);
+        const std::size_t first = end ? 1 : 0;
+        AgcDriver::Pm4::WriteOcclusionDump(reinterpret_cast<std::uintptr_t>(&direct[first]));
+        for (std::size_t index = 0; index < direct.size(); ++index) {
+            const bool written = index >= first && index < first + 2 * AgcDriver::Pm4::OcclusionRenderBackends && (index - first) % 2 == 0;
+            if (!written) {
+                check(direct[index] == untouched, "occlusion dump wrote outside its 16-byte stride");
+                continue;
+            }
+            check((direct[index] & valid) != 0, "occlusion dump result lost its valid bit");
+            const auto backend = (index - first) / 2;
+            check(direct[index] == (end && backend == 0 ? valid | visible : valid), end ? "end dump counted samples outside backend 0" : "begin dump counted samples");
+        }
+        const auto packet = makePacket(0x46, {0x139, low(&executed[first]), high(&executed[first])});
+        check(AgcDriver::Pm4::EventWritesMemory(packet) && AgcDriver::Pm4::OcclusionDumpAddress(packet) == reinterpret_cast<std::uintptr_t>(&executed[first]), "occlusion dump address decoded wrongly");
+        execute(state, packet);
+        check(executed == direct, "EVENT_WRITE pixel pipe dump changed its results");
+    }
+    struct Resolution {
+        const std::uint64_t* slot = nullptr;
+        std::uint64_t address = 0;
+        std::size_t bytes = 0;
+        bool writable = false;
+        bool unwritten = false;
+        int calls = 0;
+    } resolution;
+    alignas(256) std::array<std::uint64_t, 32> slot{};
+    resolution.slot = slot.data();
+    {
+        const AgcDriver::GuestMemory::MemoryAccessScope scope(&resolution, [](void* context, std::uint64_t address, std::size_t bytes, bool writable) {
+            auto& resolution = *static_cast<Resolution*>(context);
+            resolution.address = address;
+            resolution.bytes = bytes;
+            resolution.writable = writable;
+            resolution.unwritten = std::all_of(resolution.slot, resolution.slot + 32, [](std::uint64_t value) { return value == 0; });
+            ++resolution.calls;
+        });
+        AgcDriver::Pm4::WriteOcclusionDump(reinterpret_cast<std::uintptr_t>(&slot[1]));
+    }
+    check(resolution.calls == 1 && resolution.address == reinterpret_cast<std::uintptr_t>(&slot[1]) && resolution.bytes == AgcDriver::Pm4::OcclusionDumpBytes && resolution.writable && resolution.unwritten, "occlusion dump did not synchronize its whole range once before writing");
+    slot.fill(0);
+    {
+        const AgcDriver::GuestMemory::MemoryAccessScope rejecting(nullptr, [](void*, std::uint64_t, std::size_t, bool) {
+            throw std::runtime_error("range synchronization failed");
+        });
+        expectFailure([&] { AgcDriver::Pm4::WriteOcclusionDump(reinterpret_cast<std::uintptr_t>(slot.data())); }, "range synchronization failed");
+    }
+    check(std::all_of(slot.begin(), slot.end(), [](std::uint64_t value) { return value == 0; }), "a failed occlusion dump wrote part of its results");
+}
+
+void testDeviceOcclusionDump() {
+    alignas(256) static const std::array<std::uint32_t, 1> code{0xbf810000};
+    Shader shader{};
+    shader.file_header = 0x34333231;
+    shader.version = 0x18;
+    shader.header_size = sizeof(Shader);
+    shader.shader_size = sizeof(code);
+    shader.code = code.data();
+    AgcDriverRegisterShader_nid_postfix(&shader);
+    const auto program = reinterpret_cast<std::uintptr_t>(code.data());
+    constexpr std::uint64_t valid = 1ull << 63u;
+    constexpr std::uint64_t visible = 1ull << 20u;
+    alignas(256) std::array<std::uint64_t, 32> slot{};
+    slot.fill(~0ull);
+    alignas(256) std::array<std::uint64_t, 32> straddled{};
+    alignas(256) std::array<std::uint64_t, 32> replaced{};
+    const auto* straddling = reinterpret_cast<const std::byte*>(straddled.data()) + sizeof(std::uint32_t);
+    const auto* replacing = reinterpret_cast<const std::byte*>(replaced.data()) + sizeof(std::uint32_t);
+    std::uint64_t copied = 0;
+    std::vector<std::uint32_t> commands;
+    for (const auto& packet : {
+        makePacket(0x76, {0x20c, static_cast<std::uint32_t>(program >> 8u), static_cast<std::uint32_t>(program >> 40u)}),
+        makePacket(0x76, {0x207, 1, 1, 1}),
+        makePacket(0x76, {0x213, 0}),
+        makePacket(0x15, {1, 1, 1, 0x8041}),
+        makePacket(0x50, {0x40000000, 0, 0, low(slot.data()), high(slot.data()), 0x100}),
+        makePacket(0x37, {0x100, low(slot.data()), high(slot.data()), 0x11111111, 0x22222222}),
+        makePacket(0x46, {0x139, low(&slot[0]), high(&slot[0])}),
+        makePacket(0x15, {1, 1, 1, 0x8041}),
+        makePacket(0x46, {0x139, low(&slot[1]), high(&slot[1])}),
+        makePacket(0x40, {0x10101, low(&slot[1]), high(&slot[1]), low(&copied), high(&copied)}),
+        makePacket(0x37, {0x100, low(straddling), high(straddling), 0x33333333, 0x44444444}),
+        makePacket(0x46, {0x139, low(&straddled[1]), high(&straddled[1])}),
+        makePacket(0x15, {1, 1, 1, 0x8041}),
+        makePacket(0x37, {0x100, low(replacing), high(replacing), 0x55555555, 0x66666666}),
+        makePacket(0x37, {0x100, low(replacing), high(replacing), 0x77777777}),
+        makePacket(0x46, {0x139, low(&replaced[1]), high(&replaced[1])})
+    }) commands.insert(commands.end(), packet.begin(), packet.end());
+    Packet packet{commands.data(), static_cast<std::uint32_t>(commands.size()), 0, {}};
+    check(sceAgcDriverSubmitDcb(&packet) == 0, "occlusion dump submission failed");
+    AgcDriverWaitIdle_nid_postfix();
+    for (std::uint32_t backend = 0; backend < AgcDriver::Pm4::OcclusionRenderBackends; ++backend) {
+        check(slot[backend * 2] == valid, "a deferred write into the query slot landed after the begin dump");
+        check(slot[backend * 2 + 1] == (backend == 0 ? valid | visible : valid), "the end dump lost its results");
+    }
+    check(copied == (valid | visible), "COPY_DATA after an occlusion dump did not read the dump");
+    check(straddled[0] == 0x3333333300000000ull && straddled[1] == (valid | visible), "a deferred write that runs into the query slot landed after the end dump");
+    check(replaced[0] == 0x7777777700000000ull && replaced[1] == (valid | visible), "a smaller deferred write hid a larger pending write that runs into the query slot");
+}
+
 void testAcquireMem() {
     const auto captured = makePacket(0x58, {0x02007fc0, 0, 0, 0, 0, 10, 0x200});
     AgcDriver::Pm4::Validate(captured, 0);
@@ -357,11 +468,13 @@ void testAcquireMem() {
 void testDriverSubmission() {
     std::array<std::uint32_t, 2> source{0x10, 73};
     std::array<std::uint32_t, 1> destination{};
+    alignas(256) std::array<std::uint64_t, 32> slot{};
     std::vector<std::uint32_t> commands;
     for (const auto& packet : {
         makePacket(0x9f, {low(source.data()), high(source.data()), 0x80000000, 1}),
         makePacket(0x81, {0, 83}),
         makePacket(0x42, {0}),
+        makePacket(0x46, {0x139, low(&slot[1]), high(&slot[1])}),
         makePacket(0x46, {0x410}),
         makePacket(0x46, {0x407}),
         makePacket(0x46, {0x40f}),
@@ -378,6 +491,7 @@ void testDriverSubmission() {
     check(sceAgcDriverSubmitDcb(&packet) == 0, "PM4 submission failed");
     AgcDriverWaitIdle_nid_postfix();
     check(destination[0] == 83, "worker did not execute PM4 memory operations");
+    check(slot[0] == 0 && slot[1] == ((1ull << 63u) | (1ull << 20u)) && slot[3] == (1ull << 63u) && slot[31] == (1ull << 63u), "worker did not write the occlusion dump without a device");
     auto rejectedCommands = commands;
     const auto unsupportedEvent = makePacket(0x46, {0x13a});
     rejectedCommands.insert(rejectedCommands.end(), unsupportedEvent.begin(), unsupportedEvent.end());
@@ -513,12 +627,14 @@ int main(int argc, char** argv) {
         testCopies();
         testMemorySynchronization();
         testEventWrite();
+        testOcclusionDump();
         testAcquireMem();
         testDriverSubmission();
         testDriverThreads();
         testWorkerWatchdog();
+        testDeviceOcclusionDump();
         LibcRunShutdown_nid_postfix();
-        std::puts("PM4 catalog, registers, state, memory, submission, driver thread and worker watchdog tests passed");
+        std::puts("PM4 catalog, registers, state, memory, occlusion dump, submission, driver thread, worker watchdog and device occlusion dump tests passed");
         return 0;
     } catch (const std::exception& error) {
         std::fprintf(stderr, "%s\n", error.what());
