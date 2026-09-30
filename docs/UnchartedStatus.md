@@ -37,18 +37,30 @@ Build and relink as described in the README. The run folder holds the relinked `
 - Buffer device address (BDA) page tables only map windows that shaders have touched. A BDA access to an unmapped address inside registered GPU memory learns its window. Accesses outside guest memory are logged and the invocation stops instead of the driver failing.
 - macOS only: Metal command buffers retain the resources they bind (`RetainMetalCommandReferences`), because MoltenVK 1.4.2 creates them unretained next to its residency set.
 
-## Before this runs on Windows
+## Where it stands (Windows, i5-12400F, RTX 3070)
 
-This branch was only built and run on macOS with Apple Clang. Expect work in these places:
+- Builds with MinGW-w64 GCC 15.2 and runs from the relinked `eboot.exe`. Guest physical memory is one pagefile-backed section mapped into placeholders in 1 MiB views, so the title's defragmentation (1 MiB `munmap` pieces remapped with `sceKernelBatchMap2`) costs about 15 µs per unmap.
+- Speed: 18-20 fps in the first scenes (60-75 s after start), about 4 fps while compute pipelines of about 9700 dwords compile in 200 ms each.
+- Crash (blocker): about two minutes in, a game leaf function reads a pointer it kept in the SysV red zone and gets zero. Windows has no red zone: when a guest thread takes a page fault on memory the driver tracks, the kernel writes the exception record just below `rsp` and overwrites the 128 bytes the function still uses. Linux and macOS skip the red zone when they deliver a signal. A run saw 14,000 such faults, mostly while loading. The fix is to patch every guest instruction that can fault while the red zone holds live data so it runs with `rsp` lowered by 128 (shadPS4 and the Kyty fork do this with Zydis). Fewer tracking faults only makes the crash rarer.
+- Movies are black: `libSceVdecsw` only decodes with VideoToolbox (macOS).
 
-- **Physical memory aliasing (blocker).** Uncharted defragments its memory: it unmaps 1 MiB pieces of direct memory and maps the same physical pages at new addresses with `sceKernelBatchMap2`. `MemoryBackingWindows.cpp` ignores the physical offset in `MapPhysical` and throws in `UnmapViewRange`. It needs one pagefile-backed section for guest physical memory (13.5 GiB, `GuestPhysicalMemoryBytes`), mapped into placeholders (`VirtualAlloc2` with `MEM_RESERVE_PLACEHOLDER`, then `MapViewOfFile3`) so views can be mapped and unmapped per piece. Darwin (`mach_vm_remap`) and Linux (`memfd` + `mmap`) already do this.
-- **Build with MinGW-w64 GCC.** `Aio.cpp` uses `pread`/`pwrite`, and `PosixExtra.cpp` gained `truncate` and `fsync`. These may need Windows versions.
-- **Video.** `libSceVdecsw` decodes with VideoToolbox on macOS and falls back to blank frames elsewhere, so movies will be black until a decoder (for example Media Foundation) is added.
-- The fixed-address workaround for the macOS reserved range (0xfc0000000-0x7000000000) and the Metal/MoltenVK workarounds do not apply on Windows.
+## Windows findings
+
+- MinGW winpthreads rounds timed waits up to the 15.6 ms system tick even with `timeBeginPeriod(1)`, and `sleep_for` below 1 ms returns at once. Guest sleeps, condition variable, event flag, semaphore and equeue timeouts go through high-resolution waitable timers (`PreciseSleep`, `PreciseWait`).
+- `VirtualQuery` walks page tables and costs milliseconds on multi-GiB views; guest range checks consult the allocation registry first, and watches keep their original protections instead of querying them again.
+- Remapping a view unmaps it for a moment. A guest thread that faults on it waits for the remap and retries; the retry budget restarts after every remap.
+- Fatal exception reports print the state and protection of the faulting page.
+
+## Debug switches for performance work
+
+- `ANYPS5_SAMPLE_THREADS=1`: samples the title, worker and graphics threads every millisecond (Windows) and prints the hottest functions and call chains every 30 s.
+- `ANYPS5_TRACE_SLOW_OPS=1`: prints 5 s summaries of lock waits and slow memory, tracking and device operations.
+- `ANYPS5_TRACE_TIMING=1`: per-frame timing of the driver stages and GPU timestamps per command batch.
 
 ## Next steps
 
-1. Selector image: find out why the history depth buffers (`0x8463400000` / `0x8464710000` in the logs) are never filled, then fix the dark lighting and the blocky tiles.
-2. Continue past New Game into gameplay. Watch for GPU-culled indirect draw arguments exceeding the index buffer, a hint from the Kyty fork (github.com/budhilaw/Kyty, branch `feat/ps5-gameplay-fixes`).
-3. Performance target: 30 fps in gameplay at a 720p internal resolution. That needs render scaling, smaller recompiled shaders and less per-draw CPU work.
-4. The graphics unit tests stop at a stale "pitch" expectation, and the minimum-LOD case changed from an error to a log.
+1. Windows: protect the guest red zone (see the crash above), then cut the tracking faults and the full pipeline barriers around every compute dispatch.
+2. Selector image: find out why the history depth buffers (`0x8463400000` / `0x8464710000` in the logs) are never filled, then fix the dark lighting and the blocky tiles.
+3. Continue past New Game into gameplay. Watch for GPU-culled indirect draw arguments exceeding the index buffer, a hint from the Kyty fork (github.com/budhilaw/Kyty, branch `feat/ps5-gameplay-fixes`).
+4. Performance target: 30 fps in gameplay at a 720p internal resolution. That needs render scaling, smaller recompiled shaders and less per-draw CPU work.
+5. The graphics unit tests stop at a stale "pitch" expectation, and the minimum-LOD case changed from an error to a log.

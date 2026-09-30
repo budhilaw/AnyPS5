@@ -35,6 +35,12 @@ Throughout the project, every function at every stage either **does exactly what
 - Rosetta 2 translation is the only way to run the x86-64 guest on Apple Silicon; there is no arm64 recompilation.
 - `sceKernelRaiseException` (signal delivery into another guest thread) and the guest exception handlers registered with `sceKernelInstallExceptionHandler` are recorded but never invoked with a synthesized machine context.
 
+### Windows host
+
+- The SysV red zone is not preserved: Windows writes the exception record below `rsp` when it dispatches a guest page fault, so a guest leaf function that faults on tracked memory loses up to 128 bytes of its locals ([UnchartedStatus](UnchartedStatus.md)). Guest code is not patched to lower `rsp` around such accesses yet.
+- Guest memory tracking and transient remaps rely on vectored exception handlers ([MemoryTrackingWindows](../core/libs/prx/libc/src/MemoryTrackingWindows.cpp), [MemoryBackingWindows](../core/libs/prx/libc/src/MemoryBackingWindows.cpp)); a fault takes the global tracking lock, so a guest thread can wait behind a long driver operation.
+- Timed waits bypass winpthreads' 15.6 ms rounding with high-resolution waitable timers ([PreciseWait](../core/libs/prx/libc/include/PreciseWait.hpp)).
+
 ### PS5 title coverage (Unity / il2cpp)
 
 - APR file reads ([libkernel Apr](../core/libs/prx/libkernel/Apr/src/Apr.cpp), [libSceAmpr](../core/libs/prx/libSceAmpr/Export.cpp)) execute synchronously at submission; only the read-file command is implemented (no gather/scatter, kernel-event or AMM commands).
