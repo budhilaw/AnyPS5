@@ -104,6 +104,42 @@ static void RequireTrackingFastPath() {
     GuestMemoryBacking::GuestMemoryBackingUnmap_nid_postfix(memory, mapped);
 }
 
+static void RequirePhysicalViewSplits() {
+    using namespace GuestMemoryTracking;
+    constexpr std::size_t mebibyte = 1u << 20;
+    constexpr std::size_t granule = 1u << 16;
+    const auto pageSize = GuestMemoryTrackingPageSize_nid_postfix();
+    std::int64_t physical = -1;
+    Require(sceKernelAllocateDirectMemory(0, 13824ll << 20, 4 * mebibyte, 2 * mebibyte, 0, &physical) == 0);
+    void* view = nullptr;
+    Require(sceKernelMapDirectMemory(&view, 4 * mebibyte, 3, 0, physical, 2 * mebibyte) == 0);
+    auto* bytes = static_cast<unsigned char*>(view);
+    const auto base = reinterpret_cast<std::uint64_t>(view);
+    for (std::size_t offset = 0; offset < 4 * mebibyte; offset += granule) bytes[offset] = static_cast<unsigned char>(offset / granule + 1);
+    {
+        TrackingProbe probe;
+        Watch watch(base + mebibyte - pageSize, 2 * pageSize, &probe, &TrackingResolver);
+        probe.watch = &watch;
+        watch.Protect(Protection::None);
+        Require(*reinterpret_cast<volatile unsigned char*>(base + mebibyte) == 17 && probe.reads == 1);
+        *reinterpret_cast<volatile unsigned char*>(base + mebibyte - pageSize) = 5;
+        Require(probe.writes == 1);
+        watch.Protect(Protection::Read);
+    }
+    bytes[mebibyte - pageSize] = 6;
+    Require(sceKernelMunmap(base + mebibyte + granule, mebibyte) == 0);
+    for (std::size_t offset = 0; offset < 4 * mebibyte; offset += granule) {
+        if (offset < mebibyte + granule || offset >= 2 * mebibyte + granule) Require(bytes[offset] == static_cast<unsigned char>(offset / granule + 1));
+    }
+    Require(bytes[mebibyte - pageSize] == 6);
+    bytes[mebibyte] = 7;
+    bytes[2 * mebibyte + granule] = 8;
+    Require(sceKernelMunmap(base, mebibyte + granule) == 0);
+    Require(bytes[2 * mebibyte + granule] == 8);
+    Require(sceKernelMunmap(base + 2 * mebibyte + granule, 2 * mebibyte - granule) == 0);
+    Require(sceKernelReleaseDirectMemory(physical, 4 * mebibyte) == 0);
+}
+
 int main() {
     constexpr std::size_t page = 0x4000;
     const auto failed = reinterpret_cast<void*>(static_cast<std::uintptr_t>(-1));
@@ -155,6 +191,7 @@ int main() {
     }
     RequirePhysicalAliasing();
     RequireTrackingFastPath();
+    RequirePhysicalViewSplits();
     void* writable = mmap_nid_postfix(nullptr, page, 3, 0x1002, -1, 0);
     void* readOnly = mmap_nid_postfix(nullptr, page, 1, 0x1002, -1, 0);
     Require(writable != failed && readOnly != failed);

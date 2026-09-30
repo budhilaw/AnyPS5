@@ -16,6 +16,8 @@
 namespace GuestMemoryBacking::Platform {
 namespace {
 
+constexpr std::uint64_t PhysicalViewBytes = std::uint64_t{1} << 20;
+
 using VirtualAlloc2Function = PVOID (WINAPI*)(HANDLE, PVOID, SIZE_T, ULONG, ULONG, MEM_EXTENDED_PARAMETER*, ULONG);
 using MapViewOfFile3Function = PVOID (WINAPI*)(HANDLE, HANDLE, PVOID, ULONG64, SIZE_T, ULONG, ULONG, MEM_EXTENDED_PARAMETER*, ULONG);
 using UnmapViewOfFile2Function = BOOL (WINAPI*)(HANDLE, PVOID, ULONG);
@@ -193,6 +195,33 @@ void splitView(std::uint64_t base, const View& view, std::uint64_t first, std::u
     remapGeneration.fetch_add(1, std::memory_order_release);
 }
 
+void mapPhysicalPiece(HANDLE section, std::uint64_t address, std::uint64_t end, std::uint64_t offset, int protection) {
+    const auto bytes = static_cast<std::size_t>(end - address);
+    void* view = mapIntoPlaceholder(section, reinterpret_cast<void*>(address), offset, bytes);
+    if (view != reinterpret_cast<void*>(address)) throw std::system_error(static_cast<int>(GetLastError()), std::system_category(), describe("MapViewOfFile3 guest physical view", address, bytes));
+    physicalViews[address] = {end, offset};
+    check(VirtualAlloc(view, bytes, MEM_COMMIT, PAGE_READWRITE) != nullptr, "VirtualAlloc commit guest physical memory");
+    protectNative(address, bytes, nativeProtection(protection), "VirtualProtect guest physical view");
+}
+
+void releasePhysicalRange(std::uint64_t address, std::uint64_t end) {
+    while (address < end) {
+        auto next = end;
+        if (const auto view = physicalViews.find(address); view != physicalViews.end()) {
+            next = view->second.end;
+            physicalViews.erase(view);
+            UnmapViewOfFile(reinterpret_cast<void*>(address));
+        } else {
+            MEMORY_BASIC_INFORMATION info{};
+            if (VirtualQuery(reinterpret_cast<const void*>(address), &info, sizeof(info)) != sizeof(info)) return;
+            next = reinterpret_cast<std::uintptr_t>(info.BaseAddress) + info.RegionSize;
+            if (info.State == MEM_RESERVE) VirtualFree(reinterpret_cast<void*>(address), 0, MEM_RELEASE);
+        }
+        if (next <= address) return;
+        address = next;
+    }
+}
+
 }
 
 Mapping Map(void* address, std::size_t bytes, std::size_t alignment, int protection) {
@@ -232,22 +261,20 @@ Mapping MapPhysical(void* address, std::size_t bytes, std::size_t alignment, int
     if (!lastChanceHandlerInstalled) throw std::runtime_error("guest memory needs its last-chance exception handler");
     const auto& memory = physicalMemory();
     std::lock_guard lock(viewMutex);
-    void* placeholder = reservePlaceholder(address, bytes, alignment);
-    void* guest = mapIntoPlaceholder(memory.section, placeholder, offset, bytes);
-    if (guest != placeholder) {
-        const auto error = GetLastError();
-        VirtualFree(placeholder, 0, MEM_RELEASE);
-        throw std::system_error(static_cast<int>(error), std::system_category(), describe("MapViewOfFile3 guest physical view", reinterpret_cast<std::uintptr_t>(placeholder), bytes));
-    }
+    const auto start = reinterpret_cast<std::uintptr_t>(reservePlaceholder(address, bytes, alignment));
+    const auto end = start + bytes;
+    auto cursor = start;
     try {
-        check(VirtualAlloc(guest, bytes, MEM_COMMIT, PAGE_READWRITE) != nullptr, "VirtualAlloc commit guest physical memory");
-        protectNative(reinterpret_cast<std::uintptr_t>(guest), bytes, nativeProtection(protection), "VirtualProtect guest physical view");
+        while (cursor < end) {
+            const auto next = std::min(end, (cursor / PhysicalViewBytes + 1) * PhysicalViewBytes);
+            if (next < end) check(VirtualFree(reinterpret_cast<void*>(cursor), static_cast<std::size_t>(next - cursor), MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER) != FALSE, "VirtualFree split guest physical placeholder");
+            mapPhysicalPiece(memory.section, cursor, next, offset + (cursor - start), protection);
+            cursor = next;
+        }
     } catch (...) {
-        UnmapViewOfFile(guest);
+        releasePhysicalRange(start, end);
         throw;
     }
-    const auto start = reinterpret_cast<std::uintptr_t>(guest);
-    physicalViews[start] = {start + bytes, offset};
     return {start, bytes, memory.alias + offset, 0, true};
 }
 
@@ -255,18 +282,29 @@ void UnmapViewRange(std::uint64_t address, std::size_t bytes) {
     const auto end = address + bytes;
     std::lock_guard lock(viewMutex);
     auto it = physicalViews.upper_bound(address);
-    if (it == physicalViews.begin() || std::prev(it)->second.end < end) throw std::runtime_error(describe("guest physical unmap does not lie within one view:", address, bytes));
+    if (it == physicalViews.begin()) throw std::runtime_error(describe("guest physical unmap lies outside the mapped views:", address, bytes));
     --it;
-    const auto base = it->first;
-    const auto view = it->second;
-    if (base == address && view.end == end) {
-        physicalViews.erase(it);
-        check(UnmapViewOfFile(reinterpret_cast<void*>(base)) != FALSE, "UnmapViewOfFile guest physical view");
-        return;
+    auto covered = address;
+    for (auto view = it; covered < end; ++view) {
+        if (view == physicalViews.end() || view->first > covered || view->second.end <= covered) throw std::runtime_error(describe("guest physical unmap is not covered by mapped views:", address, bytes));
+        covered = view->second.end;
     }
     const auto unit = granularity();
-    if (address % unit != 0 || end % unit != 0) throw std::invalid_argument(describe("partial guest physical unmap is not aligned to the 64 KiB Windows allocation granularity:", address, bytes));
-    splitView(base, view, address, end);
+    if (address % unit != 0 || (end != covered && end % unit != 0)) throw std::invalid_argument(describe("partial guest physical unmap is not aligned to the 64 KiB Windows allocation granularity:", address, bytes));
+    auto cursor = address;
+    while (cursor < end) {
+        const auto found = std::prev(physicalViews.upper_bound(cursor));
+        const auto base = found->first;
+        const auto view = found->second;
+        const auto last = std::min(end, view.end);
+        if (base == cursor && view.end == last) {
+            physicalViews.erase(found);
+            check(UnmapViewOfFile(reinterpret_cast<void*>(base)) != FALSE, "UnmapViewOfFile guest physical view");
+        } else {
+            splitView(base, view, cursor, last);
+        }
+        cursor = last;
+    }
 }
 
 void UnmapView(const Mapping& mapping) {
