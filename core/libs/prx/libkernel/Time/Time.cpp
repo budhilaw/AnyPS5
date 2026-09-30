@@ -35,7 +35,7 @@ static std::uint64_t GetMonotonicNanos() {
     }();
     LARGE_INTEGER counter{};
     QueryPerformanceCounter(&counter);
-    return static_cast<std::uint64_t>(counter.QuadPart) * 1000000000ULL / freq;
+    return static_cast<std::uint64_t>(static_cast<unsigned __int128>(counter.QuadPart) * 1000000000ULL / freq);
 #else
     struct timespec ts{};
     clock_gettime(CLOCK_MONOTONIC, &ts);
