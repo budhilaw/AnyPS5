@@ -33,6 +33,7 @@ public:
     const std::vector<std::pair<std::uint64_t, std::uint64_t>>& WriteRanges() const { return guestMemory.WriteRanges(); }
     bool HasGuestWrites() const { return guestMemory.HasWrites(); }
     bool Writes() const { return guestMemory.HasWrites() || storesImages || usesFaultBuffer; }
+    bool UsesGds() const { return usesGds; }
     const std::vector<std::uint32_t>& LayoutKey() const { return layoutKey; }
 
 private:
@@ -65,6 +66,7 @@ private:
     std::unique_ptr<BdaResources> bda;
     bool usesBda = false;
     bool usesFaultBuffer = false;
+    bool usesGds = false;
     bool storesImages = false;
     VkDescriptorSetLayout _layout = VK_NULL_HANDLE;
     VkDescriptorSet _set = VK_NULL_HANDLE;

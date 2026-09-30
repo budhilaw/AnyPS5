@@ -24,6 +24,7 @@ void DrawQueue::retire(Batch batch) {
     if (!batch.entries.empty()) {
         const auto last = batch.entries.back().sequence;
         writers.erase(writers.begin(), std::find_if(writers.begin(), writers.end(), [&](const Writer& writer) { return writer.sequence > last; }));
+        retiredThrough = std::max(retiredThrough, last);
     }
     for (auto& entry : batch.entries) entry.resources->WriteBack(entry.sequence);
     timing.Mark("resources_writeback");

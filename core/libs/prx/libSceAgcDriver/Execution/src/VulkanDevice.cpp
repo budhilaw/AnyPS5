@@ -656,7 +656,7 @@ void VulkanDevice::GdsTransfer(std::span<const std::uint32_t> packet) {
     const bool fromGds = Pm4::DmaGdsSource(packet);
     require(toGds || fromGds, "DMA_DATA does not involve GDS");
     require(!(toGds && fromGds), "GDS to GDS DMA_DATA is not implemented");
-    state->drawQueue->Wait();
+    state->drawQueue->WaitGds();
     timing.Mark("draw_wait");
     auto gds = state->gds->Bytes();
     std::uint32_t previous = 0;

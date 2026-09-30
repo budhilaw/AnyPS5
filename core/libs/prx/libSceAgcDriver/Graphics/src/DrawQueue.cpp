@@ -81,6 +81,7 @@ void DrawQueue::EndPass() {
 void DrawQueue::Enqueue(std::shared_ptr<ShaderResources> resources, std::shared_ptr<void> storage) {
     Require(recording.commands != nullptr && resources != nullptr && storage != nullptr, "draw batch is incomplete");
     if (resources->HasGuestWrites()) writers.push_back({nextSequence, resources.get()});
+    if (resources->UsesGds()) lastGdsSequence = nextSequence;
     recording.entries.push_back({std::move(storage), std::move(resources), nextSequence++});
     ++drawCount;
     if (recording.entries.size() >= BatchDraws) Flush();
@@ -146,6 +147,7 @@ void DrawQueue::Resolve(std::uint64_t address, std::size_t bytes, bool ordered) 
 }
 
 void DrawQueue::waitThrough(std::uint64_t sequence) {
+    if (sequence <= retiredThrough) return;
     PerformanceTimer timing("Graphics.DrawQueue.WaitThrough");
     if (!recording.entries.empty() && recording.entries.front().sequence <= sequence) Flush();
     timing.Mark("submit");

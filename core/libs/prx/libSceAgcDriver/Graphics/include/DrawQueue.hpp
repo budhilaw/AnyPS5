@@ -41,6 +41,7 @@ public:
         for (const auto& writer : writers) ranges.insert(ranges.end(), writer.resources->WriteRanges().begin(), writer.resources->WriteRanges().end());
     }
     void Wait();
+    void WaitGds() { if (lastGdsSequence != 0) waitThrough(lastGdsSequence); }
     void WaitGpu();
     void Collect();
     void RecordMemoryBarrier(const Context& context);
@@ -66,6 +67,8 @@ private:
     std::vector<std::unique_ptr<CommandBatch>> available;
     std::size_t drawCount = 0;
     std::uint64_t nextSequence = 1;
+    std::uint64_t retiredThrough = 0;
+    std::uint64_t lastGdsSequence = 0;
     struct Writer {
         std::uint64_t sequence;
         const ShaderResources* resources;

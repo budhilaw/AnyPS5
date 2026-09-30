@@ -139,6 +139,7 @@ void ShaderResources::build(std::span<const CompiledShader> shaders, const Color
                     Require(binding.count == 1, "GDS descriptors must not be arrays");
                     item.allocations.push_back(allocations.size());
                     allocations.push_back({0, context.gds->Bytes().size(), false, nullptr, binding.role});
+                    usesGds = true;
                 } else {
                     Require(binding.count == 1, "shader data and flattened SRT descriptors must not be arrays");
                     Require(!binding.guestDescriptor.empty(), "empty shader data descriptor");
