@@ -4,6 +4,7 @@
 #include "prx/libSceAgcDriver/Execution/include/MemoryAccessScope.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver.hpp"
 #include "prx/libSceAgcDriver/Execution/include/DriverThread.hpp"
+#include "prx/libSceAgcDriver/Execution/include/WorkerWatchdog.hpp"
 #include "prx/libSceAgcDriver/Submit/include/Dcb.hpp"
 #include "prx/libc/include/Shutdown.hpp"
 #include <chrono>
@@ -12,6 +13,7 @@
 #include <limits>
 #include <set>
 #include <stdexcept>
+#include <string>
 #include <thread>
 #include <vector>
 #ifdef _WIN32
@@ -451,6 +453,37 @@ void testDriverThreads() {
     if (failure) std::rethrow_exception(failure);
 }
 
+void testWorkerWatchdog() {
+    using Watchdog = AgcDriver::WorkerWatchdog;
+    using namespace std::chrono_literals;
+    const auto origin = Watchdog::Clock::time_point{} + 100s;
+    Watchdog disabled(false);
+    disabled.Enter(0, 0xc0031500u, "dispatch");
+    check(!disabled.Check(origin) && !disabled.Check(origin + 10s) && disabled.Stage("draw") == nullptr, "a disabled watchdog reported a stall");
+    Watchdog watchdog(true, 1s, 5s);
+    check(!watchdog.Check(origin) && !watchdog.Check(origin + 3s), "an idle worker was reported as stalled");
+    watchdog.Enter(0x20, 0xc0031500u, "dispatch");
+    check(!watchdog.Check(origin + 3100ms), "a stall was reported before the threshold");
+    check(std::string(watchdog.Stage("dispatch compile")) == "dispatch", "the previous stage was not returned");
+    check(!watchdog.Check(origin + 3900ms), "a stall was reported before the threshold");
+    const auto first = watchdog.Check(origin + 4200ms);
+    check(first && first->queue == 0x20 && first->header == 0xc0031500u && std::string(first->stage) == "dispatch compile" && first->elapsed == 1200ms, "a stall inside one packet was not reported with its queue, packet and stage");
+    check(!watchdog.Check(origin + 5s), "a stall was reported again before the repeat interval");
+    const auto second = watchdog.Check(origin + 9300ms);
+    check(second && second->elapsed == 6300ms, "a long stall was not reported again");
+    watchdog.Progress();
+    check(!watchdog.Check(origin + 9400ms), "a completed packet was reported as a stall");
+    watchdog.Enter(0, 0xc0053c00u, "label_wait");
+    const auto blocked = watchdog.Check(origin + 10500ms);
+    check(blocked && blocked->queue == 0 && blocked->header == 0xc0053c00u && std::string(blocked->stage) == "label_wait" && blocked->elapsed == 1100ms, "a blocked label wait was not reported");
+    watchdog.Progress();
+    check(!watchdog.Check(origin + 10600ms), "a completed packet was reported as a stall");
+    const auto between = watchdog.Check(origin + 11700ms);
+    check(between && between->stage == nullptr, "a stall between packets was not reported");
+    watchdog.Idle();
+    check(!watchdog.Check(origin + 20s) && !watchdog.Check(origin + 30s), "an idle worker was reported as stalled");
+}
+
 void testAsyncMemoryFailure() {
     auto commands = makePacket(0x37, {0x100, 0x1000, 0, 1});
     Packet packet{commands.data(), static_cast<std::uint32_t>(commands.size()), 0, {}};
@@ -483,8 +516,9 @@ int main(int argc, char** argv) {
         testAcquireMem();
         testDriverSubmission();
         testDriverThreads();
+        testWorkerWatchdog();
         LibcRunShutdown_nid_postfix();
-        std::puts("PM4 catalog, registers, state, memory, submission and driver thread tests passed");
+        std::puts("PM4 catalog, registers, state, memory, submission, driver thread and worker watchdog tests passed");
         return 0;
     } catch (const std::exception& error) {
         std::fprintf(stderr, "%s\n", error.what());
