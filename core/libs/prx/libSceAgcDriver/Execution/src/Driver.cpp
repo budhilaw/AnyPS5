@@ -691,6 +691,10 @@ private:
 
     void dispatch(QueueState& queue, std::span<const std::uint32_t> packet, const Submission& submission, std::uint64_t indirectArguments = 0) {
         PerformanceTimer timing("Driver.Dispatch");
+        if (indirectArguments == 0 && (packet[1] == 0 || packet[2] == 0 || packet[3] == 0)) {
+            timing.Mark("empty");
+            return;
+        }
         const auto address = (static_cast<std::uint64_t>(readRegister(queue.shader, 0x20c)) << 8u) | (static_cast<std::uint64_t>(readRegister(queue.shader, 0x20d) & 0xffu) << 40u);
         auto it = submission.shaders.upper_bound(address);
         require(it != submission.shaders.begin(), "compute program does not belong to a registered shader");
