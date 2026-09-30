@@ -1188,6 +1188,16 @@ private:
                 std::uint32_t writeBytes = 0;
                 bool writeKnown = false;
                 const auto current = currentDevice();
+                if (current != nullptr && opcode == 0x49 && ((packet[2] >> 29u) & 7u) == 0 && ((packet[2] >> 24u) & 7u) != 4) {
+                    const auto interrupt = (packet[2] >> 24u) & 7u;
+                    const auto interruptId = packet.size() > 7 ? packet[7] & 0x7ffffffu : 0u;
+                    if (interrupt == 0) postGraphics({[current] { current->RecordBarrier(); }, {}, false});
+                    else if (graphicsPending() || current->HasPendingWork()) postGraphics({[current, interruptId] { current->Defer([interruptId] { AgcDriver::Eq::Trigger(interruptId); }); }, {}, false});
+                    else AgcDriver::Eq::Trigger(interruptId);
+                    timing.Mark("release_event");
+                    execution.cursor += count;
+                    return Step::Progressed;
+                }
                 if (current != nullptr && (opcode == 0x37 || opcode == 0x40 || opcode == 0x50 || opcode == 0x49) && Pm4::DeferrableWrite(packet, writeAddress, writeBytes, writeValue, writeKnown) && (graphicsPending() || current->HasPendingWork())) {
                     const auto id = ++deferredSerial;
                     {
