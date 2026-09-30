@@ -72,6 +72,14 @@ unsigned long APS5_VABI _Stoul_nid_postfix(const char* str, char** endptr, int b
     return std::strtoul(str, endptr, base);
 }
 
+unsigned long long APS5_VABI _Stoull_nid_postfix(const char* str, char** endptr, int base) {
+    return std::strtoull(str, endptr, base);
+}
+
+void APS5_VABI _Assert_nid_postfix(const char* message, const char* location) {
+    throw std::runtime_error(std::string("guest assertion failed: ") + (message != nullptr ? message : "?") + " at " + (location != nullptr ? location : "?"));
+}
+
 void APS5_VABI _Locksyslock_nid_postfix() {
     g_sysLock.lock();
 }

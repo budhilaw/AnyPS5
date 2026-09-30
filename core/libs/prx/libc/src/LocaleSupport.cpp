@@ -210,4 +210,23 @@ void APS5_VABI _init_env_nid_postfix() {
     ApplicationHeapInitialize_nid_no_patch(ApplicationProcessParameters_nid_no_patch());
 }
 
+int APS5_VABI _Iswctype_nid_postfix(std::uint32_t character, std::size_t category) {
+    const auto value = static_cast<wint_t>(character);
+    switch (category) {
+        case 1: return std::iswalnum(value);
+        case 2: return std::iswalpha(value);
+        case 3: return std::iswcntrl(value);
+        case 4: return std::iswdigit(value);
+        case 5: return std::iswgraph(value);
+        case 6: return std::iswlower(value);
+        case 7: return std::iswprint(value);
+        case 8: return std::iswpunct(value);
+        case 9: return std::iswspace(value);
+        case 10: return std::iswupper(value);
+        case 11: return std::iswxdigit(value);
+        case 12: return std::iswblank(value);
+        default: return 0;
+    }
+}
+
 }

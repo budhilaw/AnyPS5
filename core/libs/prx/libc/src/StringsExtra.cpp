@@ -52,8 +52,25 @@ int APS5_VABI vswprintf_nid_postfix(wchar_t* buffer, size_t count, const wchar_t
 }
 
 size_t APS5_VABI strspn_nid_postfix(const char* s, const char* accept) { return std::strspn(s, accept); }
-size_t APS5_VABI wcslen_nid_postfix(const wchar_t* s) { return std::wcslen(s); }
-int APS5_VABI wcscmp_nid_postfix(const wchar_t* a, const wchar_t* b) { return std::wcscmp(a, b); }
+size_t APS5_VABI wcslen_nid_postfix(const char16_t* s) {
+    size_t length = 0;
+    while (s[length] != 0) ++length;
+    return length;
+}
+
+int APS5_VABI wcscmp_nid_postfix(const char16_t* a, const char16_t* b) {
+    for (;; ++a, ++b) {
+        if (*a != *b) return *a < *b ? -1 : 1;
+        if (*a == 0) return 0;
+    }
+}
+
+char16_t* APS5_VABI wcsncpy_nid_postfix(char16_t* destination, const char16_t* source, size_t count) {
+    size_t index = 0;
+    for (; index < count && source[index] != 0; ++index) destination[index] = source[index];
+    for (; index < count; ++index) destination[index] = 0;
+    return destination;
+}
 size_t APS5_VABI mbstowcs_nid_postfix(wchar_t* destination, const char* source, size_t count) { return std::mbstowcs(destination, source, count); }
 size_t APS5_VABI wcstombs_nid_postfix(char* destination, const wchar_t* source, size_t count) { return std::wcstombs(destination, source, count); }
 

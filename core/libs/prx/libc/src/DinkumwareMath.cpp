@@ -21,6 +21,8 @@ short APS5_VABI _Dtest_nid_postfix(const double* value) {
 
 double APS5_VABI _Cosh_nid_postfix(double x, double y) { return y * std::cosh(x); }
 double APS5_VABI _Sinh_nid_postfix(double x, double y) { return y * std::sinh(x); }
+float APS5_VABI _FSinh_nid_postfix(float x, float y) { return y * std::sinh(x); }
+int APS5_VABI _Fltrounds_nid_postfix() { return 1; }
 
 extern const double _Inf_nid_postfix = std::numeric_limits<double>::infinity();
 
