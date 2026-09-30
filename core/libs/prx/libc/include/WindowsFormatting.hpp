@@ -196,6 +196,32 @@ inline int FormatWindows(char* buffer, size_t size, const char* format, const vo
     return output.Count();
 }
 
+inline int ScanWindows(const char* input, const char* format, const void* source) {
+    if (!input || !format || !source) throw std::invalid_argument("Null scanning argument");
+    FormatArguments args(source);
+    std::vector<void*> targets;
+    for (const char* cursor = format; *cursor; ++cursor) {
+        if (*cursor != '%') continue;
+        ++cursor;
+        if (*cursor == '%') continue;
+        const bool suppressed = *cursor == '*';
+        if (suppressed) ++cursor;
+        while (*cursor >= '0' && *cursor <= '9') ++cursor;
+        if (*cursor == '$') throw std::invalid_argument("Positional scan conversions are not supported");
+        while (*cursor && std::strchr("hljztLq", *cursor)) ++cursor;
+        if (*cursor == '[') {
+            ++cursor;
+            if (*cursor == '^') ++cursor;
+            if (*cursor == ']') ++cursor;
+            while (*cursor && *cursor != ']') ++cursor;
+        }
+        if (!*cursor) throw std::invalid_argument("Incomplete scan conversion");
+        if (!suppressed) targets.push_back(args.Next<void*>());
+    }
+    targets.push_back(nullptr);
+    return std::vsscanf(input, format, reinterpret_cast<std::va_list>(targets.data()));
+}
+
 inline int PrintWindows(const char* format, const void* args) {
     std::string buffer;
     const int size = FormatWindows(nullptr, 0, format, args, &buffer);
