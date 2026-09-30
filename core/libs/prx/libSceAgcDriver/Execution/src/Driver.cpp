@@ -308,9 +308,9 @@ private:
         if (current == nullptr) return;
         const bool queuedWrite = self.graphicsMayWrite(address, bytes);
         const bool recorded = !queuedWrite && current->NeedsResolve(address, bytes);
-        if (!writable && !queuedWrite && !recorded) return;
+        if (!queuedWrite && !recorded) return;
         PerformanceTimer timing("Driver.HostResolve");
-        timing.Mark(queuedWrite ? "queued_write" : recorded ? "recorded_write" : "host_write");
+        timing.Mark(queuedWrite ? "queued_write" : "recorded_write");
         if (static const bool trace = std::getenv("ANYPS5_TRACE_DRAINS") != nullptr; trace) {
             static int reported = 0;
             if (reported++ < 400) {
