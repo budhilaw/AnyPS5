@@ -238,8 +238,11 @@ std::shared_ptr<Texture> TextureCache::Get(std::span<const std::uint32_t> words,
         if (reported++ < 6000) APS5_LOG_OUT("texture 0x%llx (%llu bytes, format 0x%x %ux%u mips %u layers %u) detiled", static_cast<unsigned long long>(resource.baseAddress), static_cast<unsigned long long>(bytes), resource.format, resource.width, resource.height, resource.mipCount, layers);
     }
     const auto stamp = context.guestBufferCache != nullptr ? context.guestBufferCache->Track(resource.baseAddress, resource.baseAddress + bytes) : 0;
+    timing.Mark("miss_track");
     GuestMemory::Read(resource.baseAddress, snapshot, 1);
+    timing.Mark("miss_read", snapshot.size());
     auto texture = std::make_shared<Texture>(context, *context.detiler, resource, components, snapshot);
+    timing.Mark("miss_detile");
     if (context.drawQueue != nullptr) context.drawQueue->EnqueueUpload([texture] { texture->ReleaseUpload(); }, snapshot.size());
     const auto retained = snapshot.size() + texture->AllocationBytes();
     auto surface = std::make_shared<Surface>();
@@ -250,7 +253,7 @@ std::shared_ptr<Texture> TextureCache::Get(std::span<const std::uint32_t> words,
     addEntry({key, resource.viewDimension, texture, surface, {}, {}, 0, retained});
     retainedBytes += retained;
     trim();
-    timing.Mark("miss_detile");
+    timing.Mark("miss_retain");
     return texture;
 }
 

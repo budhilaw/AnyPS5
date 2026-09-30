@@ -4,6 +4,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/TextureFormat.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureTiling.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
+#include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
 #include "prx/libc/include/General.hpp"
 #include <cstdlib>
 #include <algorithm>
@@ -67,6 +68,7 @@ std::uint64_t SliceLinearBytes(const std::vector<TileMipLayout>& mips) {
 }
 
 Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTextureResource& descriptor, VkComponentMapping components, std::span<const std::byte> snapshot) : context(context) {
+    PerformanceTimer timing("Graphics.Texture.Detile");
     try {
         const auto vkFormat = ResolveTextureFormat(descriptor.format);
         if (IsBlockCompressed(descriptor.format)) {
@@ -122,6 +124,7 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
         imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
         imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         Check(context.Function<PFN_vkCreateImage>("vkCreateImage")(context.device, &imageInfo, nullptr, &image), "vkCreateImage");
+        timing.Mark("image");
         layout = storageCapable ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
         VkMemoryRequirements requirements{};
@@ -132,11 +135,14 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
         allocation.memoryTypeIndex = context.MemoryType(requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
         Check(context.Function<PFN_vkAllocateMemory>("vkAllocateMemory")(context.device, &allocation, nullptr, &memory), "vkAllocateMemory texture");
         Check(context.Function<PFN_vkBindImageMemory>("vkBindImageMemory")(context.device, image, memory, 0), "vkBindImageMemory");
+        timing.Mark("memory", requirements.size);
 
         {
             staging = std::make_unique<Buffer>(context, static_cast<std::size_t>(guestBytes), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
             std::memcpy(staging->Bytes().data(), snapshot.data(), snapshot.size());
+            timing.Mark("staging", snapshot.size());
             linear = std::make_unique<Buffer>(context, static_cast<std::size_t>(linearBytes), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+            timing.Mark("linear", linearBytes);
 
             std::unique_ptr<CommandBatch> batch;
             VkCommandBuffer commands = VK_NULL_HANDLE;
@@ -232,9 +238,11 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
             } else {
                 detiler.Retire(*context.drawQueue);
             }
+            timing.Mark("record");
         }
 
         createGuestViews(descriptor, components, vkFormat, storageCapable);
+        timing.Mark("views");
     } catch (...) {
         release();
         throw;
