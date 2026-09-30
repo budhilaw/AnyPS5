@@ -60,6 +60,7 @@ private:
     };
     void retire(Batch batch);
     void throttle();
+    void waitThrough(std::uint64_t sequence);
     Batch recording;
     std::vector<Batch> pending;
     std::vector<std::unique_ptr<CommandBatch>> available;

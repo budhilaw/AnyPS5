@@ -138,7 +138,27 @@ void DrawQueue::Resolve(std::uint64_t address, std::size_t bytes, bool ordered) 
         }
         return true;
     };
-    if (std::any_of(writers.begin(), writers.end(), overlaps)) Wait();
+    std::uint64_t last = 0;
+    for (const auto& writer : writers) {
+        if (writer.sequence > last && overlaps(writer)) last = writer.sequence;
+    }
+    if (last != 0) waitThrough(last);
+}
+
+void DrawQueue::waitThrough(std::uint64_t sequence) {
+    PerformanceTimer timing("Graphics.DrawQueue.WaitThrough");
+    if (!recording.entries.empty() && recording.entries.front().sequence <= sequence) Flush();
+    timing.Mark("submit");
+    while (!pending.empty()) {
+        const bool covers = !pending.front().entries.empty() && pending.front().entries.back().sequence >= sequence;
+        pending.front().commands->Wait();
+        timing.Mark("fence_wait");
+        auto batch = std::move(pending.front());
+        pending.erase(pending.begin());
+        retire(std::move(batch));
+        timing.Mark("retire");
+        if (covers) break;
+    }
 }
 
 
