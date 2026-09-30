@@ -31,7 +31,7 @@ GuestTm* APS5_VABI libc_gmtime_nid_postfix(const int64_t* timer) {
     static thread_local GuestTm result;
     const std::time_t t = static_cast<std::time_t>(*timer);
     std::tm converted{};
-    if (gmtime_r(&t, &converted) == nullptr) return nullptr;
+    if (!HostGmtime(t, converted)) return nullptr;
     result = ToGuestTm(converted);
     return &result;
 }
@@ -40,7 +40,7 @@ GuestTm* APS5_VABI libc_localtime_nid_postfix(const int64_t* timer) {
     static thread_local GuestTm result;
     const std::time_t t = static_cast<std::time_t>(*timer);
     std::tm converted{};
-    if (localtime_r(&t, &converted) == nullptr) return nullptr;
+    if (!HostLocaltime(t, converted)) return nullptr;
     result = ToGuestTm(converted);
     return &result;
 }
@@ -53,7 +53,7 @@ GuestTm* APS5_VABI localtime_s_nid_postfix(const int64_t* timer, GuestTm* result
     if (timer == nullptr || result == nullptr) return nullptr;
     const std::time_t t = static_cast<std::time_t>(*timer);
     std::tm converted{};
-    if (localtime_r(&t, &converted) == nullptr) return nullptr;
+    if (!HostLocaltime(t, converted)) return nullptr;
     *result = ToGuestTm(converted);
     return result;
 }
@@ -62,7 +62,7 @@ GuestTm* APS5_VABI gmtime_s_nid_postfix(const int64_t* timer, GuestTm* result) {
     if (timer == nullptr || result == nullptr) return nullptr;
     const std::time_t t = static_cast<std::time_t>(*timer);
     std::tm converted{};
-    if (gmtime_r(&t, &converted) == nullptr) return nullptr;
+    if (!HostGmtime(t, converted)) return nullptr;
     *result = ToGuestTm(converted);
     return result;
 }

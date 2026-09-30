@@ -20,4 +20,20 @@ inline GuestTm ToGuestTm(const std::tm& host) {
     return GuestTm{host.tm_sec, host.tm_min, host.tm_hour, host.tm_mday, host.tm_mon, host.tm_year, host.tm_wday, host.tm_yday, host.tm_isdst};
 }
 
+inline bool HostGmtime(const std::time_t& time, std::tm& result) {
+#ifdef _WIN32
+    return gmtime_s(&result, &time) == 0;
+#else
+    return gmtime_r(&time, &result) != nullptr;
+#endif
+}
+
+inline bool HostLocaltime(const std::time_t& time, std::tm& result) {
+#ifdef _WIN32
+    return localtime_s(&result, &time) == 0;
+#else
+    return localtime_r(&time, &result) != nullptr;
+#endif
+}
+
 #endif

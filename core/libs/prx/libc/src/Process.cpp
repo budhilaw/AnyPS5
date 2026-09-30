@@ -1,4 +1,8 @@
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <execinfo.h>
+#endif
 #include <cstdio>
 #include <cstdint>
 #include <cstdlib>
@@ -75,9 +79,14 @@ void APS5_VABI exit_nid_postfix(int code) {
     (void)arg0; (void)arg1; (void)arg2;
     (void)arg3; (void)arg4; (void)arg5;
     void* frames[32];
-    const int count = ::backtrace(frames, 32);
     std::fprintf(stderr, "guest abort() called from %p\n", __builtin_return_address(0));
+#ifdef _WIN32
+    const auto count = CaptureStackBackTrace(0, 32, frames, nullptr);
+    for (unsigned index = 0; index < count; ++index) std::fprintf(stderr, "%p\n", frames[index]);
+#else
+    const int count = ::backtrace(frames, 32);
     ::backtrace_symbols_fd(frames, count, 2);
+#endif
     std::abort();
 }
 
