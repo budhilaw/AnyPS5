@@ -195,6 +195,8 @@ void GuestMemoryTrackingProtect_nid_postfix(void* handle, Protection protection)
     std::lock_guard lock(registry().mutex);
     auto& entry = **static_cast<std::shared_ptr<Entry>*>(handle);
     if (entry.protection == protection) return;
+    const bool tightening = restriction(protection) > restriction(entry.protection);
+    if (tightening) markPages(entry.address, entry.bytes, protection);
     if (protection == Protection::ReadWrite) {
         Platform::Restore(entry.original);
         entry.original.clear();
@@ -204,7 +206,7 @@ void GuestMemoryTrackingProtect_nid_postfix(void* handle, Protection protection)
         entry.active = true;
     }
     entry.protection = protection;
-    markPages(entry.address, entry.bytes, protection);
+    if (!tightening) markPages(entry.address, entry.bytes, protection);
 }
 
 void GuestMemoryTrackingResolve_nid_postfix(std::uint64_t address, std::size_t bytes, bool writable) {
@@ -243,6 +245,13 @@ void GuestMemoryTrackingValidate_nid_postfix(std::uint64_t address, std::size_t 
     if (bytes == 0) return;
     if (!validate) throw std::invalid_argument("missing native memory range validator");
     const auto end = checkedEnd(address, bytes);
+    if (!pagesRestricted(address, end, true)) {
+        try {
+            validate(address, bytes);
+            return;
+        } catch (const std::exception&) {
+        }
+    }
     std::lock_guard lock(registry().mutex);
     for (const auto& entry : overlapping(address, bytes)) {
         if (address < entry->address) validate(address, static_cast<std::size_t>(entry->address - address));
