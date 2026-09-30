@@ -227,8 +227,11 @@ struct VulkanDevice::State {
         if (!computePipelines.emplace(key, entry).second) destroyComputePipeline(entry);
     }
     static std::string computePipelineKey(const ShaderRecompiler::RecompileResult& shader, bool push, std::span<const std::uint32_t> layoutKey) {
-        std::uint64_t hash = 1469598103934665603ull;
-        for (const auto word : shader.spirv) hash = (hash ^ word) * 1099511628211ull;
+        std::uint64_t hash = shader.spirvHash;
+        if (hash == 0) {
+            hash = 1469598103934665603ull;
+            for (const auto word : shader.spirv) hash = (hash ^ word) * 1099511628211ull;
+        }
         std::string key(reinterpret_cast<const char*>(&hash), sizeof(hash));
         const auto spirvWords = static_cast<std::uint64_t>(shader.spirv.size());
         key.append(reinterpret_cast<const char*>(&spirvWords), sizeof(spirvWords));
