@@ -549,8 +549,6 @@ private:
     std::atomic<std::uint64_t> graphicsCompleted{0};
     bool graphicsStopping = false;
     ShaderWarmup warmup;
-    std::thread graphicsThread;
-    std::thread worker;
 
     Driver() : graphicsThread([this] { runGraphics(); }), worker([this] { run(); }) {
         try {
@@ -1299,6 +1297,8 @@ private:
     }
 
     bool gpuPending = false;
+    std::thread graphicsThread;
+    std::thread worker;
 
     void run() noexcept {
         preferPerformanceCores();
