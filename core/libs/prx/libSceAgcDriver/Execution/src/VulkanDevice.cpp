@@ -37,6 +37,7 @@
 #include <spirv/unified1/spirv.hpp>
 #include <array>
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <cstdio>
 #include <limits>
@@ -75,6 +76,22 @@ struct VulkanDevice::State {
     void* library = nullptr;
     PFN_vkGetInstanceProcAddr instanceProc = nullptr;
     PFN_vkGetDeviceProcAddr deviceProc = nullptr;
+    PFN_vkCmdPipelineBarrier cmdPipelineBarrier = nullptr;
+    PFN_vkCmdBindPipeline cmdBindPipeline = nullptr;
+    PFN_vkCmdPushConstants cmdPushConstants = nullptr;
+    PFN_vkCmdDispatch cmdDispatch = nullptr;
+    PFN_vkCmdFillBuffer cmdFillBuffer = nullptr;
+    PFN_vkCmdClearColorImage cmdClearColorImage = nullptr;
+    PFN_vkWaitForFences waitForFences = nullptr;
+    PFN_vkResetFences resetFences = nullptr;
+    PFN_vkBeginCommandBuffer beginCommandBuffer = nullptr;
+    PFN_vkEndCommandBuffer endCommandBuffer = nullptr;
+    PFN_vkResetCommandBuffer resetCommandBuffer = nullptr;
+    PFN_vkQueueSubmit queueSubmit = nullptr;
+    PFN_vkDeviceWaitIdle deviceWaitIdle = nullptr;
+    PFN_vkAcquireNextImageKHR acquireNextImage = nullptr;
+    PFN_vkQueuePresentKHR queuePresent = nullptr;
+    Graphics::Context context{};
     VkInstance instance = VK_NULL_HANDLE;
     VkDevice device = VK_NULL_HANDLE;
     VkPhysicalDevice physical = VK_NULL_HANDLE;
@@ -94,23 +111,34 @@ struct VulkanDevice::State {
     std::shared_ptr<const std::vector<std::pair<std::uint64_t, std::uint64_t>>> hostRanges = std::make_shared<const std::vector<std::pair<std::uint64_t, std::uint64_t>>>();
     std::vector<std::pair<std::uint64_t, std::uint64_t>> hostRangesScratch;
     std::vector<std::pair<std::uint64_t, std::uint64_t>> hostRangesSource;
+    std::atomic<std::uint64_t> publishedColorEpoch{0};
+    std::atomic<std::uint64_t> publishedWriterEpoch{0};
+    bool HostRangesCurrent() const {
+        return publishedColorEpoch.load(std::memory_order_acquire) == renderCache->Epoch() && publishedWriterEpoch.load(std::memory_order_acquire) == drawQueue->WriterEpoch();
+    }
     void PublishHostRanges() {
+        const auto colorEpoch = renderCache ? renderCache->Epoch() : 0;
+        const auto writerEpoch = drawQueue ? drawQueue->WriterEpoch() : 0;
+        if (colorEpoch == publishedColorEpoch.load(std::memory_order_relaxed) && writerEpoch == publishedWriterEpoch.load(std::memory_order_relaxed)) return;
         hostRangesScratch.clear();
         if (renderCache) renderCache->AppendColorRanges(hostRangesScratch);
         if (drawQueue) drawQueue->AppendWriteRanges(hostRangesScratch);
-        if (hostRangesScratch == hostRangesSource) return;
-        hostRangesSource = hostRangesScratch;
-        std::sort(hostRangesScratch.begin(), hostRangesScratch.end());
-        std::vector<std::pair<std::uint64_t, std::uint64_t>> merged;
-        merged.reserve(hostRangesScratch.size());
-        for (const auto& range : hostRangesScratch) {
-            if (range.first >= range.second) continue;
-            if (!merged.empty() && range.first <= merged.back().second) merged.back().second = std::max(merged.back().second, range.second);
-            else merged.push_back(range);
+        if (hostRangesScratch != hostRangesSource) {
+            hostRangesSource = hostRangesScratch;
+            std::sort(hostRangesScratch.begin(), hostRangesScratch.end());
+            std::vector<std::pair<std::uint64_t, std::uint64_t>> merged;
+            merged.reserve(hostRangesScratch.size());
+            for (const auto& range : hostRangesScratch) {
+                if (range.first >= range.second) continue;
+                if (!merged.empty() && range.first <= merged.back().second) merged.back().second = std::max(merged.back().second, range.second);
+                else merged.push_back(range);
+            }
+            auto ranges = std::make_shared<const std::vector<std::pair<std::uint64_t, std::uint64_t>>>(std::move(merged));
+            std::lock_guard lock(hostRangesMutex);
+            hostRanges = std::move(ranges);
         }
-        auto ranges = std::make_shared<const std::vector<std::pair<std::uint64_t, std::uint64_t>>>(std::move(merged));
-        std::lock_guard lock(hostRangesMutex);
-        hostRanges = std::move(ranges);
+        publishedColorEpoch.store(colorEpoch, std::memory_order_release);
+        publishedWriterEpoch.store(writerEpoch, std::memory_order_release);
     }
     std::mutex ticketMutex;
     std::uint64_t ticketsIssued = 0;
@@ -372,6 +400,7 @@ struct VulkanDevice::State {
             if (renderCache) renderCache->Flush();
             const auto idle = reinterpret_cast<PFN_vkDeviceWaitIdle>(deviceProc(device, "vkDeviceWaitIdle"))(device);
             if (idle != VK_SUCCESS && idle != VK_ERROR_DEVICE_LOST) std::terminate();
+            context = {};
             drawQueue.reset();
             graphicsPipelines.reset();
             destroyComputePipelines();
@@ -632,6 +661,8 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
     state->samplerAnisotropy = true;
     state->textureCompressionBC = true;
     enabled.dualSrcBlend = available.dualSrcBlend;
+    enabled.independentBlend = available.independentBlend;
+    enabled.imageCubeArray = available.imageCubeArray;
     enabled.depthClamp = available.depthClamp;
     state->depthClamp = enabled.depthClamp == VK_TRUE;
     enabled.shaderStorageImageWriteWithoutFormat = available.shaderStorageImageWriteWithoutFormat;
@@ -666,24 +697,38 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
     check(state->InstanceFunction<PFN_vkCreateDevice>("vkCreateDevice")(selected, &deviceInfo, nullptr, &state->device), "vkCreateDevice");
     RetainMetalCommandReferences();
     state->DeviceFunction<PFN_vkGetDeviceQueue>("vkGetDeviceQueue")(state->device, family, 0, &state->queue);
+    state->cmdPipelineBarrier = state->DeviceFunction<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier");
+    state->cmdBindPipeline = state->DeviceFunction<PFN_vkCmdBindPipeline>("vkCmdBindPipeline");
+    state->cmdPushConstants = state->DeviceFunction<PFN_vkCmdPushConstants>("vkCmdPushConstants");
+    state->cmdDispatch = state->DeviceFunction<PFN_vkCmdDispatch>("vkCmdDispatch");
+    state->cmdFillBuffer = state->DeviceFunction<PFN_vkCmdFillBuffer>("vkCmdFillBuffer");
+    state->cmdClearColorImage = state->DeviceFunction<PFN_vkCmdClearColorImage>("vkCmdClearColorImage");
+    state->waitForFences = state->DeviceFunction<PFN_vkWaitForFences>("vkWaitForFences");
+    state->resetFences = state->DeviceFunction<PFN_vkResetFences>("vkResetFences");
+    state->beginCommandBuffer = state->DeviceFunction<PFN_vkBeginCommandBuffer>("vkBeginCommandBuffer");
+    state->endCommandBuffer = state->DeviceFunction<PFN_vkEndCommandBuffer>("vkEndCommandBuffer");
+    state->resetCommandBuffer = state->DeviceFunction<PFN_vkResetCommandBuffer>("vkResetCommandBuffer");
+    state->queueSubmit = state->DeviceFunction<PFN_vkQueueSubmit>("vkQueueSubmit");
+    state->deviceWaitIdle = state->DeviceFunction<PFN_vkDeviceWaitIdle>("vkDeviceWaitIdle");
     VkCommandPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
     poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
     poolInfo.queueFamilyIndex = family;
     check(state->DeviceFunction<PFN_vkCreateCommandPool>("vkCreateCommandPool")(state->device, &poolInfo, nullptr, &state->pool), "vkCreateCommandPool");
-    state->releaseQueue = std::make_shared<Graphics::ReleaseQueue>(graphicsContext());
-    state->bufferPool = std::make_shared<Graphics::BufferPool>(graphicsContext());
+    state->releaseQueue = std::make_shared<Graphics::ReleaseQueue>(buildContext());
+    state->bufferPool = std::make_shared<Graphics::BufferPool>(buildContext());
     state->descriptorCache = std::make_shared<Graphics::DescriptorCache>();
     state->samplerCache = std::make_shared<Graphics::SamplerCache>();
-    state->pipelineCache = std::make_unique<Graphics::PipelineCache>(graphicsContext());
-    state->detiler = std::make_unique<Graphics::TextureDetiler>(graphicsContext());
+    state->pipelineCache = std::make_unique<Graphics::PipelineCache>(buildContext());
+    state->detiler = std::make_unique<Graphics::TextureDetiler>(buildContext());
     state->drawQueue = std::make_unique<Graphics::DrawQueue>();
-    state->guestBufferCache = std::make_unique<Graphics::GuestBufferCache>(graphicsContext());
-    state->gds = std::make_unique<Graphics::Buffer>(graphicsContext(), GdsBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+    state->guestBufferCache = std::make_unique<Graphics::GuestBufferCache>(buildContext());
+    state->gds = std::make_unique<Graphics::Buffer>(buildContext(), GdsBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
     std::memset(state->gds->Bytes().data(), 0, GdsBytes);
-    state->colorTransfer = std::make_unique<Graphics::GpuColorTransfer>(graphicsContext());
-    state->renderCache = std::make_unique<Graphics::RenderCache>(graphicsContext());
-    state->graphicsPipelines = std::make_unique<Graphics::GraphicsPipelineCache>(graphicsContext());
-    state->textureCache = std::make_unique<Graphics::TextureCache>(graphicsContext());
+    state->colorTransfer = std::make_unique<Graphics::GpuColorTransfer>(buildContext());
+    state->renderCache = std::make_unique<Graphics::RenderCache>(buildContext());
+    state->graphicsPipelines = std::make_unique<Graphics::GraphicsPipelineCache>(buildContext());
+    state->textureCache = std::make_unique<Graphics::TextureCache>(buildContext());
+    state->context = buildContext();
     if (window != nullptr) {
         require(window->getDrawableSize != nullptr, "missing window drawable size query");
         std::uint32_t drawableWidth = 0;
@@ -717,6 +762,8 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
         swapchain.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
         swapchain.presentMode = VK_PRESENT_MODE_FIFO_KHR;
         swapchain.clipped = VK_FALSE;
+        state->acquireNextImage = state->DeviceFunction<PFN_vkAcquireNextImageKHR>("vkAcquireNextImageKHR");
+        state->queuePresent = state->DeviceFunction<PFN_vkQueuePresentKHR>("vkQueuePresentKHR");
         check(state->DeviceFunction<PFN_vkCreateSwapchainKHR>("vkCreateSwapchainKHR")(state->device, &swapchain, nullptr, &state->swapchain), "vkCreateSwapchainKHR");
         std::uint32_t imageCount = 0;
         auto getImages = state->DeviceFunction<PFN_vkGetSwapchainImagesKHR>("vkGetSwapchainImagesKHR");
@@ -759,7 +806,7 @@ void VulkanDevice::WaitIdle() {
     const auto submissions = Graphics::QueueSubmissionCounter().load(std::memory_order_relaxed);
     if (submissions == state->idleSubmissions) return;
     VkResult idle = VK_SUCCESS;
-    GpuJournal::Watched("vkDeviceWaitIdle", std::chrono::seconds(15), [&] { idle = state->DeviceFunction<PFN_vkDeviceWaitIdle>("vkDeviceWaitIdle")(state->device); });
+    GpuJournal::Watched("vkDeviceWaitIdle", std::chrono::seconds(15), [&] { idle = state->deviceWaitIdle(state->device); });
     check(idle, "vkDeviceWaitIdle");
     state->idleSubmissions = Graphics::QueueSubmissionCounter().load(std::memory_order_relaxed);
     timing.Mark("device_wait");
@@ -805,14 +852,14 @@ void VulkanDevice::GdsTransfer(std::span<const std::uint32_t> packet) {
     require(!(toGds && fromGds), "GDS to GDS DMA_DATA is not implemented");
     static const bool trace = std::getenv("ANYPS5_TRACE_INDIRECT") != nullptr || std::getenv("ANYPS5_TRACE_WRITEBACK") != nullptr;
     if (toGds && !trace && Pm4::DmaImmediateSource(packet) && bytes != 0 && bytes % 4 == 0 && packet[4] % 4 == 0 && packet[4] + bytes <= state->gds->Bytes().size()) {
-        const auto context = graphicsContext();
+        const auto& context = graphicsContext();
         state->drawQueue->RecordMemoryBarrier(context);
         const auto commands = state->drawQueue->Begin(context);
-        state->DeviceFunction<PFN_vkCmdFillBuffer>("vkCmdFillBuffer")(commands, state->gds->Handle(), packet[4], bytes, packet[2]);
+        state->cmdFillBuffer(commands, state->gds->Handle(), packet[4], bytes, packet[2]);
         VkMemoryBarrier filled{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
         filled.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
         filled.dstAccessMask = VK_ACCESS_HOST_READ_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
-        state->DeviceFunction<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &filled, 0, nullptr, 0, nullptr);
+        state->cmdPipelineBarrier(commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &filled, 0, nullptr, 0, nullptr);
         state->drawQueue->MarkGds();
         timing.Mark("gpu_fill");
         return;
@@ -994,7 +1041,7 @@ void VulkanDevice::present(std::uint32_t width, std::uint32_t height, bool opaqu
     state->PublishHostRanges();
     timing.Mark("draw_wait");
     if (state->renderPending) {
-        check(state->DeviceFunction<PFN_vkWaitForFences>("vkWaitForFences")(state->device, 1, &state->renderFence, VK_TRUE, std::numeric_limits<std::uint64_t>::max()), "vkWaitForFences previous presentation");
+        check(state->waitForFences(state->device, 1, &state->renderFence, VK_TRUE, std::numeric_limits<std::uint64_t>::max()), "vkWaitForFences previous presentation");
         state->renderPending = false;
     }
     state->presentedTarget.reset();
@@ -1109,13 +1156,13 @@ void VulkanDevice::present(std::uint32_t width, std::uint32_t height, bool opaqu
     auto* scaler = resident && DisplayFormatRgba(display->pixelFormat) && !DisplayFormatTenBit(display->pixelFormat) ? state->rgbaScaler.get() : state->scaler.get();
     if (!pixels.empty()) state->Upload(pixels);
     timing.Mark("pixel_upload");
-    auto wait = state->DeviceFunction<PFN_vkWaitForFences>("vkWaitForFences");
-    auto reset = state->DeviceFunction<PFN_vkResetFences>("vkResetFences");
+    auto wait = state->waitForFences;
+    auto reset = state->resetFences;
     const std::array<VkFence, 2> fences{state->acquireFence, state->renderFence};
     check(reset(state->device, static_cast<std::uint32_t>(fences.size()), fences.data()), "vkResetFences");
     std::uint32_t index = 0;
     timing.Mark("fence_reset");
-    if (!state->swapchainState.ProcessResult(state->DeviceFunction<PFN_vkAcquireNextImageKHR>("vkAcquireNextImageKHR")(state->device, state->swapchain, 5'000'000'000ULL, VK_NULL_HANDLE, state->acquireFence, &index), "vkAcquireNextImageKHR")) return;
+    if (!state->swapchainState.ProcessResult(state->acquireNextImage(state->device, state->swapchain, 5'000'000'000ULL, VK_NULL_HANDLE, state->acquireFence, &index), "vkAcquireNextImageKHR")) return;
     timing.Mark("acquire_image");
     check(wait(state->device, 1, &state->acquireFence, VK_TRUE, std::numeric_limits<std::uint64_t>::max()), "vkWaitForFences acquire");
     timing.Mark("acquire_fence_wait");
@@ -1129,10 +1176,10 @@ void VulkanDevice::present(std::uint32_t width, std::uint32_t height, bool opaqu
     }
     auto commands = state->clearCommands;
     timing.Mark("retired_swapchains");
-    check(state->DeviceFunction<PFN_vkResetCommandBuffer>("vkResetCommandBuffer")(commands, 0), "vkResetCommandBuffer");
+    check(state->resetCommandBuffer(commands, 0), "vkResetCommandBuffer");
     VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    check(state->DeviceFunction<PFN_vkBeginCommandBuffer>("vkBeginCommandBuffer")(commands, &begin), "vkBeginCommandBuffer");
+    check(state->beginCommandBuffer(commands, &begin), "vkBeginCommandBuffer");
     VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
     barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
     barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -1141,12 +1188,12 @@ void VulkanDevice::present(std::uint32_t width, std::uint32_t height, bool opaqu
     barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     barrier.image = state->images[index];
     barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-    auto pipelineBarrier = state->DeviceFunction<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier");
+    auto pipelineBarrier = state->cmdPipelineBarrier;
     pipelineBarrier(commands, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
     if (pixels.empty() && display == nullptr) {
         VkClearColorValue clear{};
         clear.float32[3] = opaque ? 1.0f : 0.0f;
-        state->DeviceFunction<PFN_vkCmdClearColorImage>("vkCmdClearColorImage")(commands, barrier.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear, 1, &barrier.subresourceRange);
+        state->cmdClearColorImage(commands, barrier.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear, 1, &barrier.subresourceRange);
     } else {
         require(scaler != nullptr, "presentation scaler is unavailable");
         scaler->EnsureSourceImage(width, height);
@@ -1159,7 +1206,7 @@ void VulkanDevice::present(std::uint32_t width, std::uint32_t height, bool opaqu
         }
         VkClearColorValue letterbox{};
         letterbox.float32[3] = 1.0f;
-        state->DeviceFunction<PFN_vkCmdClearColorImage>("vkCmdClearColorImage")(commands, barrier.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &letterbox, 1, &barrier.subresourceRange);
+        state->cmdClearColorImage(commands, barrier.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &letterbox, 1, &barrier.subresourceRange);
         VkImageMemoryBarrier letterboxBarrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
         letterboxBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
         letterboxBarrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -1177,14 +1224,14 @@ void VulkanDevice::present(std::uint32_t width, std::uint32_t height, bool opaqu
     barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     barrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
     pipelineBarrier(commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
-    check(state->DeviceFunction<PFN_vkEndCommandBuffer>("vkEndCommandBuffer")(commands), "vkEndCommandBuffer");
+    check(state->endCommandBuffer(commands), "vkEndCommandBuffer");
     VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     submit.commandBufferCount = 1;
     submit.pCommandBuffers = &commands;
     submit.signalSemaphoreCount = 1;
     submit.pSignalSemaphores = &rendered;
     timing.Mark("command_record_scale");
-    check(state->DeviceFunction<PFN_vkQueueSubmit>("vkQueueSubmit")(state->queue, 1, &submit, state->renderFence), "vkQueueSubmit clear");
+    check(state->queueSubmit(state->queue, 1, &submit, state->renderFence), "vkQueueSubmit clear");
     Graphics::QueueSubmissionCounter().fetch_add(1, std::memory_order_relaxed);
     state->releaseQueue->Collect();
     timing.Mark("queue_submit");
@@ -1201,7 +1248,7 @@ void VulkanDevice::present(std::uint32_t width, std::uint32_t height, bool opaqu
     present.swapchainCount = 1;
     present.pSwapchains = &state->swapchain;
     present.pImageIndices = &index;
-    state->swapchainState.ProcessResult(state->DeviceFunction<PFN_vkQueuePresentKHR>("vkQueuePresentKHR")(state->queue, &present), "vkQueuePresentKHR");
+    state->swapchainState.ProcessResult(state->queuePresent(state->queue, &present), "vkQueuePresentKHR");
     timing.Mark("queue_present");
 }
 
@@ -1228,7 +1275,11 @@ ShaderRecompiler::SpirvTarget VulkanDevice::Target() const {
     return target;
 }
 
-Graphics::Context VulkanDevice::graphicsContext() const {
+const Graphics::Context& VulkanDevice::graphicsContext() const {
+    return state->context;
+}
+
+Graphics::Context VulkanDevice::buildContext() const {
     auto context = Graphics::Context{
         state->device,
         state->physical,
@@ -1274,6 +1325,7 @@ Graphics::Context VulkanDevice::graphicsContext() const {
 }
 
 void VulkanDevice::ResolveMemory(std::uint64_t address, std::size_t bytes, bool writable) {
+    if (state->HostRangesCurrent() && !NeedsResolve(address, bytes)) return;
     SlowOperationTimer slowTimer("device resolve memory");
     std::lock_guard memoryLock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
     slowTimer.Split("device resolve lock wait");
@@ -1299,8 +1351,7 @@ void VulkanDevice::Draw(const Graphics::State& graphics, const Pm4::DrawParamete
 }
 
 void VulkanDevice::ValidateDraw(const Graphics::State& graphics, std::span<const Graphics::CompiledShader> shaders) const {
-    const auto context = graphicsContext();
-    Graphics::ValidateShaders(shaders, graphics, context.subgroup, context.fragmentShaderBarycentric);
+    Graphics::ValidateShaders(shaders, graphics, state->subgroup, state->fragmentShaderBarycentric);
 }
 
 void VulkanDevice::EnqueueDraw(const Graphics::State& graphics, const Pm4::DrawParameters& draw, std::span<const Graphics::CompiledShader> shaders, std::span<const Graphics::GuestMemorySnapshot> snapshots) {
@@ -1310,7 +1361,7 @@ void VulkanDevice::EnqueueDraw(const Graphics::State& graphics, const Pm4::DrawP
     const GuestMemory::MemoryAccessScope memoryScope(this, [](void* context, std::uint64_t address, std::size_t bytes, bool writable) {
         static_cast<VulkanDevice*>(context)->ResolveMemory(address, bytes, writable);
     });
-    const auto context = graphicsContext();
+    const auto& context = graphicsContext();
     static const char* slowGpu = std::getenv("ANYPS5_DEBUG_SLOW_GPU");
     if (slowGpu != nullptr) {
         state->drawQueue->Flush();
@@ -1330,7 +1381,6 @@ void VulkanDevice::EnqueueDraw(const Graphics::State& graphics, const Pm4::DrawP
 }
 
 void VulkanDevice::Dispatch(const ShaderRecompiler::RecompileResult& shader, std::uint32_t x, std::uint32_t y, std::uint32_t z, std::span<const Graphics::GuestMemorySnapshot> snapshots) {
-    SlowOperationTimer slowTimer("device dispatch");
     if (shader.spirv.size() < 5 || shader.spirv[0] != 0x07230203u) {
         throw std::runtime_error("Vulkan dispatch: invalid SPIR-V");
     }
@@ -1339,7 +1389,13 @@ void VulkanDevice::Dispatch(const ShaderRecompiler::RecompileResult& shader, std
     if (pushStages != 0 && state->properties.limits.maxPushConstantsSize < Graphics::PipelinePushConstantBytes) {
         throw std::runtime_error("Vulkan dispatch: compute push constant range exceeds device limit");
     }
-    const auto context = graphicsContext();
+    const auto* limit = state->properties.limits.maxComputeWorkGroupCount;
+    if (x > limit[0] || y > limit[1] || z > limit[2]) {
+        throw std::runtime_error("Vulkan dispatch: workgroup count exceeds device limits");
+    }
+    if (x == 0 || y == 0 || z == 0) return;
+    SlowOperationTimer slowTimer("device dispatch");
+    const auto& context = graphicsContext();
     state->precompileComputePipeline(shaders, context.pipelineCache, pushStages != 0);
     slowTimer.Split("device dispatch precompile");
     std::lock_guard memoryLock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
@@ -1349,10 +1405,6 @@ void VulkanDevice::Dispatch(const ShaderRecompiler::RecompileResult& shader, std
         static_cast<VulkanDevice*>(context)->ResolveMemory(address, bytes, writable);
     });
     const auto pushBytes = Graphics::AssemblePushConstants(shaders);
-    const auto* limit = state->properties.limits.maxComputeWorkGroupCount;
-    if (x > limit[0] || y > limit[1] || z > limit[2]) {
-        throw std::runtime_error("Vulkan dispatch: workgroup count exceeds device limits");
-    }
     static const char* slowGpu = std::getenv("ANYPS5_DEBUG_SLOW_GPU");
     if (slowGpu != nullptr) {
         state->drawQueue->Flush();
@@ -1439,13 +1491,13 @@ void VulkanDevice::Dispatch(const ShaderRecompiler::RecompileResult& shader, std
         VkMemoryBarrier upload{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
         upload.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
         upload.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-        state->DeviceFunction<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(commands, VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &upload, 0, nullptr, 0, nullptr);
-        state->DeviceFunction<PFN_vkCmdBindPipeline>("vkCmdBindPipeline")(commands, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+        state->cmdPipelineBarrier(commands, VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &upload, 0, nullptr, 0, nullptr);
+        state->cmdBindPipeline(commands, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
         resources->Bind(commands, VK_PIPELINE_BIND_POINT_COMPUTE, layout);
         if (pushStages != 0) {
-            state->DeviceFunction<PFN_vkCmdPushConstants>("vkCmdPushConstants")(commands, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, Graphics::PipelinePushConstantBytes, pushBytes.data());
+            state->cmdPushConstants(commands, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, Graphics::PipelinePushConstantBytes, pushBytes.data());
         }
-        state->DeviceFunction<PFN_vkCmdDispatch>("vkCmdDispatch")(commands, x, y, z);
+        state->cmdDispatch(commands, x, y, z);
         if (GpuJournal::CommandLabel != nullptr) {
             char text[80];
             std::snprintf(text, sizeof(text), "dispatch 0x%llx %ux%ux%u", static_cast<unsigned long long>(GpuJournal::CurrentProgram), x, y, z);
@@ -1454,7 +1506,7 @@ void VulkanDevice::Dispatch(const ShaderRecompiler::RecompileResult& shader, std
         VkMemoryBarrier download{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
         download.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
         download.dstAccessMask = VK_ACCESS_HOST_READ_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_INDEX_READ_BIT | VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_UNIFORM_READ_BIT;
-        state->DeviceFunction<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(commands, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &download, 0, nullptr, 0, nullptr);
+        state->cmdPipelineBarrier(commands, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &download, 0, nullptr, 0, nullptr);
         timing.Mark("command_record");
         slowTimer.Split("device dispatch record");
         bool debugPost = false;

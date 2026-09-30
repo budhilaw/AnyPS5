@@ -48,7 +48,8 @@ public:
     void ValidateDraw(const Graphics::State& graphics, std::span<const Graphics::CompiledShader> shaders) const;
 
 private:
-    Graphics::Context graphicsContext() const;
+    const Graphics::Context& graphicsContext() const;
+    Graphics::Context buildContext() const;
     void present(std::uint32_t width, std::uint32_t height, bool opaque, std::span<const std::byte> pixels, const DisplayBuffer* display = nullptr);
     struct State;
     std::unique_ptr<State> state;
