@@ -123,8 +123,7 @@ std::int64_t APS5_VABI sceKernelRead(int d, void* buf, std::size_t nbytes) {
     if (buf == nullptr) {
         throw std::invalid_argument(std::string(__func__) + ": buf is null");
     }
-    PrepareGuestBuffer(buf, nbytes, true);
-    auto n = NativeRead(d, buf, nbytes);
+    auto n = ReadIntoGuest(buf, nbytes, [&](void* target, std::size_t count) { return NativeRead(d, target, count); });
     {
         static const bool trace = std::getenv("ANYPS5_TRACE_IO") != nullptr;
         static std::atomic<std::uint64_t> reads{0};

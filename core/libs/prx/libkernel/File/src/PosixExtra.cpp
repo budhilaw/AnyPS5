@@ -45,6 +45,22 @@ int APS5_VABI futimes_nid_postfix(int d, const GuestTimeval* times) {
     return PosixFromHost(::futimes(d, times != nullptr ? host : nullptr));
 }
 
+int APS5_VABI sceKernelUtimes(const char* path, const GuestTimeval* times) {
+    if (path == nullptr) return static_cast<int>(0x8002000e);
+    timeval host[2];
+    if (times != nullptr) ToHost(times, host);
+    if (::utimes(ResolvePath_nid_no_patch(path).c_str(), times != nullptr ? host : nullptr) != 0) return static_cast<int>(0x80020000u | static_cast<unsigned>(errno & 0xff));
+    return 0;
+}
+
+int APS5_VABI sceKernelTruncate(const char* path, std::int64_t length) {
+    if (path == nullptr) return static_cast<int>(0x8002000e);
+    if (::truncate(ResolvePath_nid_no_patch(path).c_str(), static_cast<off_t>(length)) != 0) return static_cast<int>(0x80020000u | static_cast<unsigned>(errno & 0xff));
+    return 0;
+}
+
+int APS5_VABI fsync_nid_postfix(int d) { return PosixFromHost(::fsync(d)); }
+
 int APS5_VABI sceKernelFtruncate(int d, std::int64_t length) {
     if (::ftruncate(d, static_cast<off_t>(length)) != 0) return errno == EBADF ? SCE_KERNEL_ERROR_EBADF : 0x80020000 | errno;
     return 0;

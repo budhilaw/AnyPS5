@@ -146,8 +146,7 @@ int APS5_VABI open_nid_postfix(const char* path, int flags, int mode) {
 
 int64_t APS5_VABI pread_nid_postfix(int d, void* buf, size_t nbytes, int64_t offset) {
     if (buf == nullptr && nbytes != 0) return PosixFailure(14);
-    PrepareGuestBuffer(buf, nbytes, true);
-    const auto result = ::pread(d, buf, nbytes, static_cast<off_t>(offset));
+    const auto result = ReadIntoGuest(buf, nbytes, [&](void* target, std::size_t count) { return ::pread(d, target, count, static_cast<off_t>(offset)); });
     if (result < 0) { PosixFailure(errno); return -1; }
     return result;
 }
@@ -162,8 +161,7 @@ int64_t APS5_VABI pwrite_nid_disambig1_nid_postfix(int d, const void* buf, size_
 
 int64_t APS5_VABI read_nid_postfix(int d, void* buf, uint64_t nbytes) {
     if (buf == nullptr && nbytes != 0) return PosixFailure(14);
-    PrepareGuestBuffer(buf, static_cast<size_t>(nbytes), true);
-    const auto result = ::read(d, buf, static_cast<size_t>(nbytes));
+    const auto result = ReadIntoGuest(buf, static_cast<size_t>(nbytes), [&](void* target, std::size_t count) { return ::read(d, target, count); });
     if (result < 0) return PosixFailure(errno);
     return static_cast<int>(result);
 }
@@ -196,9 +194,8 @@ int APS5_VABI sceKernelFstat(int d, FileStat* sb) {
 }
 
 int APS5_VABI sceKernelFsync(int fd) {
- (void)fd;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+    if (::fsync(fd) != 0) return errno == EBADF ? SCE_KERNEL_ERROR_EBADF_ : static_cast<int>(0x80020000u | static_cast<unsigned>(errno & 0xff));
+    return 0;
 }
 
 int APS5_VABI sceKernelGetdents(int fd, char* buf, int nbytes) {
@@ -218,8 +215,7 @@ int APS5_VABI sceKernelMkdir(const char* path, uint16_t mode) {
 
 int64_t APS5_VABI sceKernelPread(int d, void* buf, size_t nbytes, int64_t offset) {
     if (buf == nullptr && nbytes != 0) throw std::invalid_argument(std::string(__func__) + ": buf is null");
-    PrepareGuestBuffer(buf, nbytes, true);
-    const auto result = ::pread(d, buf, nbytes, static_cast<off_t>(offset));
+    const auto result = ReadIntoGuest(buf, nbytes, [&](void* target, std::size_t count) { return ::pread(d, target, count, static_cast<off_t>(offset)); });
     {
         static const bool trace = std::getenv("ANYPS5_TRACE_IO") != nullptr;
         static std::atomic<std::uint64_t> preads{0};
