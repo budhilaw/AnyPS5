@@ -879,6 +879,14 @@ void VulkanDevice::RecordBarrier() {
     if (state->drawQueue->HasPending()) state->drawQueue->RecordMemoryBarrier(graphicsContext());
 }
 
+void VulkanDevice::WriteOcclusionDump(std::uint64_t destination) {
+    std::lock_guard memoryLock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
+    const GuestMemory::MemoryAccessScope memoryScope(this, [](void* context, std::uint64_t address, std::size_t bytes, bool writable) {
+        static_cast<VulkanDevice*>(context)->ResolveMemory(address, bytes, writable);
+    });
+    Pm4::WriteOcclusionDump(destination);
+}
+
 void VulkanDevice::ResolveGpuWrites(std::uint64_t address, std::size_t bytes) {
     std::lock_guard memoryLock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
     if (bytes != 0) state->drawQueue->Resolve(address, bytes);

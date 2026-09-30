@@ -30,6 +30,7 @@ public:
     bool HasPendingWork();
     void Collect();
     void RecordBarrier();
+    void WriteOcclusionDump(std::uint64_t destination);
     void ResolveGpuWrites(std::uint64_t address, std::size_t bytes);
     void GdsTransfer(std::span<const std::uint32_t> packet);
     std::array<std::uint32_t, 3> IndirectDispatchGroups(std::uint64_t address);

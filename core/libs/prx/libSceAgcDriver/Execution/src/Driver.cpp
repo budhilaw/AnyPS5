@@ -1305,6 +1305,14 @@ private:
         return true;
     }
 
+    bool deferredOverlaps(std::uint64_t address, std::size_t bytes) {
+        std::lock_guard lock(deferredMutex);
+        for (auto it = deferred.lower_bound(address >= sizeof(std::uint64_t) ? address - sizeof(std::uint64_t) + 1 : 0); it != deferred.end() && it->first < address + bytes; ++it) {
+            if (it->first + it->second.bytes > address) return true;
+        }
+        return false;
+    }
+
     Step step(Execution& execution) {
         const Submission& submission = execution.submission;
         if (!execution.started) {
@@ -1368,7 +1376,8 @@ private:
                     const auto id = ++deferredSerial;
                     {
                         std::lock_guard lock(deferredMutex);
-                        deferred[writeAddress] = {writeBytes, writeValue, writeKnown, id};
+                        auto& entry = deferred[writeAddress];
+                        entry = {std::max(entry.bytes, writeBytes), writeValue, writeKnown, id};
                     }
                     std::vector<std::uint32_t> copy(packet.begin(), packet.end());
                     const auto interrupt = opcode == 0x49 ? (packet[2] >> 24u) & 7u : 0u;
@@ -1392,6 +1401,26 @@ private:
                         if (opcode == 0x58) {
                             postGraphics({[current] { current->AcquireGpuMemory(); }, {}, false});
                             timing.Mark("gpu_cache_barrier");
+                        } else if (opcode == 0x46 && Pm4::EventWritesMemory(packet)) {
+                            watchdog.Stage("occlusion_dump");
+                            const auto destination = Pm4::OcclusionDumpAddress(packet);
+                            const bool afterDeferredWrites = deferredOverlaps(destination, Pm4::OcclusionDumpBytes);
+                            GraphicsJob job;
+                            job.writes.emplace_back(destination, destination + Pm4::OcclusionDumpBytes);
+                            job.run = [current, frame = frameTiming, destination, afterDeferredWrites] {
+                                PerformanceContext timingContext(frame.get());
+                                PerformanceTimer dumpTiming("Driver.OcclusionDump");
+                                if (afterDeferredWrites) {
+                                    current->WaitDraws();
+                                    dumpTiming.Mark("deferred_write_wait");
+                                }
+                                current->WriteOcclusionDump(destination);
+                                dumpTiming.Mark("write");
+                            };
+                            postGraphics(std::move(job));
+                            timing.Mark("occlusion_post");
+                            execution.cursor += count;
+                            return execution.cursor >= submission.commands.size() ? Step::Finished : Step::Progressed;
                         } else if (opcode == 0x42 || opcode == 0x46) {
                             postGraphics({[current] { current->RecordBarrier(); }, {}, false});
                             timing.Mark("gpu_barrier");
