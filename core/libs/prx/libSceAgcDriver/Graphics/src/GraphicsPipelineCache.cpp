@@ -4,9 +4,9 @@
 #include <chrono>
 #include "prx/libSceAgcDriver/Graphics/include/VertexInput.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
+#include "prx/libc/include/SlowOperation.hpp"
 #include <type_traits>
 #include <algorithm>
-#include <iterator>
 
 namespace AgcDriver::Graphics {
 namespace {
@@ -123,11 +123,8 @@ std::shared_ptr<Pipeline> GraphicsPipelineCache::Get(const State& state, const s
     PerformanceTimer timing("Graphics.PipelineCache");
     auto key = makeKey(context, state, target, extraTargets, depth, resources, shaders);
     timing.Mark("key");
-    const auto found = lookup.find(key);
-    if (found != lookup.end()) {
-        const auto it = found->second;
-        auto pipeline = it->pipeline;
-        entries.splice(entries.end(), entries, it);
+    if (const auto found = entries.Find(key); found != entries.End()) {
+        auto pipeline = found->value.pipeline;
         timing.Mark("hit");
         return pipeline;
     }
@@ -135,36 +132,25 @@ std::shared_ptr<Pipeline> GraphicsPipelineCache::Get(const State& state, const s
     const auto creationStart = std::chrono::steady_clock::now();
     std::vector<const RenderTarget*> extraViews;
     for (const auto& extra : extraTargets) extraViews.push_back(&extra->Target());
-    auto pipeline = std::make_shared<Pipeline>(context, state, target ? &target->Target() : nullptr, extraViews, depth.get(), resources, shaders);
+    std::shared_ptr<Pipeline> pipeline;
+    {
+        SlowOperationTimer creation("graphics pipeline create");
+        pipeline = std::make_shared<Pipeline>(context, state, target ? &target->Target() : nullptr, extraViews, depth.get(), resources, shaders);
+    }
     timing.Mark("create");
     ReportSlowPipeline("graphics", creationStart, shaders);
     if (context.pipelineCacheOwner) context.pipelineCacheOwner->NoteCreated();
-    if (context.pipelineCacheOwner && std::chrono::steady_clock::now() - creationStart > std::chrono::milliseconds(100)) context.pipelineCacheOwner->Save();
-    entries.push_back({std::move(key), target, std::vector<std::shared_ptr<ResidentColor>>(extraTargets.begin(), extraTargets.end()), depth, pipeline});
-    try {
-        const auto it = std::prev(entries.end());
-        Require(lookup.emplace(it->key, it).second, "duplicate graphics pipeline cache key");
-    } catch (...) {
-        entries.pop_back();
-        throw;
-    }
-    const auto abandoned = [](const Entry& entry) {
-        if (entry.pipeline.use_count() != 1) return false;
-        if (entry.target && entry.target.use_count() == 1) return true;
-        if (entry.depth && entry.depth.use_count() == 1) return true;
-        return std::any_of(entry.extraTargets.begin(), entry.extraTargets.end(), [](const auto& extra) { return extra.use_count() == 1; });
-    };
-    for (auto it = entries.begin(); it != entries.end();) {
-        if (!abandoned(*it)) { ++it; continue; }
-        lookup.erase(it->key);
-        it = entries.erase(it);
-    }
-    while (entries.size() > 1024) {
-        const auto it = std::find_if(entries.begin(), entries.end(), [](const auto& entry) { return entry.pipeline.use_count() == 1; });
-        if (it == entries.end()) break;
-        lookup.erase(it->key);
-        entries.erase(it);
-    }
+    entries.EraseIf([](const auto& entry) {
+        const auto& cached = entry.value;
+        if (cached.pipeline.use_count() != 1) return false;
+        if (cached.target && cached.target.use_count() == 1) return true;
+        if (cached.depth && cached.depth.use_count() == 1) return true;
+        return std::any_of(cached.extraTargets.begin(), cached.extraTargets.end(), [](const auto& extra) { return extra.use_count() == 1; });
+    });
+    const auto inserted = entries.Insert(std::move(key), Entry{target, std::vector<std::shared_ptr<ResidentColor>>(extraTargets.begin(), extraTargets.end()), depth, pipeline}, [](const auto&) {
+        SlowOperationRecord_nid_no_patch("graphics pipeline evict", 0);
+    }).second;
+    Require(inserted, "duplicate graphics pipeline cache key");
     return pipeline;
 }
 
