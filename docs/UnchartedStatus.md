@@ -14,7 +14,7 @@ State of branch `feat/macos-uncharted` on 2026-09-30, written so the work can co
 Build and relink as described in the README. The run folder holds the relinked `eboot`, `libs/*.prx` (links to `build-x64/core/libs/libs`) and `app0` (a link to the dump).
 
 - Rebuild the modules the game loads with `ninja -C <build> libs`. The default target does not rebuild the `.prx` files.
-- Environment: `ANYPS5_SKIP_FAILED_PROGRAMS=1` skips GPU programs that fail to prepare instead of stopping, and `ANYPS5_NP_STUB_SUCCESS=1` makes the PSN stubs report success.
+- Environment: `ANYPS5_SKIP_FAILED_PROGRAMS=1` skips GPU programs that fail to prepare and draws whose register state cannot be translated instead of stopping, and `ANYPS5_NP_STUB_SUCCESS=1` makes the PSN stubs report success.
 - A save profile in `_sd` (the English language and HUD choices) skips the first-run screens.
 - If startup stalls for minutes at the first flip, MoltenVK is recompiling every library stored in `pipeline.cache` because the system Metal cache went cold. Move `pipeline.cache` aside.
 
@@ -56,7 +56,7 @@ Build and relink as described in the README. The run folder holds the relinked `
 
 - `ANYPS5_SAMPLE_THREADS=1`: samples the title, worker and graphics threads every millisecond (Windows) and prints the hottest functions and call chains every 30 s.
 - `ANYPS5_TRACE_SLOW_OPS=1`: prints 5 s summaries of lock waits, the reasons the driver worker waits for the graphics thread, the stages of recording draws and dispatches, and slow memory, tracking and device operations. On Windows it also prints the first tracking fault of each guest instruction with the watch it hit.
-- `ANYPS5_TRACE_TIMING=1`: per-frame timing of the driver stages and GPU timestamps per command batch.
+- `ANYPS5_TRACE_TIMING=1`: per-frame timing of the driver stages and GPU timestamps per command batch. `Graphics.Draw.feedback` counts the draws that sample their own color or depth target.
 
 ## Next steps
 
