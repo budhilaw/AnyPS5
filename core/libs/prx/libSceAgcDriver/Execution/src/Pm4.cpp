@@ -71,7 +71,6 @@ std::uint32_t dmaDestination(std::span<const std::uint32_t> packet) {
 
 constexpr std::uint32_t DmaNowhere = 2;
 constexpr std::uint32_t PixelPipeStatDump = 0x39;
-constexpr std::uint32_t OcclusionRenderBackends = 16;
 constexpr std::uint64_t OcclusionVisibleSamples = 1u << 20u;
 constexpr std::uint64_t OcclusionResultValid = 1ull << 63u;
 
@@ -361,6 +360,17 @@ bool DmaGdsDestination(std::span<const std::uint32_t> packet) { return dmaDestin
 bool DmaGdsSource(std::span<const std::uint32_t> packet) { return dmaSource(packet) == 1; }
 bool DmaImmediateSource(std::span<const std::uint32_t> packet) { return dmaSource(packet) == 2; }
 bool EventWritesMemory(std::span<const std::uint32_t> packet) { return ((packet[0] >> 8u) & 0xffu) == 0x46 && (packet[1] & 0x3fu) == PixelPipeStatDump; }
+std::uint64_t OcclusionDumpAddress(std::span<const std::uint32_t> packet) { return address(packet[2], packet[3]); }
+
+void WriteOcclusionDump(std::uint64_t destination) {
+    auto* results = reinterpret_cast<std::byte*>(destination);
+    GuestMemory::CheckRange(results, OcclusionDumpBytes, sizeof(std::uint64_t), true);
+    const bool end = (destination & 8u) != 0;
+    for (std::uint32_t backend = 0; backend < OcclusionRenderBackends; ++backend) {
+        const std::uint64_t value = OcclusionResultValid | (end && backend == 0 ? OcclusionVisibleSamples : 0);
+        std::memcpy(results + backend * 16u, &value, sizeof(value));
+    }
+}
 
 void TransferRanges(std::span<const std::uint32_t> packet, std::uint64_t& destination, std::size_t& destinationBytes, std::uint64_t& source, std::size_t& sourceBytes) {
     destination = source = 0;
@@ -590,16 +600,10 @@ void Execute(std::span<const std::uint32_t> packet, QueueState& queue) {
         case 0x83:
             GuestMemory::Write(address(packet[3], packet[4]), std::as_bytes(std::span(queue.constantRam).subspan(packet[1] / 4, packet[2])), 4);
             return;
-        case 0x46: {
+        case 0x46:
             require((packet[1] & 0x3fu) == PixelPipeStatDump, "EVENT_WRITE without memory results is executed by the driver");
-            const auto destination = address(packet[2], packet[3]);
-            const bool end = (destination & 8u) != 0;
-            for (std::uint32_t backend = 0; backend < OcclusionRenderBackends; ++backend) {
-                const std::uint64_t value = OcclusionResultValid | (end && backend == 0 ? OcclusionVisibleSamples : 0);
-                GuestMemory::Write(destination + backend * 16u, std::as_bytes(std::span(&value, 1)), 8);
-            }
+            WriteOcclusionDump(OcclusionDumpAddress(packet));
             return;
-        }
         case 0x37: {
             const auto destination = address(packet[2], packet[3]);
             static const bool traceWrites = std::getenv("ANYPS5_TRACE_LABELS") != nullptr;

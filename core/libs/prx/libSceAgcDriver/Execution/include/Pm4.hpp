@@ -10,6 +10,9 @@
 
 namespace AgcDriver::Pm4 {
 
+constexpr std::uint32_t OcclusionRenderBackends = 16;
+constexpr std::size_t OcclusionDumpBytes = (OcclusionRenderBackends - 1) * 16 + sizeof(std::uint64_t);
+
 struct DrawParameters {
     std::uint64_t indexAddress;
     std::uint32_t indexCount;
@@ -30,6 +33,8 @@ bool DmaGdsDestination(std::span<const std::uint32_t> packet);
 bool DmaGdsSource(std::span<const std::uint32_t> packet);
 bool DmaImmediateSource(std::span<const std::uint32_t> packet);
 bool EventWritesMemory(std::span<const std::uint32_t> packet);
+std::uint64_t OcclusionDumpAddress(std::span<const std::uint32_t> packet);
+void WriteOcclusionDump(std::uint64_t destination);
 void TransferRanges(std::span<const std::uint32_t> packet, std::uint64_t& destination, std::size_t& destinationBytes, std::uint64_t& source, std::size_t& sourceBytes);
 bool DeferrableWrite(std::span<const std::uint32_t> packet, std::uint64_t& address, std::uint32_t& bytes, std::uint64_t& value, bool& known);
 void Validate(std::span<const std::uint32_t> packet, std::uint32_t queue);
