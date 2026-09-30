@@ -530,7 +530,9 @@ std::shared_ptr<const ValidatedInterface> inspectCached(const CompiledShader& co
         if (!code.empty()) key.append(reinterpret_cast<const char*>(code.data()), code.size());
     }
     timing.Mark("key", key.size());
-    static thread_local std::map<std::string, std::shared_ptr<const ValidatedInterface>> cache;
+    thread_local std::map<std::string, std::shared_ptr<const ValidatedInterface>>* cacheStorage = nullptr;
+    if (cacheStorage == nullptr) cacheStorage = new std::map<std::string, std::shared_ptr<const ValidatedInterface>>();
+    auto& cache = *cacheStorage;
     const auto found = cache.find(key);
     if (found != cache.end()) {
         timing.Mark("hit");
@@ -573,7 +575,9 @@ void ValidateShaders(std::span<const CompiledShader> shaders, const State& state
         }
         for (const auto& attribute : shader.vertexAttributes) { mix(attribute.location); mix(attribute.components); mix(attribute.resource.fields[3]); }
     }
-    thread_local std::unordered_set<std::uint64_t> passed;
+    thread_local std::unordered_set<std::uint64_t>* passedStorage = nullptr;
+    if (passedStorage == nullptr) passedStorage = new std::unordered_set<std::uint64_t>();
+    auto& passed = *passedStorage;
     if (hashed && passed.contains(hash)) return;
     static_cast<void>(AssemblePushConstants(shaders));
     std::shared_ptr<const ValidatedInterface> previous;

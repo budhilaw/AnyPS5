@@ -31,8 +31,9 @@ constexpr int SCE_KERNEL_ERROR_EBUSY = 0x80020010;
 constexpr int SCE_KERNEL_ERROR_EINVAL = 0x80020016;
 
 unsigned& HeldReads(PthreadRwlockPrivate* lock) {
-    thread_local std::unordered_map<PthreadRwlockPrivate*, unsigned> held;
-    return held[lock];
+    thread_local std::unordered_map<PthreadRwlockPrivate*, unsigned>* held = nullptr;
+    if (held == nullptr) held = new std::unordered_map<PthreadRwlockPrivate*, unsigned>();
+    return (*held)[lock];
 }
 
 PthreadRwlockPrivate* Ensure(PthreadRwlock* rwlock, const char* caller) {
