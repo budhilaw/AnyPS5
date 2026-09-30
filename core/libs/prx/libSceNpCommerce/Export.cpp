@@ -11,4 +11,13 @@ int APS5_VABI sceNpCommerceDialogUpdateStatus(void) {
  return 0;
 }
 
+int APS5_VABI sceNpCommerceShowPsStoreIcon(int position) {
+    (void)position;
+    return 0;
+}
+
+int APS5_VABI sceNpCommerceHidePsStoreIcon(void) {
+    return 0;
+}
+
 }

@@ -126,4 +126,11 @@ int APS5_VABI sceUserServiceTerminate(void) {
  return USER_SERVICE_OK;
 }
 
+int APS5_VABI sceUserServiceGetPlatformPrivacyWs1(int user_id, int32_t* setting) {
+    (void)user_id;
+    if (setting == nullptr) return USER_SERVICE_ERROR_INVALID_ARGUMENT;
+    *setting = 0;
+    return USER_SERVICE_OK;
+}
+
 }

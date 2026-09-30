@@ -28,10 +28,4 @@ int APS5_VABI sceSystemServiceUnknown_sPuK5ic3GD4() { NotImplemented_nid_no_patc
 APS5_EXPORT("uaieF+glFPs", sceSystemServiceUnknown_uaieF_plus_glFPs);
 int APS5_VABI sceSystemServiceUnknown_uaieF_plus_glFPs() { NotImplemented_nid_no_patch(__func__); return 0; }
 
-APS5_EXPORT("64nkF7LGk8w", libSceSystemServiceUnknown_64nkF7LGk8w);
-int APS5_VABI libSceSystemServiceUnknown_64nkF7LGk8w() { NotImplemented_nid_no_patch(__func__); return 0; }
-
-APS5_EXPORT("uInYhy7xa+U", libSceSystemServiceUnknown_uInYhy7xa_plus_U);
-int APS5_VABI libSceSystemServiceUnknown_uInYhy7xa_plus_U() { NotImplemented_nid_no_patch(__func__); return 0; }
-
 }

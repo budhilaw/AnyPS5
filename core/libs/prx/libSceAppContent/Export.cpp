@@ -22,6 +22,7 @@ constexpr int SCE_APP_CONTENT_ERROR_NOT_INITIALIZED = static_cast<int>(0x80D9000
 constexpr std::uint32_t PARAM_ID_SKU_FLAG = 0, PARAM_ID_USER_DEFINED_1 = 1, PARAM_ID_USER_DEFINED_4 = 4;
 constexpr std::int32_t SKU_FLAG_FULL = 3;
 constexpr const char* TemporaryMount = "/temp0";
+constexpr const char* DownloadMount = "/download0";
 
 std::mutex appMutex;
 bool initialized = false;
@@ -113,8 +114,21 @@ int APS5_VABI sceAppContentTemporaryDataGetAvailableSpaceKb(const AppContentMoun
 
 int APS5_VABI sceAppContentDownloadDataGetAvailableSpaceKb(const AppContentMountPoint* mount_point, size_t* available_space_kb) {
     Aps5TraceCall_nid_no_patch(__func__);
-    if (mount_point == nullptr || available_space_kb == nullptr) return SCE_APP_CONTENT_ERROR_PARAMETER;
-    return SCE_APP_CONTENT_ERROR_NOT_MOUNTED;
+    if (mount_point == nullptr || available_space_kb == nullptr || std::strncmp(mount_point->data, DownloadMount, sizeof(mount_point->data)) != 0) return SCE_APP_CONTENT_ERROR_PARAMETER;
+    std::int32_t quotaMegabytes = 0;
+    if (!ParamInteger("downloadDataSize", quotaMegabytes) || quotaMegabytes <= 0) return SCE_APP_CONTENT_ERROR_NOT_MOUNTED;
+    const auto native = ResolvePath_nid_no_patch(DownloadMount);
+    std::error_code error;
+    std::filesystem::create_directories(native, error);
+    if (error) throw std::runtime_error("sceAppContentDownloadDataGetAvailableSpaceKb: cannot create " + native.string());
+    std::uintmax_t used = 0;
+    for (auto it = std::filesystem::recursive_directory_iterator(native, error); !error && it != std::filesystem::recursive_directory_iterator(); it.increment(error)) {
+        if (it->is_regular_file(error)) used += it->file_size(error);
+    }
+    const auto quota = static_cast<std::uintmax_t>(quotaMegabytes) * 1024;
+    const auto usedKb = (used + 1023) / 1024;
+    *available_space_kb = static_cast<size_t>(usedKb >= quota ? 0 : quota - usedKb);
+    return 0;
 }
 
 int APS5_VABI sceAppContentAddcontMount(uint32_t service_label, const NpUnifiedEntitlementLabel* entitlement_label, AppContentMountPoint* mount_point) {

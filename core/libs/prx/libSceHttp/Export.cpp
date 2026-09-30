@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cctype>
 #include <cstdlib>
 #include <cstdint>
@@ -20,6 +21,8 @@ constexpr int SCE_HTTP_ERROR_INVALID_URL = static_cast<int>(0x80433060);
 constexpr int SCE_HTTP_ERROR_NETWORK = static_cast<int>(0x80431063);
 constexpr int SCE_HTTP_ERROR_BEFORE_SEND = static_cast<int>(0x80431065);
 constexpr int SCE_HTTP_ERROR_RESOLVER_ENODNS = static_cast<int>(0x80436002);
+constexpr int SCE_HTTP_ERROR_PARSE_HTTP_NOT_FOUND = static_cast<int>(0x80432025);
+constexpr int SCE_HTTP_ERROR_PARSE_HTTP_INVALID_VALUE = static_cast<int>(0x804321fe);
 
 struct IdTable {
     std::mutex mutex;
@@ -95,6 +98,13 @@ int APS5_VABI sceHttpCreateRequest(int conn_id, int method, const char* path, ui
     return requests.Create();
 }
 
+int APS5_VABI sceHttpCreateRequestWithURL(int conn_id, int method, const char* url, uint64_t content_length) {
+    (void)method; (void)content_length;
+    if (!connections.Has(conn_id)) return SCE_HTTP_ERROR_INVALID_ID;
+    if (url == nullptr) return SCE_HTTP_ERROR_INVALID_URL;
+    return requests.Create();
+}
+
 int APS5_VABI sceHttpCreateRequestWithURL2(int conn_id, const char* method, const char* url, uint64_t content_length) {
     (void)content_length;
     if (!connections.Has(conn_id)) return SCE_HTTP_ERROR_INVALID_ID;
@@ -151,6 +161,33 @@ int APS5_VABI sceHttpsSetSslCallback(int id, HttpsCallback cbfunc, void* user_ar
 int APS5_VABI sceHttpsSetMinSslVersion(int id, uint32_t ssl_version) { (void)ssl_version; return anyId(id) ? 0 : SCE_HTTP_ERROR_INVALID_ID; }
 int APS5_VABI sceHttpsDisableOption(int id, uint32_t ssl_flags) { (void)ssl_flags; return anyId(id) ? 0 : SCE_HTTP_ERROR_INVALID_ID; }
 int APS5_VABI sceHttpsEnableOption(int id, uint32_t ssl_flags) { (void)ssl_flags; return anyId(id) ? 0 : SCE_HTTP_ERROR_INVALID_ID; }
+
+int APS5_VABI sceHttpsLoadCert(int http_ctx_id, int ca_cert_num, const void** ca_list, const void* cert, const void* priv_key) {
+    (void)cert; (void)priv_key;
+    if (!contexts.Has(http_ctx_id)) return SCE_HTTP_ERROR_INVALID_ID;
+    return ca_cert_num >= 0 && (ca_cert_num == 0 || ca_list != nullptr) ? 0 : SCE_HTTP_ERROR_INVALID_VALUE;
+}
+
+int APS5_VABI sceHttpParseResponseHeader(const char* header, size_t header_len, const char* field_str, const char** field_value, size_t* value_len) {
+    if (header == nullptr || field_str == nullptr || field_value == nullptr || value_len == nullptr) return SCE_HTTP_ERROR_PARSE_HTTP_INVALID_VALUE;
+    const std::string_view text(header, header_len);
+    const std::string_view field(field_str);
+    for (std::size_t line = 0; line < text.size();) {
+        const auto end = std::min(text.find('\n', line), text.size());
+        auto current = text.substr(line, end - line);
+        if (!current.empty() && current.back() == '\r') current.remove_suffix(1);
+        const auto colon = current.find(':');
+        if (colon == field.size() && std::equal(field.begin(), field.end(), current.begin(), [](char a, char b) { return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b)); })) {
+            auto value = current.substr(colon + 1);
+            while (!value.empty() && (value.front() == ' ' || value.front() == '\t')) value.remove_prefix(1);
+            *field_value = value.data();
+            *value_len = value.size();
+            return 0;
+        }
+        line = end + 1;
+    }
+    return SCE_HTTP_ERROR_PARSE_HTTP_NOT_FOUND;
+}
 
 int APS5_VABI sceHttpCreateEpoll(int http_ctx_id, HttpEpollHandle* eh) {
     if (eh == nullptr) return SCE_HTTP_ERROR_INVALID_VALUE;

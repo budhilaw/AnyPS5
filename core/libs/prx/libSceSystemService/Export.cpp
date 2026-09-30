@@ -123,4 +123,12 @@ int APS5_VABI sceSystemServiceSetNoticeScreenSkipFlag(void) {
     return 0;
 }
 
+int APS5_VABI sceSystemServiceDisableMediaPlay(void) {
+    return 0;
+}
+
+int APS5_VABI sceSystemServiceReenableMediaPlay(void) {
+    return 0;
+}
+
 }

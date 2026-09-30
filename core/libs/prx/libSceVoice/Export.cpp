@@ -2,6 +2,22 @@
 #include <cstddef>
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
+#include <map>
+#include <mutex>
+#include <stdexcept>
+#include <string>
+
+namespace {
+
+struct PortState {
+    float volume = 1.0f;
+    bool muted = false;
+};
+
+std::mutex portMutex;
+std::map<std::uint32_t, PortState> ports;
+
+}
 
 extern "C" {
 
@@ -61,10 +77,11 @@ int APS5_VABI sceVoiceGetPortInfo(uint32_t port_id, VoicePortInfo* info) {
 }
 
 int APS5_VABI sceVoiceGetVolume(uint32_t port_id, float* volume) {
- (void)port_id;
- (void)volume;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+    if (volume == nullptr) throw std::invalid_argument(std::string(__func__) + ": volume is null");
+    std::lock_guard lock(portMutex);
+    const auto it = ports.find(port_id);
+    *volume = it != ports.end() ? it->second.volume : 1.0f;
+    return 0;
 }
 
 int APS5_VABI sceVoiceInit(VoiceInitParam* param, int32_t version) {
@@ -89,10 +106,9 @@ int APS5_VABI sceVoiceSetThreadsParams(void* params) {
 }
 
 int APS5_VABI sceVoiceSetVolume(uint32_t port_id, float volume) {
- (void)port_id;
- (void)volume;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+    std::lock_guard lock(portMutex);
+    ports[port_id].volume = volume;
+    return 0;
 }
 
 int APS5_VABI sceVoiceStart(const VoiceStartParam* param) {
@@ -113,6 +129,20 @@ int APS5_VABI sceVoiceWriteToIPort(uint32_t input_port_id, const void* data, uin
  (void)frame_gaps;
  NotImplemented_nid_no_patch(__func__);
  return 0;
+}
+
+int APS5_VABI sceVoiceGetMuteFlag(uint32_t port_id, bool* muted) {
+    if (muted == nullptr) throw std::invalid_argument(std::string(__func__) + ": flag is null");
+    std::lock_guard lock(portMutex);
+    const auto it = ports.find(port_id);
+    *muted = it != ports.end() && it->second.muted;
+    return 0;
+}
+
+int APS5_VABI sceVoiceSetMuteFlag(uint32_t port_id, bool muted) {
+    std::lock_guard lock(portMutex);
+    ports[port_id].muted = muted;
+    return 0;
 }
 
 }

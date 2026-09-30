@@ -346,4 +346,22 @@ int APS5_VABI sceSaveDataUmount2(uint32_t mode, const SaveDataMountPoint* mount_
     return SAVE_DATA_OK;
 }
 
+int APS5_VABI sceSaveDataDirNameSearchPs4(const void* cond, SaveDataDirNameSearchResult* result) {
+    Aps5TraceCall_nid_no_patch(__func__);
+    if (cond == nullptr || result == nullptr) {
+        throw std::runtime_error("sceSaveDataDirNameSearchPs4: null argument");
+    }
+    result->hit_num = 0;
+    result->set_num = 0;
+    return SAVE_DATA_OK;
+}
+
+int APS5_VABI sceSaveDataTransferringMountPs4(const void* mount, void* result) {
+    Aps5TraceCall_nid_no_patch(__func__);
+    if (mount == nullptr || result == nullptr) {
+        throw std::runtime_error("sceSaveDataTransferringMountPs4: null argument");
+    }
+    return SAVE_DATA_ERROR_NOT_FOUND;
+}
+
 }

@@ -20,6 +20,7 @@ std::mutex npMutex;
 std::set<int> requests;
 int nextRequest = 1;
 void* stateCallback = nullptr;
+void* stateCallbackA = nullptr;
 void* reachabilityCallback = nullptr;
 void* plusCallback = nullptr;
 void* premiumCallback = nullptr;
@@ -88,6 +89,22 @@ int APS5_VABI sceNpSetNpTitleId(const NpTitleId* title_id, const NpTitleSecret* 
     std::lock_guard lock(npMutex);
     titleId = *title_id;
     titleIdSet = true;
+    return 0;
+}
+
+int APS5_VABI sceNpRegisterStateCallbackA(void* callback, void* userdata) {
+    (void)userdata;
+    if (callback == nullptr) return SCE_NP_ERROR_INVALID_ARGUMENT;
+    std::lock_guard lock(npMutex);
+    if (stateCallbackA != nullptr) return SCE_NP_ERROR_CALLBACK_ALREADY_REGISTERED;
+    stateCallbackA = callback;
+    return 0;
+}
+
+int APS5_VABI sceNpUnregisterStateCallbackA(int callback_id) {
+    (void)callback_id;
+    std::lock_guard lock(npMutex);
+    stateCallbackA = nullptr;
     return 0;
 }
 
