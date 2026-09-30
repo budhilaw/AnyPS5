@@ -275,7 +275,8 @@ private:
     }
 
     void postGraphics(GraphicsJob job) {
-        if (!job.writes.empty() || job.writesUnknown) postedWrites.push_back({graphicsPosted + 1, job.writes, job.writesUnknown});
+        for (const auto& range : job.writes) postedWriteRanges[range] = graphicsPosted + 1;
+        if (job.writesUnknown) postedUnknownWrites = graphicsPosted + 1;
         ++graphicsPosted;
         std::unique_lock lock(graphicsMutex);
         graphicsChanged.wait(lock, [&] { return graphicsJobs.size() < MaxGraphicsJobs || graphicsStopping; });
@@ -295,22 +296,34 @@ private:
         return graphicsCompleted.load(std::memory_order_acquire) != graphicsPosted;
     }
 
-    bool graphicsMayWrite(std::uint64_t address, std::size_t bytes) {
+    void waitGraphics(std::uint64_t number, const char* reason) {
+        SlowOperationTimer slowTimer(reason);
+        PerformanceTimer timing("Driver.GraphicsDrain");
+        std::unique_lock lock(graphicsMutex);
+        graphicsChanged.wait(lock, [&] { return graphicsCompleted.load(std::memory_order_acquire) >= number; });
+    }
+
+    std::uint64_t graphicsWriter(std::uint64_t address, std::size_t bytes) {
         const auto completed = graphicsCompleted.load(std::memory_order_acquire);
-        while (!postedWrites.empty() && postedWrites.front().number <= completed) postedWrites.pop_front();
+        auto writer = postedUnknownWrites > completed ? postedUnknownWrites : 0;
         const auto end = address + bytes;
-        for (const auto& job : postedWrites) {
-            if (job.writesUnknown) return true;
-            for (const auto& [first, last] : job.writes) if (first < end && address < last) return true;
+        for (auto it = postedWriteRanges.begin(); it != postedWriteRanges.end();) {
+            if (it->second <= completed) {
+                it = postedWriteRanges.erase(it);
+                continue;
+            }
+            if (it->first.first < end && address < it->first.second) writer = std::max(writer, it->second);
+            ++it;
         }
-        return false;
+        return writer;
     }
 
     static void resolveForHost(void* context, std::uint64_t address, std::size_t bytes, bool writable) {
         auto& self = *static_cast<Driver*>(context);
         auto* current = self.graphicsDevice.get();
         if (current == nullptr) return;
-        const bool queuedWrite = self.graphicsMayWrite(address, bytes);
+        const auto writer = self.graphicsWriter(address, bytes);
+        const bool queuedWrite = writer != 0;
         const bool recorded = !queuedWrite && current->NeedsResolve(address, bytes);
         if (!queuedWrite && !recorded) return;
         PerformanceTimer timing("Driver.HostResolve");
@@ -329,14 +342,14 @@ private:
                 std::fprintf(stderr, "[drain] 0x%llx+0x%zx %s queued %d recorded %d:%s\n", static_cast<unsigned long long>(address), bytes, writable ? "write" : "read", queuedWrite ? 1 : 0, recorded ? 1 : 0, ranges.c_str());
             }
         }
-        self.drainGraphics("drain host resolve");
+        if (queuedWrite) self.waitGraphics(writer, "drain host resolve");
         timing.Mark("drain");
         current->ResolveMemory(address, bytes, writable);
         timing.Mark("resolve");
     }
     static bool quietForHost(void* context, std::uint64_t address, std::size_t bytes) {
         auto& self = *static_cast<Driver*>(context);
-        return self.graphicsDevice == nullptr || (!self.graphicsMayWrite(address, bytes) && !self.graphicsDevice->NeedsResolve(address, bytes));
+        return self.graphicsDevice == nullptr || (self.graphicsWriter(address, bytes) == 0 && !self.graphicsDevice->NeedsResolve(address, bytes));
     }
     std::shared_ptr<VulkanDevice> graphicsDevice;
     std::mutex deviceMutex;
@@ -575,12 +588,8 @@ private:
     std::condition_variable graphicsChanged;
     std::deque<GraphicsJob> graphicsJobs;
     bool graphicsBusy = false;
-    struct PostedWrites {
-        std::uint64_t number;
-        std::vector<std::pair<std::uint64_t, std::uint64_t>> writes;
-        bool writesUnknown;
-    };
-    std::deque<PostedWrites> postedWrites;
+    std::map<std::pair<std::uint64_t, std::uint64_t>, std::uint64_t> postedWriteRanges;
+    std::uint64_t postedUnknownWrites = 0;
     std::uint64_t graphicsPosted = 0;
     std::atomic<std::uint64_t> graphicsCompleted{0};
     bool graphicsStopping = false;
