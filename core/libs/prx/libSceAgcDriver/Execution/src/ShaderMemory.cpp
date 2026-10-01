@@ -54,8 +54,9 @@ bool ShaderMemory::read(void* context, std::uint64_t address, std::uint32_t* val
     if (std::find(self.checkedPages.begin(), self.checkedPages.end(), page) != self.checkedPages.end()) {
         std::memcpy(value, reinterpret_cast<const void*>(address), sizeof(*value));
     } else {
+        if (!GuestMemory::MemoryAccessScope::Quiet(page * pageBytes, pageBytes)) GuestMemory::MemoryAccessScope::Resolve(page * pageBytes, pageBytes, false);
         GuestMemory::Read(address, std::as_writable_bytes(std::span(value, 1)), alignof(std::uint32_t));
-        if (GuestMemory::MemoryAccessScope::Quiet(page * pageBytes, pageBytes)) self.checkedPages.push_back(page);
+        self.checkedPages.push_back(page);
     }
     self.dwords.insert(slot, {address, *value});
     return true;

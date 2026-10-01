@@ -18,16 +18,14 @@ public:
     };
 
     std::shared_ptr<TValue> Get() const {
-        std::lock_guard lock(mutex);
-        return value;
+        return value.load(std::memory_order_acquire);
     }
 
     const std::shared_ptr<TValue>& Get(Cache& cache) const {
-        if (generation.load(std::memory_order_acquire) == cache.generation) return cache.value;
-        auto previous = std::move(cache.value);
-        std::lock_guard lock(mutex);
-        cache.value = value;
-        cache.generation = generation.load(std::memory_order_relaxed);
+        const auto current = generation.load(std::memory_order_acquire);
+        if (current == cache.generation) return cache.value;
+        cache.value = value.load(std::memory_order_acquire);
+        cache.generation = current;
         return cache.value;
     }
 
@@ -36,18 +34,18 @@ public:
         if (Get(cache) != nullptr) return cache.value;
         auto created = create();
         std::lock_guard lock(mutex);
-        if (value == nullptr) {
-            value = std::move(created);
+        if (value.load(std::memory_order_acquire) == nullptr) {
+            value.store(std::move(created), std::memory_order_release);
             generation.store(nextGeneration(), std::memory_order_release);
         }
-        cache.value = value;
-        cache.generation = generation.load(std::memory_order_relaxed);
+        cache.value = value.load(std::memory_order_acquire);
+        cache.generation = generation.load(std::memory_order_acquire);
         return cache.value;
     }
 
     void Publish(std::shared_ptr<TValue> replacement) {
         std::lock_guard lock(mutex);
-        value.swap(replacement);
+        value.store(std::move(replacement), std::memory_order_release);
         generation.store(nextGeneration(), std::memory_order_release);
     }
 
@@ -57,8 +55,8 @@ private:
         return generations.fetch_add(1, std::memory_order_relaxed) + 1;
     }
 
-    mutable std::mutex mutex;
-    std::shared_ptr<TValue> value;
+    std::mutex mutex;
+    std::atomic<std::shared_ptr<TValue>> value;
     std::atomic<std::uint64_t> generation{0};
 };
 
