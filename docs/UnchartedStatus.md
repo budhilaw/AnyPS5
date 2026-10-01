@@ -57,7 +57,8 @@ Build and relink as described in the README. The run folder holds the relinked `
 
 - `ANYPS5_SAMPLE_THREADS=1`: samples the title, worker and graphics threads every millisecond (Windows) and prints the hottest functions and call chains every 30 s.
 - `ANYPS5_TRACE_SLOW_OPS=1`: prints 5 s summaries of lock waits, the reasons the driver worker waits for the graphics thread, the stages of recording draws and dispatches, and slow memory, tracking and device operations. On Windows it also prints the first tracking fault of each guest instruction with the watch it hit.
-- `ANYPS5_TRACE_TIMING=1`: per-frame timing of the driver stages and GPU timestamps per command batch. `Graphics.Draw.feedback` counts the draws that sample their own color or depth target.
+- `ANYPS5_TRACE_TIMING=1`: per-frame timing of the driver stages and GPU timestamps per command batch. `Graphics.Draw.feedback` counts the draws that sample their own color or depth target. Draw-queue batches add up in `Graphics.GpuTime.execute`, one-off batches in `Graphics.GpuBatch.<name>` (`depth_copy`, `color_copy`, `resolve`, `cpu_access`, `flush_stores`, `null_texture`, `readback`, `present`). A batch is timed from the moment the GPU work submitted before it has finished, so batch times do not overlap.
+- `ANYPS5_TRACE_GPU_PASSES=1`: times every render pass, keyed by its color target (or its depth target when it has no color target) and its extent, and every compute dispatch, keyed by program address and group count. A draw-queue batch holds 512 timestamps; once they run out, the batch stops timing passes and dispatches and counts the ones it dropped. Every 5 s, `[gpu-time]` lines on stderr give the batch, pass, dispatch, untimed and one-off totals and the 20 most expensive passes and programs. With `ANYPS5_TRACE_TIMING=1` the frame lines also carry `Graphics.GpuPass.<width>x<height>` and `Graphics.GpuProgram.<address>`.
 
 ## Next steps
 
