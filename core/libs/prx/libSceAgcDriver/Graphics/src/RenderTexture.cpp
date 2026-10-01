@@ -1,6 +1,8 @@
 #include "prx/libSceAgcDriver/Graphics/include/Texture.hpp"
+#include <algorithm>
 #include <set>
 #include <mutex>
+#include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Resources.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/RenderCache.hpp"
@@ -109,6 +111,48 @@ Texture::Texture(const Context& context, const std::shared_ptr<ResidentColor>& s
 void Texture::MarkStored() {
     stored = true;
     if (directView && source) source->MarkWritten();
+}
+
+Texture::Texture(const Context& context, const GuestTextureResource& descriptor, VkComponentMapping components, Assembled) : context(context) {
+    PerformanceTimer timing("Graphics.Texture.Assemble");
+    try {
+        const bool storageCapable = createDetiledImage(descriptor, timing, VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+        createGuestViews(descriptor, components, ResolveTextureFormat(descriptor.format), storageCapable);
+        timing.Mark("views");
+    } catch (...) {
+        release();
+        throw;
+    }
+}
+
+void Texture::CopyTargets(VkCommandBuffer commands, std::span<const TargetCopy> copies) {
+    Require(commands != VK_NULL_HANDLE && ownsImage && image != VK_NULL_HANDLE && !refreshable, "only a texture assembled from render targets takes their copies");
+    const auto pipelineBarrier = context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier");
+    VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    barrier.srcAccessMask = filled ? VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT : 0u;
+    barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier.oldLayout = filled ? layout : VK_IMAGE_LAYOUT_UNDEFINED;
+    barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = image;
+    barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, guestMipCount, 0, imageLayers};
+    pipelineBarrier(commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+    const auto copyImage = context.Function<PFN_vkCmdCopyImage>("vkCmdCopyImage");
+    for (const auto& copy : copies) {
+        Require(copy.source != VK_NULL_HANDLE && copy.level < guestMipCount && copy.layer < imageLayers, "a render target copy lies outside the assembled texture");
+        VkImageCopy region{};
+        region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, copy.level, copy.layer, 1};
+        region.extent = {std::max(extent.width >> copy.level, 1u), std::max(extent.height >> copy.level, 1u), 1};
+        copyImage(commands, copy.source, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    }
+    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    barrier.newLayout = layout;
+    pipelineBarrier(commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+    filled = true;
 }
 
 Texture::Texture(const Context& context, const std::shared_ptr<ResidentColor>& source, const GuestTextureResource& descriptor, VkComponentMapping components, DirectView) : context(context), source(source), ownsImage(false), directView(true) {

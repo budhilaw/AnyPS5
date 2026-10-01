@@ -10,6 +10,8 @@
 
 namespace AgcDriver::Graphics {
 
+bool GpuAssembly();
+
 class ResidentColor {
 public:
     ResidentColor(const Context& context, const ColorTarget& color);
@@ -55,7 +57,7 @@ private:
 
 class RenderCache {
 public:
-    explicit RenderCache(const Context& context) : context(context), pageSize(GuestMemoryTracking::GuestMemoryTrackingPageSize_nid_postfix()) {}
+    explicit RenderCache(const Context& context) : context(context), pageSize(GuestMemoryTracking::GuestMemoryTrackingPageSize_nid_postfix()), assembly(GpuAssembly()) {}
     ~RenderCache();
     std::shared_ptr<ResidentColor> Get(const ColorTarget& color, bool blending);
     std::uint64_t Epoch() const { return epoch.load(std::memory_order_acquire); }
@@ -67,6 +69,7 @@ public:
     std::vector<std::pair<std::uint64_t, std::uint64_t>> WatchedRanges(std::uint64_t begin, std::uint64_t end, std::uint64_t sequence) const;
     std::shared_ptr<DepthImage> GetDepth(const DepthTarget& depth);
     std::shared_ptr<ResidentColor> Find(std::uint64_t address) const;
+    void SurfaceTargets(std::uint64_t surfaceAddress, std::vector<std::shared_ptr<ResidentColor>>& targets) const;
     std::shared_ptr<DepthImage> FindDepth(std::uint64_t address, bool* stencil = nullptr) const;
     std::string DescribeDepthTargets() const;
     std::string DescribeColorTargets() const;
@@ -78,7 +81,7 @@ public:
     void Flush();
 
 private:
-    using Entries = std::map<std::uint64_t, std::shared_ptr<ResidentColor>>;
+    using Entries = std::multimap<std::uint64_t, std::shared_ptr<ResidentColor>>;
     void retire(std::shared_ptr<ResidentColor> entry);
     Entries::iterator release(Entries::iterator entry);
     std::uint64_t reachStart(std::uint64_t address) const { return address > largestTarget + pageSize ? address - largestTarget - pageSize : 0; }
@@ -89,6 +92,7 @@ private:
     std::uint64_t largestTarget = 0;
     std::atomic<std::uint64_t> epoch{0};
     std::uint64_t useCounter = 0;
+    bool assembly;
     struct DepthEntry {
         DepthTarget target;
         std::shared_ptr<DepthImage> image;

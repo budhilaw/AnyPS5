@@ -41,6 +41,14 @@ public:
     Texture(const Context& context, std::span<const std::shared_ptr<DepthImage>> sources, bool stencil, const GuestTextureResource& descriptor, VkComponentMapping components, bool compare = false);
     struct DirectDepthView {};
     Texture(const Context& context, const std::shared_ptr<DepthImage>& depth, VkImageView sampledView, bool stencil, const GuestTextureResource& descriptor, DirectDepthView);
+    struct Assembled {};
+    Texture(const Context& context, const GuestTextureResource& descriptor, VkComponentMapping components, Assembled);
+    struct TargetCopy {
+        VkImage source;
+        std::uint32_t level;
+        std::uint32_t layer;
+    };
+    void CopyTargets(VkCommandBuffer commands, std::span<const TargetCopy> copies);
     Texture(const Context& context, TextureDimension dimension, TextureNumericClass numericClass);
     ~Texture();
     Texture(const Texture&) = delete;
@@ -72,7 +80,7 @@ public:
 private:
     void release() noexcept;
     void createGuestViews(const GuestTextureResource& descriptor, VkComponentMapping components, VkFormat vkFormat, bool storageCapable);
-    bool createDetiledImage(const GuestTextureResource& descriptor, PerformanceTimer& timing);
+    bool createDetiledImage(const GuestTextureResource& descriptor, PerformanceTimer& timing, VkImageUsageFlags extraUsage = 0);
     void uploadDetiled(TextureDetiler& detiler, VkBuffer source, VkDeviceSize offset, bool hostWritten, PerformanceTimer& timing);
     void recordDetile(VkCommandBuffer commands, TextureDetiler& detiler, VkBuffer source, VkDeviceSize offset, bool hostWritten, VkBuffer target, VkImageLayout from);
     VkDeviceSize linearBytes() const;
@@ -107,6 +115,7 @@ private:
     bool ownsImage = true;
     bool ownsView = true;
     bool directView = false;
+    bool filled = false;
     std::unique_ptr<Buffer> staging;
     std::unique_ptr<Buffer> linear;
     std::unique_ptr<CommandBatch> upload;

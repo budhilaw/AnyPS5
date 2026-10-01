@@ -37,6 +37,10 @@ struct ColorTarget {
     ColorTileMode tileMode = ColorTileMode::Linear;
     std::uint32_t bytesPerPixel = 4;
     bool gpuOnly = false;
+    std::uint64_t surfaceAddress = 0;
+    VkExtent2D surfaceExtent{};
+    std::uint32_t mipLevel = 0;
+    std::uint32_t slice = 0;
 };
 
 struct DepthTarget {

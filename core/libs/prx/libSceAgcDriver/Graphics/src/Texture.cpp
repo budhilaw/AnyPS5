@@ -116,7 +116,7 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
     }
 }
 
-bool Texture::createDetiledImage(const GuestTextureResource& descriptor, PerformanceTimer& timing) {
+bool Texture::createDetiledImage(const GuestTextureResource& descriptor, PerformanceTimer& timing, VkImageUsageFlags extraUsage) {
     const auto vkFormat = ResolveTextureFormat(descriptor.format);
     if (IsBlockCompressed(descriptor.format)) {
         Require(context.textureCompressionBC, "device does not support BC compressed textures");
@@ -163,7 +163,7 @@ bool Texture::createDetiledImage(const GuestTextureResource& descriptor, Perform
     imageInfo.arrayLayers = imageLayers;
     imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
     imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-    imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | (storageCapable ? VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT : 0u);
+    imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | (storageCapable ? VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT : 0u) | extraUsage;
     imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     Check(context.Function<PFN_vkCreateImage>("vkCreateImage")(context.device, &imageInfo, nullptr, &image), "vkCreateImage");

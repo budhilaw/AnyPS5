@@ -7,6 +7,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/DrawQueue.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/GuestBufferCache.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureFormat.hpp"
+#include "prx/libc/include/SlowOperation.hpp"
 #include <cmath>
 #include <algorithm>
 #include <cstring>
@@ -14,10 +15,11 @@
 #include <cstdio>
 #include <limits>
 #include <mutex>
+#include <numeric>
 
 namespace AgcDriver::Graphics {
 
-TextureCache::TextureCache(const Context& context) : context(context), budget(4096ull << 20) {
+TextureCache::TextureCache(const Context& context) : context(context), budget(4096ull << 20), assembly(GpuAssembly()) {
     Require(context.detiler != nullptr, "texture cache requires a device detiler");
     if (const char* value = std::getenv("ANYPS5_TEXTURE_CACHE_MB")) {
         const auto megabytes = std::strtoull(value, nullptr, 10);
@@ -62,7 +64,7 @@ void TextureCache::addEntry(Entry entry) {
 std::list<TextureCache::Entry>::iterator TextureCache::findEntry(const std::array<std::uint32_t, 8>& descriptor, TextureDimension viewDimension, bool compare, bool depthView) {
     if (++lookupsSinceSweep >= 1024) {
         lookupsSinceSweep = 0;
-        for (auto it = entries.begin(); it != entries.end();) it = (it->surface && it->surface->stale) || !depthResident(*it) ? eraseEntry(it) : std::next(it);
+        for (auto it = entries.begin(); it != entries.end();) it = (it->surface && it->surface->stale) || !depthResident(*it) || !targetsResident(*it) ? eraseEntry(it) : std::next(it);
     }
     auto [first, last] = index.equal_range(descriptorHash(descriptor));
     while (first != last) {
@@ -83,6 +85,92 @@ bool TextureCache::depthResident(const Entry& entry) const {
         const auto image = source.lock();
         return image != nullptr && context.renderCache->FindDepth(image->Description().address) == image;
     });
+}
+
+bool TextureCache::targetsResident(const Entry& entry) {
+    return std::none_of(entry.targets.begin(), entry.targets.end(), [](const TargetSource& source) { return source.target.expired(); });
+}
+
+std::shared_ptr<Texture> TextureCache::assembled(const std::array<std::uint32_t, 8>& key, const GuestTextureResource& resource, VkComponentMapping components, PerformanceTimer& timing) {
+    const bool planar = resource.dimension == TextureDimension::k2D || resource.dimension == TextureDimension::k2DArray || resource.dimension == TextureDimension::kCube;
+    if (!assembly || context.renderCache == nullptr || context.drawQueue == nullptr || !planar || IsBlockCompressed(resource.format)) return nullptr;
+    const auto layers = FullArrayLayers(resource);
+    if ((resource.mipCount == 1 && layers == 1) || resource.baseLevel > resource.lastLevel || resource.lastLevel >= resource.mipCount || resource.baseArray >= layers) return nullptr;
+    std::vector<std::shared_ptr<ResidentColor>> candidates;
+    context.renderCache->SurfaceTargets(resource.baseAddress, candidates);
+    if (candidates.empty()) return nullptr;
+    const auto elementBytes = BytesPerElement(resource.format);
+    const auto viewLayers = resource.viewDimension == TextureDimension::k1D || resource.viewDimension == TextureDimension::k2D ? 1u : layers - resource.baseArray;
+    std::vector<std::shared_ptr<ResidentColor>> sources;
+    sources.reserve(static_cast<std::size_t>(resource.lastLevel - resource.baseLevel + 1u) * viewLayers);
+    for (auto level = resource.baseLevel; level <= resource.lastLevel; ++level) {
+        const VkExtent2D extent{std::max(resource.width >> level, 1u), std::max(resource.height >> level, 1u)};
+        for (auto layer = resource.baseArray; layer < resource.baseArray + viewLayers; ++layer) {
+            const auto match = std::find_if(candidates.begin(), candidates.end(), [&](const std::shared_ptr<ResidentColor>& target) {
+                const auto& color = target->Description();
+                return color.mipLevel == level && color.slice == layer && color.extent.width == extent.width && color.extent.height == extent.height && color.surfaceExtent.width == resource.width && color.surfaceExtent.height == resource.height && color.bytesPerPixel == elementBytes && (color.gpuOnly || !context.drawQueue->WritesPending(color.address, color.bytes, target->AdoptedThrough()));
+            });
+            if (match == candidates.end()) return nullptr;
+            sources.push_back(*match);
+        }
+    }
+    auto it = findEntry(key, resource.viewDimension);
+    if (it != entries.end() && it->targets.size() != sources.size()) {
+        eraseEntry(it);
+        it = entries.end();
+    }
+    const bool created = it == entries.end();
+    std::vector<std::size_t> changed;
+    if (created) {
+        auto texture = std::make_shared<Texture>(context, resource, components, Texture::Assembled{});
+        Entry entry{key, resource.viewDimension, texture, nullptr, {}, {}, 0, texture->AllocationBytes()};
+        entry.targets.resize(sources.size());
+        retainedBytes += entry.retained;
+        addEntry(std::move(entry));
+        it = std::prev(entries.end());
+        changed.resize(sources.size());
+        std::iota(changed.begin(), changed.end(), std::size_t{0});
+    } else {
+        entries.splice(entries.end(), entries, it);
+        for (std::size_t index = 0; index < sources.size(); ++index) {
+            const auto& cached = it->targets[index];
+            if (cached.generation != sources[index]->Generation() || cached.target.lock() != sources[index]) changed.push_back(index);
+        }
+        if (changed.empty()) {
+            timing.Mark("assembled_hit");
+            SlowOperationRecord_nid_no_patch("texture assembly reused", 0);
+            return it->texture;
+        }
+    }
+    auto texture = it->texture;
+    {
+        SlowOperationTimer slow(created ? "texture assembled from render targets" : "texture assembly updated from render targets");
+        const auto commands = context.drawQueue->BeginBarrier(context);
+        std::vector<Texture::TargetCopy> copies;
+        std::vector<VkImageLayout> layouts;
+        copies.reserve(changed.size());
+        layouts.reserve(changed.size());
+        for (const auto index : changed) {
+            auto& target = *sources[index];
+            layouts.push_back(target.Layout());
+            target.Transition(commands, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+            copies.push_back({target.Target().Image(), resource.baseLevel + static_cast<std::uint32_t>(index / viewLayers), resource.baseArray + static_cast<std::uint32_t>(index % viewLayers)});
+        }
+        texture->CopyTargets(commands, copies);
+        for (std::size_t copy = 0; copy < changed.size(); ++copy) {
+            const auto index = changed[copy];
+            if (layouts[copy] != VK_IMAGE_LAYOUT_UNDEFINED) sources[index]->Transition(commands, layouts[copy]);
+            it->targets[index] = {sources[index], sources[index]->Generation()};
+        }
+        context.drawQueue->EnqueueCompletion([texture] {});
+    }
+    if (created) {
+        static int reported = 0;
+        if (reported++ < 64) APS5_LOG_OUT("texture 0x%llx %ux%u format 0x%x mips %u-%u layers %u-%u assembled on the GPU from the render targets of its %zu subresources", static_cast<unsigned long long>(resource.baseAddress), resource.width, resource.height, resource.format, resource.baseLevel, resource.lastLevel, resource.baseArray, resource.baseArray + viewLayers - 1u, sources.size());
+        trim();
+    }
+    timing.Mark(created ? "assembled" : "assembled_update");
+    return texture;
 }
 
 std::shared_ptr<Texture> TextureCache::directDepth(const std::array<std::uint32_t, 8>& key, const std::shared_ptr<DepthImage>& image, bool stencil, const GuestTextureResource& resource, VkComponentMapping components, bool compare, PerformanceTimer& timing) {
@@ -199,6 +287,9 @@ std::shared_ptr<Texture> TextureCache::Get(std::span<const std::uint32_t> words,
         timing.Mark("depth_copy");
         return texture;
     }
+    if (!stores) {
+        if (auto texture = assembled(key, resource, components, timing)) return texture;
+    }
     auto source = context.renderCache ? context.renderCache->Find(resource.baseAddress) : nullptr;
     bool rowCopy = false;
     if (source) {
@@ -210,13 +301,15 @@ std::shared_ptr<Texture> TextureCache::Get(std::span<const std::uint32_t> words,
         if (!rowCopy && (!compatibleTiling || resource.width != color.extent.width || resource.height != color.extent.height || !singleSlice || resource.mipCount != 1 || resource.baseLevel != 0 || resource.baseArray != 0 || IsBlockCompressed(resource.format) || BytesPerElement(resource.format) != color.bytesPerPixel)) {
             static int reported = 0;
             if (reported++ < 400) APS5_LOG_OUT("texture 0x%llx %ux%u format 0x%x tile %u mips %u dim %u (base level %u, base array %u, %u bpp) does not match the resident render target there (%ux%u tile %u bpp %u%s): sampled from guest memory", static_cast<unsigned long long>(resource.baseAddress), resource.width, resource.height, resource.format, static_cast<unsigned>(resource.tileMode), resource.mipCount, static_cast<unsigned>(resource.dimension), resource.baseLevel, resource.baseArray, BytesPerElement(resource.format), color.extent.width, color.extent.height, static_cast<unsigned>(color.tileMode), color.bytesPerPixel, color.gpuOnly ? ", GPU-only" : "");
+            timing.Mark("target_mismatch");
+            SlowOperationRecord_nid_no_patch("texture sampled from guest memory over a render target", 0);
             source.reset();
         }
     }
     static const bool traceTextures = std::getenv("ANYPS5_TRACE_TEXTURES") != nullptr;
     bool snapshotMiss = stores;
     if (auto it = findEntry(key, resource.viewDimension); it != entries.end()) do {
-        if (source || it->generation != 0 || !it->depthSources.empty()) {
+        if (source || it->generation != 0 || !it->depthSources.empty() || !it->targets.empty()) {
             if (source && it->source.lock() == source && it->texture->IsDirectView() && it->texture->Image() == source->Target().Image()) {
                 auto result = it->texture;
                 entries.splice(entries.end(), entries, it);

@@ -19,6 +19,7 @@
 #include <array>
 #include <bit>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <initializer_list>
 #include <iostream>
@@ -98,6 +99,12 @@ void stateTests() {
     Require(state.color.address == reinterpret_cast<std::uintptr_t>(colorMemory.data()) && state.color.bytes == colorMemory.size(), "render-target address or size changed");
     Require(state.viewport.y == 4 && state.viewport.height == -4, "negative viewport height was lost");
     Require(state.color.format == VK_FORMAT_R8G8B8A8_UNORM, "RGBA format changed");
+    Require(state.color.surfaceAddress == state.color.address && state.color.surfaceExtent.width == 64 && state.color.surfaceExtent.height == 4 && state.color.mipLevel == 0 && state.color.slice == 0, "a single-level render target did not name itself as its surface");
+    queue.context[0x31b] = 1u << 26u;
+    queue.context[0x3b0] = (1u << 28u) | (63u << 14u) | 3u;
+    const auto mip = AgcDriver::Graphics::DecodeState(queue).color;
+    Require(mip.address == state.color.address && mip.extent.width == 32 && mip.extent.height == 2 && mip.gpuOnly && mip.surfaceAddress == state.color.address && mip.surfaceExtent.width == 64 && mip.surfaceExtent.height == 4 && mip.mipLevel == 1 && mip.slice == 0, "a render target of mip 1 did not keep the base address and extent of its surface");
+    queue = makeState();
     queue.userConfig[0x24b] = 1;
     expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "GE_MULTI_PRIM_IB_RESET_EN");
     queue = makeState();
@@ -384,6 +391,16 @@ struct MockTimestamp {
     bool insidePass;
 };
 
+struct MockImageCopy {
+    VkImage source;
+    VkImageLayout sourceLayout;
+    VkImage destination;
+    VkImageLayout destinationLayout;
+    VkImageCopy region;
+    bool insidePass;
+    std::size_t barriersBefore;
+};
+
 enum class MockQuery {
     Unreset,
     Reset,
@@ -434,6 +451,7 @@ struct MockVulkan {
     std::uint32_t queryReads = 0;
     std::map<VkDeviceMemory, const void*> importedMemory;
     std::uint32_t bufferImageCopies = 0;
+    std::vector<MockImageCopy> imageCopies;
 };
 
 MockVulkan mock;
@@ -773,7 +791,9 @@ VKAPI_ATTR VkResult VKAPI_CALL mockCreateUnspecializedComputePipelines(VkDevice,
     return VK_SUCCESS;
 }
 
-VKAPI_ATTR void VKAPI_CALL mockCmdCopyImage(VkCommandBuffer, VkImage, VkImageLayout, VkImage, VkImageLayout, std::uint32_t, const VkImageCopy*) {}
+VKAPI_ATTR void VKAPI_CALL mockCmdCopyImage(VkCommandBuffer, VkImage source, VkImageLayout sourceLayout, VkImage destination, VkImageLayout destinationLayout, std::uint32_t count, const VkImageCopy* regions) {
+    for (std::uint32_t i = 0; i < count; ++i) mock.imageCopies.push_back({source, sourceLayout, destination, destinationLayout, regions[i], mock.insidePass, mock.imageBarriers.size()});
+}
 
 VKAPI_ATTR void VKAPI_CALL mockCmdCopyImageToBuffer(VkCommandBuffer, VkImage, VkImageLayout, VkBuffer, std::uint32_t, const VkBufferImageCopy*) {}
 
@@ -2670,6 +2690,158 @@ void depthDrawTests() {
     Require(mock.live == 0, "depth draws leaked Vulkan objects");
 }
 
+void setEnvironment(const char* name, const char* value) {
+#ifdef _WIN32
+    Require(_putenv_s(name, value != nullptr ? value : "") == 0, "environment update failed");
+#else
+    Require((value != nullptr ? setenv(name, value, 1) : unsetenv(name)) == 0, "environment update failed");
+#endif
+}
+
+std::vector<std::uint32_t> surfaceTextureDescriptor(std::uint64_t address, std::uint32_t format, std::uint32_t type, std::uint32_t tileMode, std::uint32_t width, std::uint32_t height, std::uint32_t baseLevel, std::uint32_t lastLevel, std::uint32_t maxMip, std::uint32_t lastArray) {
+    const auto base = address >> 8u;
+    return {static_cast<std::uint32_t>(base), static_cast<std::uint32_t>((base >> 32u) & 0xffu) | (format << 20u) | (((width - 1u) & 3u) << 30u), ((width - 1u) >> 2u) | ((height - 1u) << 14u), 0xfacu | (baseLevel << 12u) | (lastLevel << 16u) | (tileMode << 20u) | (type << 28u), lastArray, maxMip << 4u, 0u, 0u};
+}
+
+std::size_t transitionIndex(VkImage image, VkImageLayout layout, std::size_t from) {
+    for (auto index = from; index < mock.imageBarriers.size(); ++index) {
+        if (mock.imageBarriers[index].barrier.image == image && mock.imageBarriers[index].barrier.newLayout == layout) return index;
+    }
+    throw std::runtime_error("an expected image layout transition was not recorded");
+}
+
+void targetAssemblyTests() {
+    using namespace AgcDriver::Graphics;
+    mock = MockVulkan{};
+    auto context = depthContext();
+    context.formatProperties = [](VkPhysicalDevice, VkFormat, VkFormatProperties* properties) {
+        *properties = {};
+        properties->optimalTilingFeatures = VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT | VK_FORMAT_FEATURE_TRANSFER_SRC_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+    };
+    constexpr std::uint64_t chunk = 1u << 16u;
+    const std::size_t mapped = 16 * chunk;
+    void* memory = GuestMemoryBacking::GuestMemoryBackingMap_nid_postfix(nullptr, mapped, chunk, 3);
+    const auto chain = reinterpret_cast<std::uint64_t>(memory) + 2 * chunk;
+    const auto array = reinterpret_cast<std::uint64_t>(memory) + 8 * chunk;
+    const VkComponentMapping identity{VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_G, VK_COMPONENT_SWIZZLE_B, VK_COMPONENT_SWIZZLE_A};
+    const auto chainTarget = [&](std::uint32_t level) { return ColorTarget{chain, {16u >> level, 16u >> level}, VK_FORMAT_R16G16B16A16_SFLOAT, chunk, 0xe4, ColorTileMode::RenderTarget, 8, true, chain, {16, 16}, level, 0}; };
+    const auto sliceTarget = [&](std::uint32_t slice) { return ColorTarget{array + slice * chunk, {32, 32}, VK_FORMAT_R8_UNORM, chunk, 0xe4, ColorTileMode::RenderTarget, 1, true, array, {32, 32}, 0, slice}; };
+    const auto chainWords = surfaceTextureDescriptor(chain, 71, 9, 0x09, 16, 16, 0, 1, 1, 0);
+    const auto chainResource = DecodeTextureResource(chainWords);
+    {
+        TextureDetiler detiler(context);
+        context.detiler = &detiler;
+        DrawQueue queue;
+        context.drawQueue = &queue;
+        GpuColorTransfer transfer(context);
+        context.colorTransfer = &transfer;
+        RenderCache targets(context);
+        context.renderCache = &targets;
+        TextureCache cache(context);
+        context.textureCache = &cache;
+        auto level0 = targets.Get(chainTarget(0), false);
+        auto level1 = targets.Get(chainTarget(1), false);
+        Require(level0 != level1 && targets.Get(chainTarget(0), false) == level0, "render targets of two mips of one surface at one address did not stay resident together");
+        const auto commands = queue.Begin(context);
+        level0->Begin(commands);
+        level1->Begin(commands);
+        Require(targets.Find(chain) == level0, "a lookup by address did not prefer mip 0 over the other mips resident there");
+        RenderPassKey pass;
+        pass.views[pass.viewCount++] = level1->Target().View();
+        pass.extent = {8, 8};
+        mock.insidePass = true;
+        queue.OpenPass(context, pass, chain, 0);
+        const auto barriers = mock.imageBarriers.size();
+        const auto uploads = mock.bufferImageCopies;
+        auto texture = cache.Get(chainWords, chainResource, identity);
+        Require(!texture->IsDirectView() && texture->GuestMipCount() == 2 && texture->Image() != level0->Target().Image() && texture->Image() != level1->Target().Image() && mock.bufferImageCopies == uploads && mock.imageCopies.size() == 2, "a mip chain over GPU-only render targets was not assembled from them without reading guest memory");
+        Require((mock.imageUsages.at(texture->Image()) & (VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT)) == (VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT) && mock.viewImages.at(texture->View()) == texture->Image(), "the assembled image cannot take copies or be sampled through its view");
+        for (std::uint32_t level = 0; level < 2; ++level) {
+            const auto& copy = mock.imageCopies[level];
+            const auto source = (level == 0 ? level0 : level1)->Target().Image();
+            Require(copy.source == source && copy.sourceLayout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL && copy.destination == texture->Image() && copy.destinationLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL && copy.region.srcSubresource.mipLevel == 0 && copy.region.dstSubresource.mipLevel == level && copy.region.dstSubresource.baseArrayLayer == 0 && copy.region.extent.width == (16u >> level) && copy.region.extent.height == (16u >> level) && copy.region.extent.depth == 1, "a render target was not copied whole into the mip level it holds");
+            Require(!copy.insidePass, "render targets were copied inside the open render pass");
+            Require(transitionIndex(source, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, barriers) < copy.barriersBefore && transitionIndex(source, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, copy.barriersBefore) >= copy.barriersBefore, "a render target was not made a transfer source before its copy and returned to its attachment layout after it");
+        }
+        Require(level0->Layout() == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL && level1->Layout() == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, "copied render targets did not return to their attachment layout");
+        const auto into = transitionIndex(texture->Image(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, barriers);
+        const auto out = transitionIndex(texture->Image(), texture->Layout(), barriers);
+        Require(into < mock.imageCopies[0].barriersBefore && out >= mock.imageCopies[1].barriersBefore, "the assembled image was not transitioned around its copies");
+        Require(mock.imageBarriers[into].barrier.oldLayout == VK_IMAGE_LAYOUT_UNDEFINED && mock.imageBarriers[into].barrier.subresourceRange.levelCount == 2 && mock.imageBarriers[into].destinationStages == VK_PIPELINE_STAGE_TRANSFER_BIT && mock.imageBarriers[out].barrier.oldLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL && mock.imageBarriers[out].barrier.srcAccessMask == VK_ACCESS_TRANSFER_WRITE_BIT && mock.imageBarriers[out].sourceStages == VK_PIPELINE_STAGE_TRANSFER_BIT, "the assembled image was not prepared for the copies and made readable by shaders after them");
+        const auto copies = mock.imageCopies.size();
+        const auto quiet = mock.imageBarriers.size();
+        Require(cache.Get(chainWords, chainResource, identity) == texture && mock.imageCopies.size() == copies && mock.imageBarriers.size() == quiet, "an assembled texture whose render targets did not change was copied again");
+        level1->Begin(queue.Begin(context));
+        const auto update = mock.imageBarriers.size();
+        Require(cache.Get(chainWords, chainResource, identity) == texture && mock.imageCopies.size() == copies + 1 && mock.imageCopies.back().source == level1->Target().Image() && mock.imageCopies.back().region.dstSubresource.mipLevel == 1, "a render target that changed was not copied again, alone, into the same image");
+        const auto& kept = mock.imageBarriers[transitionIndex(texture->Image(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, update)];
+        Require(kept.barrier.oldLayout == texture->Layout() && kept.sourceStages == VK_PIPELINE_STAGE_ALL_COMMANDS_BIT && (kept.barrier.srcAccessMask & VK_ACCESS_SHADER_READ_BIT) != 0, "refreshing one mip discarded the others or did not wait for earlier draws that sample the image");
+        Require(level0.use_count() == 2 && level1.use_count() == 2, "the texture cache kept references to the render targets it copied");
+        const auto mipWords = surfaceTextureDescriptor(chain, 71, 9, 0x09, 16, 16, 1, 1, 1, 0);
+        auto single = cache.Get(mipWords, DecodeTextureResource(mipWords), identity);
+        Require(single != texture && mock.imageCopies.size() == copies + 2 && mock.imageCopies.back().source == level1->Target().Image() && mock.imageCopies.back().region.dstSubresource.mipLevel == 1, "a view of one mip of the chain was not assembled from the render target of that mip alone");
+        std::vector<std::shared_ptr<ResidentColor>> slices;
+        const auto sliceCommands = queue.Begin(context);
+        for (std::uint32_t slice = 0; slice < 3; ++slice) {
+            slices.push_back(targets.Get(sliceTarget(slice), false));
+            slices.back()->Begin(sliceCommands);
+        }
+        const auto arrayWords = surfaceTextureDescriptor(array, 1, 13, 0x1b, 32, 32, 0, 0, 0, 2);
+        const auto layeredCopies = mock.imageCopies.size();
+        const auto layered = cache.Get(arrayWords, DecodeTextureResource(arrayWords), identity);
+        Require(layered->GuestLayers() == 3 && mock.imageCopies.size() == layeredCopies + 3 && mock.bufferImageCopies == uploads, "a texture array over GPU-only render targets of its slices was not assembled from them");
+        for (std::uint32_t slice = 0; slice < 3; ++slice) {
+            const auto& copy = mock.imageCopies[layeredCopies + slice];
+            Require(copy.source == slices[slice]->Target().Image() && copy.destination == layered->Image() && copy.region.dstSubresource.baseArrayLayer == slice && copy.region.dstSubresource.mipLevel == 0 && copy.region.extent.width == 32 && copy.region.extent.height == 32, "a slice render target was not copied into its array layer");
+        }
+        const auto promotedAddress = array + 4 * chunk;
+        const auto promoted = targets.Get({promotedAddress, {16, 16}, VK_FORMAT_R16G16B16A16_SFLOAT, chunk, 0xe4, ColorTileMode::RenderTarget, 8, true}, false);
+        Require(targets.Get({promotedAddress, {16, 16}, VK_FORMAT_R16G16B16A16_SFLOAT, chunk, 0xe4, ColorTileMode::RenderTarget, 8, true, promotedAddress, {16, 16}, 0, 0}, false) == promoted, "a decoded render target did not reuse the target promoted from shader stores at the same memory");
+        const std::weak_ptr<Texture> replaced = texture;
+        const std::weak_ptr<ResidentColor> released = level1;
+        auto foreign = targets.Get({chain, {16, 16}, VK_FORMAT_R16G16B16A16_SFLOAT, chunk, 0xe4, ColorTileMode::RenderTarget, 8, true, chain, {32, 32}, 0, 0}, false);
+        foreign->Begin(queue.Begin(context));
+        Require(targets.Find(chain) == foreign, "a render target of another surface at the same address did not replace the mips of the chain");
+        level0.reset();
+        level1.reset();
+        texture.reset();
+        single.reset();
+        Require(cache.Get(chainWords, chainResource, identity) != replaced.lock() && mock.bufferImageCopies > uploads, "a texture whose render targets were replaced by another surface was not sampled from guest memory");
+        queue.Wait();
+        Require(released.expired() && replaced.expired(), "a released render target or a replaced assembled texture stayed alive after the batches that copied it retired");
+    }
+    setEnvironment("ANYPS5_NO_GPU_ASSEMBLY", "1");
+    {
+        TextureDetiler detiler(context);
+        context.detiler = &detiler;
+        DrawQueue queue;
+        context.drawQueue = &queue;
+        GpuColorTransfer transfer(context);
+        context.colorTransfer = &transfer;
+        RenderCache targets(context);
+        context.renderCache = &targets;
+        TextureCache cache(context);
+        context.textureCache = &cache;
+        auto level0 = targets.Get(chainTarget(0), false);
+        auto level1 = targets.Get(chainTarget(1), false);
+        level1->Begin(queue.Begin(context));
+        Require(targets.Find(chain) == level1, "ANYPS5_NO_GPU_ASSEMBLY=1 kept two mips of one surface resident at one address");
+        const auto copies = mock.imageCopies.size();
+        const auto uploads = mock.bufferImageCopies;
+        static_cast<void>(cache.Get(chainWords, chainResource, identity));
+        Require(mock.imageCopies.size() == copies && mock.bufferImageCopies > uploads, "ANYPS5_NO_GPU_ASSEMBLY=1 assembled a texture from render targets instead of sampling guest memory");
+        queue.Wait();
+    }
+    setEnvironment("ANYPS5_NO_GPU_ASSEMBLY", nullptr);
+    context.detiler = nullptr;
+    context.drawQueue = nullptr;
+    context.colorTransfer = nullptr;
+    context.renderCache = nullptr;
+    context.textureCache = nullptr;
+    GuestMemoryBacking::GuestMemoryBackingUnmap_nid_postfix(memory, mapped);
+    Require(mock.live == 0, "render target assembly leaked Vulkan objects");
+}
+
 void depthWriteTests() {
     using AgcDriver::Graphics::WritesDepthStencil;
     AgcDriver::Graphics::DepthState quiet{};
@@ -2923,6 +3095,7 @@ int main() {
         depthWriteTests();
         depthViewTests();
         depthDrawTests();
+        targetAssemblyTests();
         gpuTimestampTests();
         drawQueueTimestampTests();
         gpuTimeReportTests();

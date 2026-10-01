@@ -20,6 +20,31 @@
 
 namespace AgcDriver::Graphics {
 
+namespace {
+
+std::uint64_t SurfaceOf(const ColorTarget& color) {
+    return color.surfaceAddress != 0 ? color.surfaceAddress : color.address;
+}
+
+bool SameSurface(const ColorTarget& a, const ColorTarget& b) {
+    return SurfaceOf(a) == SurfaceOf(b) && a.surfaceExtent.width == b.surfaceExtent.width && a.surfaceExtent.height == b.surfaceExtent.height;
+}
+
+bool SameSubresource(const ColorTarget& a, const ColorTarget& b) {
+    return a.mipLevel == b.mipLevel && a.slice == b.slice && (a.surfaceExtent.width == 0 || b.surfaceExtent.width == 0 || SameSurface(a, b));
+}
+
+bool Siblings(const ColorTarget& a, const ColorTarget& b) {
+    return SameSurface(a, b) && a.surfaceExtent.width != 0 && a.bytesPerPixel == b.bytesPerPixel && a.tileMode == b.tileMode && (a.mipLevel != b.mipLevel || a.slice != b.slice) && (a.gpuOnly || b.gpuOnly);
+}
+
+}
+
+bool GpuAssembly() {
+    const char* value = std::getenv("ANYPS5_NO_GPU_ASSEMBLY");
+    return value == nullptr || value[0] == '\0' || std::strcmp(value, "0") == 0;
+}
+
 void ResidentColor::Transition(VkCommandBuffer commands, VkImageLayout next) {
     VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
     barrier.srcAccessMask = layout == VK_IMAGE_LAYOUT_UNDEFINED ? 0u : VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
@@ -236,10 +261,14 @@ std::shared_ptr<ResidentColor> RenderCache::Get(const ColorTarget& color, bool b
             ++it;
             continue;
         }
-        if (previous.address == color.address && previous.bytes == color.bytes && previous.extent.width == color.extent.width && previous.extent.height == color.extent.height && previous.format == color.format && previous.tileMode == color.tileMode) {
+        if (previous.address == color.address && previous.bytes == color.bytes && previous.extent.width == color.extent.width && previous.extent.height == color.extent.height && previous.format == color.format && previous.tileMode == color.tileMode && (!assembly || SameSubresource(previous, color))) {
             it->second->lastUse = ++useCounter;
             timing.Mark("hit");
             return it->second;
+        }
+        if (assembly && Siblings(previous, color)) {
+            ++it;
+            continue;
         }
         static const bool traceTargets = std::getenv("ANYPS5_TRACE_TARGETS") != nullptr;
         if (traceTargets) APS5_LOG_OUT("resident target 0x%llx (%ux%u, %zu bytes) released for 0x%llx (%ux%u, %zu bytes) sharing its pages", static_cast<unsigned long long>(previous.address), previous.extent.width, previous.extent.height, previous.bytes, static_cast<unsigned long long>(color.address), color.extent.width, color.extent.height, color.bytes);
@@ -250,7 +279,7 @@ std::shared_ptr<ResidentColor> RenderCache::Get(const ColorTarget& color, bool b
     if (entries.size() >= 160) {
         SlowOperationTimer full("render target cache full");
         Flush();
-        std::vector<std::map<std::uint64_t, std::shared_ptr<ResidentColor>>::iterator> candidates;
+        std::vector<Entries::iterator> candidates;
         for (auto it = entries.begin(); it != entries.end(); ++it) {
             if (it->second.use_count() == 1 && !it->second->Dirty()) candidates.push_back(it);
         }
@@ -569,8 +598,17 @@ std::string RenderCache::DescribeDepthTargets() const {
 }
 
 std::shared_ptr<ResidentColor> RenderCache::Find(std::uint64_t address) const {
-    const auto it = entries.find(address);
-    if (it == entries.end()) return nullptr;
+    const auto [first, last] = entries.equal_range(address);
+    if (first == last) return nullptr;
+    auto it = first;
+    for (auto candidate = first; candidate != last; ++candidate) {
+        const auto& color = candidate->second->Description();
+        if (color.mipLevel == 0 && color.slice == 0) {
+            it = candidate;
+            break;
+        }
+        if (candidate->second->lastUse > it->second->lastUse) it = candidate;
+    }
     const auto& entry = it->second;
     const auto bytes = entry->Description().bytes;
     if (!entry->Description().gpuOnly && context.drawQueue && context.drawQueue->WritesPending(address, bytes, entry->AdoptedThrough())) {
@@ -584,6 +622,16 @@ std::shared_ptr<ResidentColor> RenderCache::Find(std::uint64_t address) const {
         }
     }
     return entry->Valid() ? entry : nullptr;
+}
+
+void RenderCache::SurfaceTargets(std::uint64_t surfaceAddress, std::vector<std::shared_ptr<ResidentColor>>& targets) const {
+    for (auto it = entries.lower_bound(surfaceAddress); it != entries.end(); ++it) {
+        if (SurfaceOf(it->second->Description()) != surfaceAddress) {
+            if (it->first != surfaceAddress) break;
+            continue;
+        }
+        if (it->second->Valid()) targets.push_back(it->second);
+    }
 }
 
 void RenderCache::Resolve(std::uint64_t address, std::size_t bytes, bool writable) {

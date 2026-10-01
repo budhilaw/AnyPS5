@@ -544,6 +544,10 @@ State DecodeState(const QueueState& queue) {
         const auto high = read(cx, 0x390 + n);
         Require((high & ~0xffu) == 0, "invalid color address extension");
         target.address = (static_cast<std::uint64_t>(high) << 40u) | (static_cast<std::uint64_t>(read(cx, cbReg(0x318))) << 8u);
+        target.surfaceAddress = target.address;
+        target.surfaceExtent = baseExtent;
+        target.mipLevel = mipLevel;
+        target.slice = sliceStart;
         target.format = colorFormat.format;
         target.bytesPerPixel = colorFormat.bytesPerPixel;
         const auto checkRange = [&](std::size_t alignment) {

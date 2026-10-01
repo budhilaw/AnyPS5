@@ -38,6 +38,10 @@ private:
         bool stored = false;
         bool stale = false;
     };
+    struct TargetSource {
+        std::weak_ptr<ResidentColor> target;
+        std::uint64_t generation = 0;
+    };
     struct Entry {
         std::array<std::uint32_t, 8> descriptor;
         TextureDimension viewDimension;
@@ -49,12 +53,15 @@ private:
         std::uint64_t retained = 0;
         bool compare = false;
         bool depthView = false;
+        std::vector<TargetSource> targets;
     };
     void trim();
     std::list<Entry>::iterator eraseEntry(std::list<Entry>::iterator it);
     std::list<Entry>::iterator findEntry(const std::array<std::uint32_t, 8>& descriptor, TextureDimension viewDimension, bool compare = false, bool depthView = false);
     void addEntry(Entry entry);
     bool depthResident(const Entry& entry) const;
+    static bool targetsResident(const Entry& entry);
+    std::shared_ptr<Texture> assembled(const std::array<std::uint32_t, 8>& key, const GuestTextureResource& resource, VkComponentMapping components, PerformanceTimer& timing);
     bool refresh(Surface& surface, std::uint64_t address, bool track);
     std::shared_ptr<Texture> hostTexture(const GuestTextureResource& resource, VkComponentMapping components, std::uint64_t bytes, std::uint64_t stamp);
     bool hostReadable(std::uint64_t address, std::uint64_t bytes);
@@ -69,6 +76,7 @@ private:
     std::map<std::pair<TextureDimension, TextureNumericClass>, std::shared_ptr<Texture>> storageNulls;
     std::uint64_t retainedBytes = 0;
     std::uint64_t budget;
+    bool assembly;
     static constexpr std::size_t maxEntries = 8192;
     static constexpr std::uint32_t VolatileUses = 8;
     static constexpr std::uint32_t VolatileProbe = 64;
