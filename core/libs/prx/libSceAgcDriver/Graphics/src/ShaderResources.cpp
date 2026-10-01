@@ -389,7 +389,7 @@ void ShaderResources::addImageBinding(const ShaderRecompiler::DescriptorBinding&
                 std::snprintf(message, sizeof(message), "AGC graphics: storage image 0x%llx (%ux%u format 0x%x tile %u dimension %u mips %u) does not support shader stores", static_cast<unsigned long long>(resource.baseAddress), resource.width, resource.height, resource.format, static_cast<unsigned>(resource.tileMode), static_cast<unsigned>(resource.dimension), resource.mipCount);
                 reportFallback("texture", words, message, "a null texture");
                 texture = nullTexture(nullDimension(shape));
-            } else if (storageImage) {
+            } else if (storageImage && !binding.readOnly) {
                 texture->MarkStored();
                 storesImages = true;
             }
