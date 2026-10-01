@@ -154,6 +154,7 @@ std::uint32_t SuppliedCoordinateComponents(SpirvValueEmitContext& ctx, const Ima
     if (supplied < components && !reported.exchange(true, std::memory_order_relaxed)) {
         const auto opcode = IrOpcodeName(access.inst.Opcode());
         std::fprintf(stderr, "SPIR-V emission: hash=0x%016llx opcode=%.*s supplies %u of %u image coordinate components; the missing ones read as zero\n", static_cast<unsigned long long>(ctx.state.program.Resources().shaderHash), static_cast<int>(opcode.size()), opcode.data(), supplied, components);
+        std::fflush(stderr);
     }
     return supplied;
 }

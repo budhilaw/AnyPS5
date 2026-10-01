@@ -513,11 +513,13 @@ void traceVariant(const RecompileRequest& request, const SourceEntry& source, co
     const bool recreated = std::find(source.evictedKeys.begin(), source.evictedKeys.end(), key) != source.evictedKeys.end();
     const auto change = describeChange(*nearest, created);
     std::fprintf(stderr, "shader recompiler: %s program 0x%llx code hash 0x%016llx compiles variant %llu%s (%zu resident, %llu evicted); variant %llu differs in%s\n", stageName(request.shader.stage), static_cast<unsigned long long>(request.shader.codeAddress), static_cast<unsigned long long>(request.shader.codeHash), static_cast<unsigned long long>(created.ordinal), recreated ? " again after evicting it" : "", source.variants.size(), static_cast<unsigned long long>(source.evicted), static_cast<unsigned long long>(nearest->ordinal), change.empty() ? " nothing" : change.c_str() + 1);
+    std::fflush(stderr);
 }
 
 void traceEviction(const RecompileRequest& request, SourceEntry& source, const CompiledVariant& evicted) {
     source.evictedKeys.push_back(variantKey(evicted.layout, evicted.specialization));
     std::fprintf(stderr, "shader recompiler: %s program 0x%llx code hash 0x%016llx evicts variant %llu, the least recently used of %zu\n", stageName(request.shader.stage), static_cast<unsigned long long>(request.shader.codeAddress), static_cast<unsigned long long>(request.shader.codeHash), static_cast<unsigned long long>(evicted.ordinal), source.variants.size());
+    std::fflush(stderr);
 }
 
 RecompileResult RecompileImpl(const RecompileRequest& request) {

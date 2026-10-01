@@ -166,6 +166,7 @@ void reportReshapedImage(ImageType type, RdnaImageDimension instruction) {
         return;
     }
     std::fprintf(stderr, "shader recompiler: %s image descriptors read by %s image instructions are specialized to the instruction's dimension\n", imageTypeName(type), RdnaImageDimensionToString(instruction));
+    std::fflush(stderr);
 }
 
 bool validImageDescriptor(const DescriptorValue& descriptor, bool r128) {
