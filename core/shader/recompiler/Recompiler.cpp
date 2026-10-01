@@ -267,6 +267,7 @@ CompiledVariant compileVariant(const RecompileRequest& request, IrProgram progra
     targetOptions.maxWorkgroupSize = request.target.maxWorkgroupSize;
     targetOptions.maxWorkgroupInvocations = request.target.maxWorkgroupInvocations;
     targetOptions.dualLaneWave64 = request.target.dualLaneWave64 || dualLaneWave64Forced();
+    targetOptions.bdaSingleCache = request.target.bdaSingleCache || BdaSingleCacheForced();
 
     constexpr SpirvEmitter spirvEmitter;
     RecompileResult result;
@@ -593,6 +594,11 @@ RecompileResult RecompileImpl(const RecompileRequest& request) {
     return result;
 }
 
+}
+
+bool BdaSingleCacheForced() {
+    static const bool forced = std::getenv("ANYPS5_BDA_SINGLE_CACHE") != nullptr;
+    return forced;
 }
 
 std::shared_ptr<const IrResourcePlan> GetResourcePlan(const RecompileRequest& request, std::shared_ptr<void>* source) {

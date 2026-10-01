@@ -23,6 +23,7 @@ struct SpirvTargetOptions {
     std::array<std::uint32_t, 3> maxWorkgroupSize {};
     std::uint32_t maxWorkgroupInvocations = 0;
     bool dualLaneWave64 = false;
+    bool bdaSingleCache = false;
 };
 
 class SpirvEmitter {

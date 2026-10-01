@@ -1,4 +1,5 @@
 #include "SpirvBackend/SpirvModuleEmitter.hpp"
+#include "SpirvBackend/SpirvBda.hpp"
 #include "SpirvBackend/SpirvEmitterHelpers.hpp"
 #include "SpirvBackend/SpirvEmitterInstructions.hpp"
 #include "SpirvBackend/SpirvFlowEmitter.hpp"
@@ -841,7 +842,12 @@ void EmitProgram(SpirvEmitterState& state) {
         const auto label = state.module.AllocateId();
         state.labels.emplace(block, label);
     }
-    DefineGetBdaPointer(state);
+    if (state.bdaSingleCache) {
+        DefineGetBdaPointer(state);
+    } else {
+        PlanBdaReads(state);
+        DefineBdaFunctions(state);
+    }
     for (const IrBlock* block : program.BlockOrder()) {
         const bool needsScratch = std::any_of(block->Instructions().begin(), block->Instructions().end(), [](const IrValue* inst) {
             return inst->Opcode() == IrOpcode::SwizzleU32 || inst->Opcode() == IrOpcode::SharedAtomicFMin32 || inst->Opcode() == IrOpcode::SharedAtomicFMax32;

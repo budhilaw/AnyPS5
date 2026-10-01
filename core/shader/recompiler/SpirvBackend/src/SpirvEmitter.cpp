@@ -280,6 +280,7 @@ std::vector<std::uint32_t> SpirvEmitter::Emit(const IrProgram& program, const Sh
     ValidateProgram(program, true);
     ValidateBdaTarget(program, target);
     SpirvEmitterState state(program, inputInfo);
+    state.bdaSingleCache = target.bdaSingleCache;
     state.module.RequireVersion(target.spirvVersion);
     const auto* workgroup = ShaderWorkgroupInputFor(state);
     state.laneCount = WaveLaneCount(program, workgroup, state.requirements, target);

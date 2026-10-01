@@ -140,6 +140,7 @@ struct SpirvTarget {
     std::optional<TessellationTargetLimits> tessellation;
     std::uint32_t subgroupStageMask = 0xffffffffu;
     bool dualLaneWave64 = false;
+    bool bdaSingleCache = false;
 };
 
 struct BindingLayout {
@@ -315,6 +316,7 @@ struct RecompileResult {
 
 [[nodiscard]] RecompileResult Recompile(const RecompileRequest& request);
 [[nodiscard]] RecompileResult RecompileSerialized(std::string_view request);
+[[nodiscard]] bool BdaSingleCacheForced();
 
 struct RectListShaders {
     RecompileResult control;

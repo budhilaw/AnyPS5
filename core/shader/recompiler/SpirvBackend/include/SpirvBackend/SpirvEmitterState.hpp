@@ -67,6 +67,24 @@ struct MemoryResourceAccess {
     bool addIndexOffset = false;
 };
 
+struct BdaCacheSlot {
+    std::uint32_t begin = 0;
+    std::uint32_t end = 0;
+    std::uint32_t delta = 0;
+};
+
+struct BdaReadGroup {
+    std::uint32_t slot = 0;
+    std::uint32_t bits = 32;
+    std::uint32_t pc = 0;
+    std::vector<std::int64_t> immediates;
+};
+
+struct BdaPlannedRead {
+    std::vector<const IrValue*> members;
+    BdaReadGroup group;
+};
+
 struct SpirvEmitterState {
     SpirvEmitterState(const IrProgram& program, const ShaderStageInputInfo& inputInfo);
 
@@ -92,6 +110,17 @@ struct SpirvEmitterState {
     std::uint32_t bdaCacheBegin = 0;
     std::uint32_t bdaCacheEnd = 0;
     std::uint32_t bdaCacheBase = 0;
+    bool bdaSingleCache = false;
+    std::uint32_t bdaMissCounterVariable = 0;
+    std::uint32_t bdaFaultFunction = 0;
+    std::uint32_t bdaFindFunction = 0;
+    std::uint32_t bdaWindowType = 0;
+    std::array<std::uint32_t, 3> bdaReadFunctions {};
+    std::uint32_t bdaReadWidths = 0;
+    std::uint32_t bdaSlotCount = 0;
+    std::vector<BdaCacheSlot> bdaSlots;
+    std::vector<BdaPlannedRead> bdaReads;
+    std::unordered_map<const IrValue*, std::size_t> bdaReadIndex;
     std::uint32_t gdsVariable = 0;
     std::uint32_t gdsLength = 0;
     std::uint32_t pushConstantVariable = 0;

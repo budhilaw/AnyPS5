@@ -251,7 +251,59 @@ std::uint32_t GuestAddress(SpirvValueEmitContext& ctx, const IrValue& inst, cons
     return AddBdaAddress(ctx, inst, address, ConstantDeviceAddress(state, static_cast<std::uint64_t>(magnitude)), immediate < 0);
 }
 
+BdaLaneAddress GuestLaneAddress(SpirvValueEmitContext& ctx, const IrValue& inst, const MemoryInfo& mem) {
+    auto& state = ctx.state;
+    BdaLaneAddress lane;
+    lane.active = AlwaysActive(inst) ? 0u : ActiveArgument(ctx, inst);
+    auto low = ctx.Arg(inst, 1);
+    if (mem.kind == ResourceKind::ScalarAddress) {
+        low = Binary(state, spv::OpBitwiseAnd, TypeU32(state), low, ConstantU32(state, ~3u));
+    }
+    if (mem.addressIsFull) {
+        lane.base = DeviceAddressFromWords(state, low, ctx.Arg(inst, 2));
+        return lane;
+    }
+    const IrValue* argument = inst.Argument(0);
+    const IrValue* handle = argument != nullptr ? argument->Resolve() : nullptr;
+    if (handle == nullptr || handle->Opcode() != IrOpcode::GetAddressResource || handle->ArgumentCount() != 2u) {
+        ctx.Fail(inst, "has no address base pair");
+    }
+    lane.base = DeviceAddressFromWords(state, ctx.Arg(*handle, 0), ctx.Arg(*handle, 1));
+    lane.offset = Unary(state, spv::OpUConvert, TypeScalarU64(state), low);
+    return lane;
+}
+
+std::uint32_t LoadPlannedBda(SpirvValueEmitContext& ctx, const IrValue& inst, const MemoryInfo& mem) {
+    auto& state = ctx.state;
+    const auto found = state.bdaReadIndex.find(&inst);
+    if (found == state.bdaReadIndex.end()) {
+        ctx.Fail(inst, "has no planned BDA read");
+    }
+    const auto& read = state.bdaReads[found->second];
+    if (read.members.front() != &inst || ctx.half != 0u) {
+        return ctx.Result(inst);
+    }
+    std::vector<SpirvValueEmitContext*> contexts{&ctx};
+    if (ctx.otherHalf != nullptr) {
+        contexts.push_back(ctx.otherHalf);
+    }
+    std::vector<BdaLaneAddress> lanes;
+    for (auto* lane : contexts) {
+        lanes.push_back(GuestLaneAddress(*lane, inst, mem));
+    }
+    const auto values = EmitBdaGroupRead(state, read.group, lanes);
+    for (std::size_t lane = 0; lane < contexts.size(); ++lane) {
+        for (std::size_t member = 0; member < read.members.size(); ++member) {
+            contexts[lane]->Define(*read.members[member], values[lane][member]);
+        }
+    }
+    return values.front().front();
+}
+
 std::uint32_t LoadBda(SpirvValueEmitContext& ctx, const IrValue& inst, const MemoryInfo& mem, std::uint32_t bits) {
+    if (!ctx.state.bdaSingleCache) {
+        return LoadPlannedBda(ctx, inst, mem);
+    }
     return WordWhenActive(ctx, inst, [&]() {
         return EmitBdaRead(ctx, inst, GuestAddress(ctx, inst, mem), bits);
     });
