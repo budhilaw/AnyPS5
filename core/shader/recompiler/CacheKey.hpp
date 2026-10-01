@@ -144,6 +144,7 @@ private:
         append(key, value.mesh);
         append(key, value.tessellation);
         append(key, value.subgroupStageMask);
+        append(key, value.dualLaneWave64);
     }
 };
 

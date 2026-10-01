@@ -233,6 +233,11 @@ std::shared_ptr<SourceEntry> getSource(const RecompileRequest& request) {
     return source;
 }
 
+bool dualLaneWave64Forced() {
+    static const bool forced = std::getenv("ANYPS5_DUAL_LANE") != nullptr;
+    return forced;
+}
+
 CompiledVariant compileVariant(const RecompileRequest& request, IrProgram program, const ResourceSnapshot& resourceSnapshot, const ResourceSpecialization& resourceSpecialization) {
     const auto inputInfo = BuildShaderStageInputInfo(toShaderStageKind(request.shader.stage), request.context, request.target.subgroupSize);
     constexpr DeadCodeEliminator deadCodeEliminator;
@@ -259,10 +264,14 @@ CompiledVariant compileVariant(const RecompileRequest& request, IrProgram progra
     targetOptions.supportedCapabilities = request.target.supportedCapabilities;
     targetOptions.supportedExtensions = request.target.supportedExtensions;
     targetOptions.subgroupStageMask = request.target.subgroupStageMask;
+    targetOptions.maxWorkgroupSize = request.target.maxWorkgroupSize;
+    targetOptions.maxWorkgroupInvocations = request.target.maxWorkgroupInvocations;
+    targetOptions.dualLaneWave64 = request.target.dualLaneWave64 || dualLaneWave64Forced();
 
     constexpr SpirvEmitter spirvEmitter;
     RecompileResult result;
     result.spirv = spirvEmitter.Emit(program, inputInfo, bindings, targetOptions);
+    result.lanesPerInvocation = LanesPerInvocation(program, inputInfo, targetOptions);
 
 #if ANYPS5_ENABLE_SPIRV_TOOLS
     result.spirv = ValidateAndOptimizeSpirv(result.spirv, request.target.vulkanVersion, request.target.spirvVersion);

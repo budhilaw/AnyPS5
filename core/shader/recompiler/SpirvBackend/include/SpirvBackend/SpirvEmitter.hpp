@@ -4,6 +4,7 @@
 #include "IntermediateRepresentation/IrProgram.hpp"
 #include "Optimization/BindingAllocator.hpp"
 #include "Optimization/ShaderStageInputInfo.hpp"
+#include <array>
 #include <cstdint>
 #include <vector>
 #include <span>
@@ -19,6 +20,9 @@ struct SpirvTargetOptions {
     std::span<const std::uint32_t> supportedCapabilities;
     std::span<const std::string_view> supportedExtensions;
     std::uint32_t subgroupStageMask = 0xffffffffu;
+    std::array<std::uint32_t, 3> maxWorkgroupSize {};
+    std::uint32_t maxWorkgroupInvocations = 0;
+    bool dualLaneWave64 = false;
 };
 
 class SpirvEmitter {
@@ -27,6 +31,8 @@ public:
     [[nodiscard]] std::vector<std::uint32_t> Emit(const IrProgram& program, const ShaderStageInputInfo& inputInfo, const BindingAllocationResult& bindings, const SpirvTargetOptions& target) const;
 
 };
+
+[[nodiscard]] std::uint32_t LanesPerInvocation(const IrProgram& program, const ShaderStageInputInfo& inputInfo, const SpirvTargetOptions& target);
 
 }
 

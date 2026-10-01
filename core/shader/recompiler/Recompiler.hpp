@@ -139,6 +139,7 @@ struct SpirvTarget {
     std::optional<MeshTargetLimits> mesh;
     std::optional<TessellationTargetLimits> tessellation;
     std::uint32_t subgroupStageMask = 0xffffffffu;
+    bool dualLaneWave64 = false;
 };
 
 struct BindingLayout {
@@ -309,6 +310,7 @@ struct RecompileResult {
     std::vector<FragmentParameter> fragmentParameters;
     std::uint32_t unresolvedImages = 0;
     bool cacheHit = false;
+    std::uint32_t lanesPerInvocation = 1;
 };
 
 [[nodiscard]] RecompileResult Recompile(const RecompileRequest& request);

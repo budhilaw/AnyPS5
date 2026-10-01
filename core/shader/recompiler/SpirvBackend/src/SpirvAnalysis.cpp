@@ -56,6 +56,7 @@ SpirvRequirements AnalyzeProgramRequirements(const IrProgram& program) {
                 if (program.Resources().stage != IrShaderStage::Compute && program.Resources().stage != IrShaderStage::Mesh && kind == ResourceKind::Lds) {
                     requirements.functionLds = true;
                 }
+                requirements.sharedMemory = true;
                 if (sharedAccess == SharedAccess::Append || sharedAccess == SharedAccess::Consume) {
                     requirements.subgroupBallot = true;
                     requirements.subgroupShuffle = true;
@@ -65,6 +66,9 @@ SpirvRequirements AnalyzeProgramRequirements(const IrProgram& program) {
             switch (inst->Opcode()) {
             case IrOpcode::Ballot:
                 requirements.subgroupBallot = true;
+                break;
+            case IrOpcode::Barrier:
+                requirements.workgroupBarrier = true;
                 break;
             case IrOpcode::DppMoveU32:
             case IrOpcode::ReadFirstLane:

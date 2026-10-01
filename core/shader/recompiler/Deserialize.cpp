@@ -77,6 +77,10 @@ struct ReplayState {
     std::size_t knownRejections = 0;
     std::size_t duplicates = 0;
     std::size_t unchanged = 0;
+    std::size_t singleLaneRequests = 0;
+    std::size_t dualLaneRequests = 0;
+    std::unordered_set<std::uint64_t> singleLanePrograms;
+    std::unordered_set<std::uint64_t> dualLanePrograms;
     double milliseconds = 0.0;
 };
 
@@ -130,7 +134,7 @@ std::uint64_t EntryKey(std::string_view payload) {
 }
 
 std::uint64_t HashMetadata(const RecompileResult& result) {
-    const auto& [spirv, spirvHash, bindings, pushConstants, bdaAbiVersion, vertexAttributes, vertexOffsetSgpr, instanceOffsetSgpr, parameterExports, fragmentParameters, unresolvedImages, cacheHit] = result;
+    const auto& [spirv, spirvHash, bindings, pushConstants, bdaAbiVersion, vertexAttributes, vertexOffsetSgpr, instanceOffsetSgpr, parameterExports, fragmentParameters, unresolvedImages, cacheHit, lanesPerInvocation] = result;
     Hasher hash;
     hash.Add(bindings.size());
     for (const auto& [kind, role, descriptorSet, binding, count, guestDescriptor, readOnly, elementWritten, elementOptional, elementRead, imageShape, samplerDepthCompare, imageDepthCompare] : bindings) {
@@ -389,7 +393,13 @@ void Replay(std::string_view payload, ReplayState& state) {
             WriteFile(state.options.spirvDirectory + "/" + name + ".spv", result.spirv.data(), result.spirv.size() * sizeof(std::uint32_t));
         }
         const auto rejection = Validate(state, request, result);
-        std::printf("ok, %zu SPIR-V words, SPIR-V hash 0x%016llx, metadata hash 0x%016llx, %zu bindings, %.1f ms%s\n", result.spirv.size(), static_cast<unsigned long long>(entry.spirvHash), static_cast<unsigned long long>(entry.metadataHash), result.bindings.size(), milliseconds, result.cacheHit ? ", cache hit" : "");
+        const bool wave64OnHalfSubgroup = request.shader.stage == ShaderStage::Compute && request.context.waveSize == 64u && request.target.subgroupSize == 32u;
+        const bool singleLane = result.lanesPerInvocation == 1u;
+        if (wave64OnHalfSubgroup) {
+            ++(singleLane ? state.singleLaneRequests : state.dualLaneRequests);
+            (singleLane ? state.singleLanePrograms : state.dualLanePrograms).insert(request.shader.codeHash);
+        }
+        std::printf("ok, %zu SPIR-V words, SPIR-V hash 0x%016llx, metadata hash 0x%016llx, %zu bindings, %.1f ms%s%s\n", result.spirv.size(), static_cast<unsigned long long>(entry.spirvHash), static_cast<unsigned long long>(entry.metadataHash), result.bindings.size(), milliseconds, !wave64OnHalfSubgroup ? "" : singleLane ? ", single-lane wave64" : ", dual-lane wave64", result.cacheHit ? ", cache hit" : "");
         Compare(state, key, entry, label);
         if (!rejection.empty()) {
             const bool known = state.baselineModules.contains(entry.spirvHash);
@@ -514,6 +524,9 @@ int Report(ReplayState& state, double totalMilliseconds) {
     if (!options.writeBaselinePath.empty()) {
         WriteBaseline(options.writeBaselinePath, state.compiled);
         std::printf("wrote the hashes of %zu request(s) to %s\n", state.compiled.size(), options.writeBaselinePath.c_str());
+    }
+    if (state.singleLaneRequests + state.dualLaneRequests != 0u) {
+        std::printf("wave64 compute on a 32-wide subgroup: %zu request(s) of %zu program(s) compiled single-lane, %zu request(s) of %zu program(s) dual-lane\n", state.singleLaneRequests, state.singleLanePrograms.size(), state.dualLaneRequests, state.dualLanePrograms.size());
     }
     const auto newRejections = state.rejected - state.knownRejections;
     std::printf("%zu requests: %zu compiled, %zu failed, %zu newly rejected by spirv-val, %zu changed, %zu over budget, %zu duplicates skipped; %.1f ms compiling, %.1f s in total\n", state.requests, state.requests - state.failures, state.failures, newRejections, state.changes.size(), overBudget, state.duplicates, state.milliseconds, totalMilliseconds / 1000.0);

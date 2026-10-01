@@ -6,6 +6,7 @@
 #include "SpirvBackend/SpirvMemory/SpirvModuleSetup.hpp"
 #include <spirv/unified1/GLSL.std.450.h>
 #include <spirv/unified1/spirv.hpp>
+#include <algorithm>
 #include <bit>
 #include <cstdint>
 #include <cstdio>
@@ -44,6 +45,56 @@ const ShaderWorkgroupInputInfo* ShaderWorkgroupInputFor(const SpirvEmitterState&
     }
 }
 
+const ShaderWorkgroupInputInfo* WorkgroupInputOf(const IrProgram& program, const ShaderStageInputInfo& inputInfo) {
+    switch (program.Resources().stage) {
+    case IrShaderStage::Compute:
+        return inputInfo.compute;
+    case IrShaderStage::Mesh:
+        return inputInfo.vertex != nullptr ? &inputInfo.vertex->mesh : nullptr;
+    default:
+        return nullptr;
+    }
+}
+
+bool Wave64OnHalfSubgroup(const IrProgram& program, const ShaderWorkgroupInputInfo* workgroup) {
+    return workgroup != nullptr && program.WaveSize() == 64u && workgroup->hostSubgroupSize == 32u;
+}
+
+bool FitsWorkgroupLimits(const ShaderWorkgroupInputInfo& workgroup, const SpirvTargetOptions& target) {
+    std::uint64_t invocations = 1u;
+    for (std::size_t axis = 0; axis < target.maxWorkgroupSize.size(); axis++) {
+        const std::uint32_t size = std::max(workgroup.threadsNum[axis], 1u);
+        if (size > target.maxWorkgroupSize[axis]) {
+            return false;
+        }
+        invocations *= size;
+    }
+    return invocations <= target.maxWorkgroupInvocations;
+}
+
+bool BranchesOnVcc(const IrProgram& program) {
+    return std::ranges::any_of(program.Metadata().blockInfo, [](const BlockInfo& info) {
+        return info.terminator.kind == TerminatorKind::ConditionalBranch && (info.terminator.condition == BranchCondition::VccZero || info.terminator.condition == BranchCondition::VccNonZero);
+    });
+}
+
+std::uint32_t WaveLaneCount(const IrProgram& program, const ShaderWorkgroupInputInfo* workgroup, const SpirvRequirements& requirements, const SpirvTargetOptions& target) {
+    if (!Wave64OnHalfSubgroup(program, workgroup)) {
+        return 1u;
+    }
+    const bool observesWave = requirements.subgroupBallot || requirements.subgroupShuffle || requirements.subgroupLocalInvocationId || requirements.computeDerivatives || requirements.sharedMemory || requirements.workgroupBarrier || BranchesOnVcc(program);
+    const bool singleLane = !target.dualLaneWave64 && program.Resources().stage == IrShaderStage::Compute && !observesWave && FitsWorkgroupLimits(*workgroup, target);
+    return singleLane ? 1u : 2u;
+}
+
+}
+
+std::uint32_t LanesPerInvocation(const IrProgram& program, const ShaderStageInputInfo& inputInfo, const SpirvTargetOptions& target) {
+    const auto* workgroup = WorkgroupInputOf(program, inputInfo);
+    if (!Wave64OnHalfSubgroup(program, workgroup)) {
+        return 1u;
+    }
+    return WaveLaneCount(program, workgroup, AnalyzeProgramRequirements(program), target);
 }
 
 SpirvEmitterState::SpirvEmitterState(const IrProgram& program, const ShaderStageInputInfo& inputInfo) : module(program.Resources().stage == IrShaderStage::Mesh ? 0x00010400u : 0x00010300u), program(program), inputInfo(inputInfo), requirements(AnalyzeProgramRequirements(program)) {
@@ -231,7 +282,7 @@ std::vector<std::uint32_t> SpirvEmitter::Emit(const IrProgram& program, const Sh
     SpirvEmitterState state(program, inputInfo);
     state.module.RequireVersion(target.spirvVersion);
     const auto* workgroup = ShaderWorkgroupInputFor(state);
-    state.laneCount = workgroup != nullptr && program.WaveSize() == 64u && workgroup->hostSubgroupSize == 32u ? 2u : 1u;
+    state.laneCount = WaveLaneCount(program, workgroup, state.requirements, target);
     {
         const auto stageBit = [&]() -> std::uint32_t {
             switch (program.Resources().stage) {
