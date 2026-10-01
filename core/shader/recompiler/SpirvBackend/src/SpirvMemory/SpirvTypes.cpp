@@ -116,6 +116,22 @@ std::uint32_t TypeStorageBufferU64ElementPointer(SpirvEmitterState& state) {
     return TypePointer(state, spv::StorageClassStorageBuffer, TypeScalarU64(state));
 }
 
+std::uint32_t TypeStorageBufferVectorBlock(SpirvEmitterState& state, std::uint32_t components) {
+    const auto array = state.module.DecoratedType(spv::OpTypeRuntimeArray, {{spv::OpDecorate, {spv::DecorationArrayStride, components * 4u}}}, TypeU32Vector(state, components));
+    return state.module.DecoratedType(spv::OpTypeStruct,
+        {{spv::OpDecorate, {spv::DecorationBlock}},
+         {spv::OpMemberDecorate, {0, spv::DecorationOffset, 0}}},
+        array);
+}
+
+std::uint32_t TypeStorageBufferVectorPointer(SpirvEmitterState& state, std::uint32_t components) {
+    return TypePointer(state, spv::StorageClassStorageBuffer, TypeStorageBufferVectorBlock(state, components));
+}
+
+std::uint32_t TypeStorageBufferVectorElementPointer(SpirvEmitterState& state, std::uint32_t components) {
+    return TypePointer(state, spv::StorageClassStorageBuffer, TypeU32Vector(state, components));
+}
+
 std::uint32_t TypePhysicalU32Pointer(SpirvEmitterState& state) {
     return TypePointer(state, spv::StorageClassPhysicalStorageBuffer, TypeU32(state));
 }

@@ -1,11 +1,13 @@
 #include "SpirvBackend/SpirvBda.hpp"
 #include "SpirvBackend/SpirvEmitterInstructions.hpp"
 #include "SpirvBackend/SpirvBufferFormat.hpp"
+#include "SpirvBackend/SpirvMemory/SpirvTypes.hpp"
 #include <spirv/unified1/spirv.hpp>
 #include <algorithm>
 #include <array>
 #include <cstdint>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 namespace ShaderRecompiler {
@@ -102,6 +104,58 @@ std::uint32_t ActiveArgument(SpirvValueEmitContext& ctx, const IrValue& inst) {
     return ctx.Arg(inst, inst.ArgumentCount() - 1u);
 }
 
+bool AlwaysActive(const IrValue& inst) {
+    const IrValue* active = inst.Argument(inst.ArgumentCount() - 1u)->Resolve();
+    return active != nullptr && active->HasImmediate() && active->Type() == IrType::Bool && active->ImmediateBool();
+}
+
+template<typename TFunction>
+std::uint32_t ValueWhenActive(SpirvValueEmitContext& ctx, const IrValue& inst, std::uint32_t type, std::uint32_t inactive, TFunction&& function) {
+    if (AlwaysActive(inst)) {
+        return function();
+    }
+    return EmitValueOrDefaultIfCondition(ctx.state, ActiveArgument(ctx, inst), type, inactive, std::forward<TFunction>(function));
+}
+
+template<typename TFunction>
+std::uint32_t WordWhenActive(SpirvValueEmitContext& ctx, const IrValue& inst, TFunction&& function) {
+    return ValueWhenActive(ctx, inst, TypeU32(ctx.state), ConstantU32(ctx.state, 0u), std::forward<TFunction>(function));
+}
+
+template<typename TFunction>
+void IfActive(SpirvValueEmitContext& ctx, const IrValue& inst, TFunction&& function) {
+    if (AlwaysActive(inst)) {
+        function();
+        return;
+    }
+    EmitIfCondition(ctx.state, ActiveArgument(ctx, inst), std::forward<TFunction>(function));
+}
+
+template<typename TThen, typename TElse>
+std::uint32_t EmitValueIfElse(SpirvEmitterState& state, std::uint32_t condition, std::uint32_t type, TThen&& thenFunction, TElse&& elseFunction) {
+    const auto thenLabel = state.module.AllocateId();
+    const auto thenExit = state.module.AllocateId();
+    const auto elseLabel = state.module.AllocateId();
+    const auto elseExit = state.module.AllocateId();
+    const auto mergeLabel = state.module.AllocateId();
+    state.module.AddFunction(spv::OpSelectionMerge, mergeLabel, spv::SelectionControlMaskNone);
+    state.module.AddFunction(spv::OpBranchConditional, condition, thenLabel, elseLabel);
+    EmitLabel(state, thenLabel);
+    const auto thenValue = thenFunction();
+    state.module.AddFunction(spv::OpBranch, thenExit);
+    EmitLabel(state, thenExit);
+    state.module.AddFunction(spv::OpBranch, mergeLabel);
+    EmitLabel(state, elseLabel);
+    const auto elseValue = elseFunction();
+    state.module.AddFunction(spv::OpBranch, elseExit);
+    EmitLabel(state, elseExit);
+    state.module.AddFunction(spv::OpBranch, mergeLabel);
+    EmitLabel(state, mergeLabel);
+    const auto value = state.module.AllocateId();
+    state.module.AddFunction(spv::OpPhi, type, value, thenValue, thenExit, elseValue, elseExit);
+    return value;
+}
+
 std::uint32_t LoadWordInBounds(SpirvValueEmitContext& ctx, const MemoryResourceAccess& resource, std::uint32_t index) {
     auto& state = ctx.state;
     const auto pointer = EmitMemoryElementPointer(state, resource, index);
@@ -135,7 +189,7 @@ std::uint32_t LoadWordPrepared(SpirvValueEmitContext& ctx, const IrValue& inst, 
 }
 
 std::uint32_t LoadWord(SpirvValueEmitContext& ctx, const IrValue& inst, const MemoryInfo& mem) {
-    return EmitValueOrZeroIfCondition(ctx.state, ActiveArgument(ctx, inst), [&]() {
+    return WordWhenActive(ctx, inst, [&]() {
         const auto resource = PrepareMemoryResourceAccess(ctx.state, mem);
         return LoadWordPrepared(ctx, inst, mem, resource);
     });
@@ -152,7 +206,7 @@ std::uint32_t LoadSubwordPrepared(SpirvValueEmitContext& ctx, const IrValue& ins
 }
 
 std::uint32_t LoadSubword(SpirvValueEmitContext& ctx, const IrValue& inst, const MemoryInfo& mem, std::uint32_t bits) {
-    return EmitValueOrZeroIfCondition(ctx.state, ActiveArgument(ctx, inst), [&]() {
+    return WordWhenActive(ctx, inst, [&]() {
         const auto resource = PrepareMemoryResourceAccess(ctx.state, mem);
         return LoadSubwordPrepared(ctx, inst, mem, resource, bits, false);
     });
@@ -198,7 +252,7 @@ std::uint32_t GuestAddress(SpirvValueEmitContext& ctx, const IrValue& inst, cons
 }
 
 std::uint32_t LoadBda(SpirvValueEmitContext& ctx, const IrValue& inst, const MemoryInfo& mem, std::uint32_t bits) {
-    return EmitValueOrZeroIfCondition(ctx.state, ActiveArgument(ctx, inst), [&]() {
+    return WordWhenActive(ctx, inst, [&]() {
         return EmitBdaRead(ctx, inst, GuestAddress(ctx, inst, mem), bits);
     });
 }
@@ -279,7 +333,7 @@ std::uint32_t FormattedLoadPrepared(SpirvValueEmitContext& ctx, const IrValue& i
 }
 
 std::uint32_t FormattedLoad(SpirvValueEmitContext& ctx, const IrValue& inst, const MemoryInfo& mem) {
-    return EmitValueOrZeroIfCondition(ctx.state, ActiveArgument(ctx, inst), [&]() {
+    return WordWhenActive(ctx, inst, [&]() {
         const auto resource = PrepareMemoryResourceAccess(ctx.state, mem);
         return FormattedLoadPrepared(ctx, inst, mem, 0u, resource);
     });
@@ -323,7 +377,7 @@ void StoreSubwordPrepared(SpirvValueEmitContext& ctx, const IrValue& inst, const
 }
 
 void StoreSubword(SpirvValueEmitContext& ctx, const IrValue& inst, const MemoryInfo& mem, std::uint32_t bits) {
-    EmitIfCondition(ctx.state, ActiveArgument(ctx, inst), [&]() {
+    IfActive(ctx, inst, [&]() {
         const auto resource = PrepareMemoryResourceAccess(ctx.state, mem);
         StoreSubwordPrepared(ctx, inst, mem, resource, bits, ctx.Arg(inst, inst.ArgumentCount() - 2u));
     });
@@ -338,7 +392,7 @@ void StoreWordPrepared(SpirvValueEmitContext& ctx, const IrValue& inst, const Me
 }
 
 void StoreWord(SpirvValueEmitContext& ctx, const IrValue& inst, const MemoryInfo& mem) {
-    EmitIfCondition(ctx.state, ActiveArgument(ctx, inst), [&]() {
+    IfActive(ctx, inst, [&]() {
         const auto resource = PrepareMemoryResourceAccess(ctx.state, mem);
         StoreWordPrepared(ctx, inst, mem, resource, ctx.Arg(inst, inst.ArgumentCount() - 2u));
     });
@@ -363,7 +417,7 @@ void FormattedStorePrepared(SpirvValueEmitContext& ctx, const IrValue& inst, con
 }
 
 void FormattedStore(SpirvValueEmitContext& ctx, const IrValue& inst, const MemoryInfo& mem) {
-    EmitIfCondition(ctx.state, ActiveArgument(ctx, inst), [&]() {
+    IfActive(ctx, inst, [&]() {
         const auto resource = PrepareMemoryResourceAccess(ctx.state, mem);
         FormattedStorePrepared(ctx, inst, mem, 0u, resource, ctx.Arg(inst, inst.ArgumentCount() - 2u));
     });
@@ -474,9 +528,76 @@ void StoreFormattedInBounds(SpirvValueEmitContext& ctx, const MemoryInfo& mem, c
     }
 }
 
+bool SwizzledBuffer(const SpirvEmitterState& state, const MemoryInfo& mem) {
+    const std::uint32_t packed = StorageBufferPackedStride(state, mem);
+    return (packed & 0x3fffu) != 0u && ((packed >> 14u) & 1u) != 0u;
+}
+
+std::uint32_t VectorBufferView(const SpirvEmitterState& state, const MemoryInfo& mem, std::uint32_t components) {
+    if (mem.formatted) {
+        return 0u;
+    }
+    return components == 2u ? state.storageBufferVector2Variable : components == 4u ? state.storageBufferVector4Variable : 0u;
+}
+
+std::uint32_t LoadBufferVector(SpirvValueEmitContext& ctx, const MemoryInfo& mem, std::uint32_t view, std::uint32_t firstIndex, std::uint32_t components) {
+    auto& state = ctx.state;
+    const auto object = state.module.AllocateId();
+    state.module.AddFunction(spv::OpAccessChain, TypeStorageBufferVectorPointer(state, components), object, view, ConstantU32(state, ResourceForDescriptor(state, DescriptorBindingKind::Buffers, mem.resource)));
+    const auto pointer = state.module.AllocateId();
+    state.module.AddFunction(spv::OpAccessChain, TypeStorageBufferVectorElementPointer(state, components), pointer, object, ConstantU32(state, 0u), EmitShiftRightConstant(state, firstIndex, components == 4u ? 2u : 1u));
+    const auto vector = state.module.AllocateId();
+    state.module.AddFunction(spv::OpLoad, TypeU32Vector(state, components), vector, pointer);
+    if (TypeU32Composite(state, components) == TypeU32Vector(state, components)) {
+        return vector;
+    }
+    std::array<std::uint32_t, 4> values{};
+    for (std::uint32_t component = 0; component < components; component++) {
+        values.at(component) = state.module.AllocateId();
+        state.module.AddFunction(spv::OpCompositeExtract, TypeU32(state), values.at(component), vector, component);
+    }
+    return ConstructU32Composite(state, components, values);
+}
+
+std::uint32_t LoadRawWideBuffer(SpirvValueEmitContext& ctx, const IrValue& inst, const MemoryInfo& mem, const MemoryResourceAccess& resource, std::uint32_t components) {
+    auto& state = ctx.state;
+    std::array<std::uint32_t, 4> values{};
+    if (SwizzledBuffer(state, mem)) {
+        for (std::uint32_t component = 0; component < components; component++) {
+            values.at(component) = LoadWordPrepared(ctx, inst, RebaseRawComponent(mem, component), resource);
+        }
+        return ConstructU32Composite(state, components, values);
+    }
+    const auto base = ByteAddress(ctx, inst, RebaseRawComponent(mem, 0u));
+    std::array<std::uint32_t, 4> indices{};
+    for (std::uint32_t component = 0; component < components; component++) {
+        const auto address = component == 0u ? base : Binary(state, spv::OpIAdd, TypeU32(state), base, ConstantU32(state, component * 4u));
+        indices.at(component) = EmitMemoryElementIndex(state, resource, EmitShiftRightConstant(state, address, 2u));
+    }
+    const auto checked = [&]() {
+        for (std::uint32_t component = 0; component < components; component++) {
+            values.at(component) = EmitValueOrZeroIfCondition(state, EmitMemoryElementInBounds(state, resource, indices.at(component)), [&]() {
+                return LoadWordInBounds(ctx, resource, indices.at(component));
+            });
+        }
+        return ConstructU32Composite(state, components, values);
+    };
+    const auto view = VectorBufferView(state, mem, components);
+    if (view == 0u) {
+        return checked();
+    }
+    const auto last = indices.at(components - 1u);
+    const auto aligned = EmitCompareU32Constant(state, spv::OpIEqual, EmitAndConstant(state, indices[0], components - 1u), 0u);
+    const auto contiguous = Binary(state, spv::OpIEqual, TypeBool(state), last, Binary(state, spv::OpIAdd, TypeU32(state), indices[0], ConstantU32(state, components - 1u)));
+    const auto inRange = AndCondition(state, AndCondition(state, aligned, contiguous), EmitMemoryElementInBounds(state, resource, last));
+    return EmitValueIfElse(state, inRange, TypeU32Composite(state, components), [&]() {
+        return LoadBufferVector(ctx, mem, view, indices[0], components);
+    }, checked);
+}
+
 std::uint32_t LoadWideBuffer(SpirvValueEmitContext& ctx, const IrValue& inst, const MemoryInfo& mem, std::uint32_t components) {
     auto& state = ctx.state;
-    return EmitValueOrDefaultIfCondition(state, ActiveArgument(ctx, inst), TypeU32Composite(state, components), ConstantU32CompositeZero(state, components), [&]() {
+    return ValueWhenActive(ctx, inst, TypeU32Composite(state, components), ConstantU32CompositeZero(state, components), [&]() {
         const auto resource = PrepareMemoryResourceAccess(state, mem);
         const auto info = MemoryFormatInfo(state, mem);
         if (info.type != SpirvFormatComponentType::Unknown) {
@@ -489,17 +610,13 @@ std::uint32_t LoadWideBuffer(SpirvValueEmitContext& ctx, const IrValue& inst, co
                 return ConstructU32Composite(state, components, values);
             });
         }
-        std::array<std::uint32_t, 4> values{};
-        for (std::uint32_t component = 0; component < components; component++) {
-            values.at(component) = LoadWordPrepared(ctx, inst, RebaseRawComponent(mem, component), resource);
-        }
-        return ConstructU32Composite(state, components, values);
+        return LoadRawWideBuffer(ctx, inst, mem, resource, components);
     });
 }
 
 void StoreWideBuffer(SpirvValueEmitContext& ctx, const IrValue& inst, const MemoryInfo& mem, std::uint32_t components) {
     auto& state = ctx.state;
-    EmitIfCondition(state, ActiveArgument(ctx, inst), [&]() {
+    IfActive(ctx, inst, [&]() {
         const auto resource = PrepareMemoryResourceAccess(state, mem);
         const auto composite = ctx.Arg(inst, inst.ArgumentCount() - 2u);
         const auto info = MemoryFormatInfo(state, mem);
@@ -524,7 +641,7 @@ void StoreWideBuffer(SpirvValueEmitContext& ctx, const IrValue& inst, const Memo
 
 std::uint32_t LoadWideShared(SpirvValueEmitContext& ctx, const IrValue& inst, const MemoryInfo& mem, std::uint32_t components) {
     auto& state = ctx.state;
-    return EmitValueOrDefaultIfCondition(state, ActiveArgument(ctx, inst), TypeU32Composite(state, components), ConstantU32CompositeZero(state, components), [&]() {
+    return ValueWhenActive(ctx, inst, TypeU32Composite(state, components), ConstantU32CompositeZero(state, components), [&]() {
         const auto resource = PrepareMemoryResourceAccess(state, mem);
         const auto base = ByteAddress(ctx, inst, mem);
         std::array<std::uint32_t, 4> values{};
@@ -542,7 +659,7 @@ std::uint32_t LoadWideShared(SpirvValueEmitContext& ctx, const IrValue& inst, co
 
 void StoreWideShared(SpirvValueEmitContext& ctx, const IrValue& inst, const MemoryInfo& mem, std::uint32_t components) {
     auto& state = ctx.state;
-    EmitIfCondition(state, ActiveArgument(ctx, inst), [&]() {
+    IfActive(ctx, inst, [&]() {
         const auto resource = PrepareMemoryResourceAccess(state, mem);
         const auto base = ByteAddress(ctx, inst, mem);
         for (std::uint32_t component = 0; component < components; component++) {
@@ -671,7 +788,7 @@ std::uint32_t EmitAtomicOperation(SpirvValueEmitContext& ctx, const IrValue& ins
 template<typename TOperation>
 std::uint32_t EmitAtomicAccess(SpirvValueEmitContext& ctx, const IrValue& inst, const MemoryInfo& mem, TOperation&& operation) {
     auto& state = ctx.state;
-    return EmitValueOrZeroIfCondition(state, ActiveArgument(ctx, inst), [&]() {
+    return WordWhenActive(ctx, inst, [&]() {
         const auto access = PrepareMemoryElement(ctx, mem, DwordIndex(ctx, inst, mem));
         return EmitValueOrZeroIfCondition(state, EmitMemoryElementInBounds(state, access.resource, access.index), [&]() {
             return operation(EmitMemoryElementPointer(state, access.resource, access.index));
@@ -722,7 +839,7 @@ std::uint32_t Atomic32(SpirvValueEmitContext& ctx, const IrValue& inst, const Me
 std::uint32_t BufferAtomic64(SpirvValueEmitContext& ctx, const IrValue& inst) {
     auto& state = ctx.state;
     const auto& mem = BufferMemory(ctx, inst);
-    return EmitValueOrDefaultIfCondition(state, ActiveArgument(ctx, inst), TypeU64(state), ConstantU64(state, 0u), [&]() {
+    return ValueWhenActive(ctx, inst, TypeU64(state), ConstantU64(state, 0u), [&]() {
         const auto resource = PrepareStorageBufferResourceAccess(state, mem, state.storageBufferU64Variable, TypeStorageBufferU64Pointer(state));
         const auto byteAddress = Binary(state, spv::OpIAdd, TypeU32(state), ByteAddress(ctx, inst, mem), resource.byteOffset);
         const auto index = Binary(state, spv::OpShiftRightLogical, TypeU32(state), byteAddress, ConstantU32(state, 3u));
@@ -748,7 +865,7 @@ void SharedFloatAtomic(SpirvValueEmitContext& ctx, const IrValue& inst, bool max
         ctx.Fail(inst, "requires the scratch dword variable");
     }
     const auto& mem = SharedMemory(ctx, inst);
-    EmitIfCondition(state, ActiveArgument(ctx, inst), [&]() {
+    IfActive(ctx, inst, [&]() {
         const auto access = PrepareMemoryElement(ctx, mem, DwordIndex(ctx, inst, mem));
         EmitIfCondition(state, EmitMemoryElementInBounds(state, access.resource, access.index), [&]() {
             state.module.AddFunction(spv::OpStore, ctx.scratchU32Variable, ctx.Arg(inst, 1));

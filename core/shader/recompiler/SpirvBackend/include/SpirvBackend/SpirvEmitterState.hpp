@@ -83,6 +83,8 @@ struct SpirvEmitterState {
     bool singleLane = false;
     std::uint32_t storageBufferVariable = 0;
     std::uint32_t storageBufferU64Variable = 0;
+    std::uint32_t storageBufferVector2Variable = 0;
+    std::uint32_t storageBufferVector4Variable = 0;
     std::array<std::uint32_t, ShaderInfo::MaxBuffers> memoryByteOffsets {};
     std::uint32_t bdaPagetableVariable = 0;
     std::uint32_t faultBufferVariable = 0;

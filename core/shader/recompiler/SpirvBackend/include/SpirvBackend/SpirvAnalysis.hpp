@@ -20,6 +20,8 @@ struct SpirvRequirements {
     bool bufferInt64Atomics = false;
     bool sharedMemory = false;
     bool workgroupBarrier = false;
+    bool bufferVector2Loads = false;
+    bool bufferVector4Loads = false;
     std::vector<std::uint32_t> capabilities;
     std::vector<std::string> extensions;
 };

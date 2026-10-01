@@ -6,6 +6,7 @@
 #include "SpirvBackend/SpirvMemory/SpirvInputOutput.hpp"
 #include <spirv/unified1/spirv.hpp>
 #include <algorithm>
+#include <array>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -355,14 +356,28 @@ void DefineDescriptors(SpirvEmitterState& state) {
             return state.module.Type(spv::OpTypeArray, type, ConstantU32(state, static_cast<std::uint32_t>(binding.resources.size())));
         };
         switch (binding.kind) {
-        case DescriptorBindingKind::Buffers:
+        case DescriptorBindingKind::Buffers: {
             state.storageBufferVariable = Define(ArrayType(StorageBufferBlockType(state)), "buffers");
             if (state.requirements.bufferInt64Atomics) {
                 state.storageBufferU64Variable = Define(ArrayType(StorageBufferU64BlockType(state)), "buffers_u64");
+            }
+            if (stage == IrShaderStage::Compute && state.requirements.bufferVector2Loads) {
+                state.storageBufferVector2Variable = Define(ArrayType(TypeStorageBufferVectorBlock(state, 2u)), "buffers_v2");
+            }
+            if (stage == IrShaderStage::Compute && state.requirements.bufferVector4Loads) {
+                state.storageBufferVector4Variable = Define(ArrayType(TypeStorageBufferVectorBlock(state, 4u)), "buffers_v4");
+            }
+            const std::array<std::uint32_t, 3> views {state.storageBufferU64Variable, state.storageBufferVector2Variable, state.storageBufferVector4Variable};
+            if (std::any_of(views.begin(), views.end(), [](std::uint32_t view) { return view != 0; })) {
                 state.module.AddAnnotation(spv::OpDecorate, state.storageBufferVariable, spv::DecorationAliased);
-                state.module.AddAnnotation(spv::OpDecorate, state.storageBufferU64Variable, spv::DecorationAliased);
+                for (const auto view : views) {
+                    if (view != 0) {
+                        state.module.AddAnnotation(spv::OpDecorate, view, spv::DecorationAliased);
+                    }
+                }
             }
             break;
+        }
         case DescriptorBindingKind::BdaPagetable:
             state.bdaPagetableVariable = Define(StorageBufferBlockType(state), "bda_pagetable");
             break;

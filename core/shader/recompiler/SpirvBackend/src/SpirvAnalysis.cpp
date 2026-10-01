@@ -35,11 +35,17 @@ SpirvRequirements AnalyzeProgramRequirements(const IrProgram& program) {
                     if (memory.resource >= program.Info().buffers.size()) {
                         throw std::runtime_error("buffer operation has invalid resource metadata");
                     }
-                    if ((program.Info().buffers.at(memory.resource).packedStride & (1u << 20u)) != 0u) {
+                    const auto packedStride = program.Info().buffers.at(memory.resource).packedStride;
+                    if ((packedStride & (1u << 20u)) != 0u) {
                         if (program.Resources().stage != IrShaderStage::Compute) {
                             throw std::runtime_error("buffer ADD_TID is only valid for compute shaders");
                         }
                         requirements.subgroupLocalInvocationId = true;
+                    }
+                    const bool swizzled = (packedStride & 0x3fffu) != 0u && (packedStride & (1u << 14u)) != 0u;
+                    if (!swizzled && !memory.formatted) {
+                        requirements.bufferVector2Loads = requirements.bufferVector2Loads || inst->Opcode() == IrOpcode::LoadBufferU32x2;
+                        requirements.bufferVector4Loads = requirements.bufferVector4Loads || inst->Opcode() == IrOpcode::LoadBufferU32x4;
                     }
                 }
             }
