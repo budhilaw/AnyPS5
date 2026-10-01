@@ -456,6 +456,11 @@ GuestBufferCache::HostView GuestBufferCache::residentRange(std::uint64_t address
     const auto slotFirst = extent.address + (address - extent.address) / HostWindowBytes * HostWindowBytes;
     const auto slotLast = std::min(extent.address + importBytes, extent.address + (address + bytes - extent.address + HostWindowBytes - 1) / HostWindowBytes * HostWindowBytes);
     if (address + bytes > slotLast) return {};
+    static const std::uint64_t minimumAddress = [] {
+        const char* value = std::getenv("ANYPS5_RESIDENT_MIN_ADDRESS");
+        return value != nullptr ? std::strtoull(value, nullptr, 16) : std::uint64_t{0x1400000000};
+    }();
+    if (address < minimumAddress) return {};
     auto it = residentWindows.upper_bound(address);
     if (it != residentWindows.begin()) --it;
     const bool contained = it != residentWindows.end() && it->second.serial == extent.serial && it->first <= address && address + bytes <= it->first + it->second.bytes;
