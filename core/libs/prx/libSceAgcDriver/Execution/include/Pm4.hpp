@@ -46,7 +46,9 @@ bool AccessesMemory(std::uint32_t header);
 bool UsesGpuCacheBarrier(std::span<const std::uint32_t> packet);
 std::uint64_t DispatchIndirectAddress(std::span<const std::uint32_t> packet, const QueueState& queue);
 std::array<std::uint32_t, 5> ResolveDispatch(std::span<const std::uint32_t> packet, const QueueState& queue);
+bool DrawIndirectArguments(std::span<const std::uint32_t> packet, const QueueState& queue, std::uint64_t& source, std::size_t& bytes);
 DrawParameters ResolveDraw(std::span<const std::uint32_t> packet, const QueueState& queue);
+void WriteIndirectDrawOffsets(std::span<const std::uint32_t> packet, const DrawParameters& draw, QueueState& queue);
 
 }
 

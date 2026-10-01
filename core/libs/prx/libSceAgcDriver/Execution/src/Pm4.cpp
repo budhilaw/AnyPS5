@@ -223,7 +223,7 @@ void Validate(std::span<const std::uint32_t> packet, std::uint32_t queue) {
             graphics();
             size(5);
             require((packet[1] & 3u) == 0, "misaligned indirect draw arguments");
-            require((packet[4] & ~0x22u) == (opcode == 0x24 ? 2u : 0u), "unsupported indirect draw flags");
+            require((packet[4] & ~(opcode == 0x24 ? 0x20u : 0x22u)) == (opcode == 0x24 ? 2u : 0u), "unsupported indirect draw flags");
             break;
         case 0x49:
             size(8);
@@ -488,6 +488,16 @@ std::array<std::uint32_t, 5> ResolveDispatch(std::span<const std::uint32_t> pack
     return result;
 }
 
+bool DrawIndirectArguments(std::span<const std::uint32_t> packet, const QueueState& queue, std::uint64_t& source, std::size_t& bytes) {
+    const auto opcode = (packet[0] >> 8u) & 0xffu;
+    if (opcode != 0x24 && opcode != 0x25) return false;
+    require(queue.drawIndirectBase != 0, "indirect draw base has not been set");
+    require(packet[1] <= std::numeric_limits<std::uint64_t>::max() - queue.drawIndirectBase, "indirect draw address overflow");
+    source = queue.drawIndirectBase + packet[1];
+    bytes = (opcode == 0x25 ? 5u : 4u) * sizeof(std::uint32_t);
+    return true;
+}
+
 DrawParameters ResolveDraw(std::span<const std::uint32_t> packet, const QueueState& queue) {
     Validate(packet, 0);
     if (((packet[0] >> 8u) & 0xffu) == 0x2d) {
@@ -510,18 +520,15 @@ DrawParameters ResolveDraw(std::span<const std::uint32_t> packet, const QueueSta
         GuestMemory::CheckRange(reinterpret_cast<const void*>(address), static_cast<std::size_t>(bytes), indexSize);
         return address;
     };
-    if (opcode == 0x24 || opcode == 0x25) {
-        require(queue.drawIndirectBase != 0, "indirect draw base has not been set");
-        require(packet[1] <= std::numeric_limits<std::uint64_t>::max() - queue.drawIndirectBase, "indirect draw address overflow");
-        const auto source = queue.drawIndirectBase + packet[1];
+    std::uint64_t source = 0;
+    std::size_t argumentBytes = 0;
+    if (DrawIndirectArguments(packet, queue, source, argumentBytes)) {
+        std::array<std::uint32_t, 5> arguments{};
+        GuestMemory::Read(source, std::as_writable_bytes(std::span(arguments)).first(argumentBytes), 4);
         if (opcode == 0x25) {
-            std::array<std::uint32_t, 5> arguments{};
-            GuestMemory::Read(source, std::as_writable_bytes(std::span(arguments)), 4);
             const auto indirectAddress = indexRange(queue.indexBase, arguments[2], arguments[0]);
             return {indirectAddress, arguments[0], indexSize, arguments[1], packet[4], true, arguments[3], arguments[4]};
         }
-        std::array<std::uint32_t, 4> arguments{};
-        GuestMemory::Read(source, std::as_writable_bytes(std::span(arguments)), 4);
         return {0, arguments[0], 0, arguments[1], packet[4] & 0x20u, false, arguments[2], arguments[3]};
     }
     if (opcode == 0x27) {
@@ -531,6 +538,13 @@ DrawParameters ResolveDraw(std::span<const std::uint32_t> packet, const QueueSta
     require(opcode == 0x35, "expected DRAW_INDEX_OFFSET_2 packet");
     const auto offsetAddress = indexRange(queue.indexBase, packet[2], packet[3]);
     return {offsetAddress, packet[3], indexSize, queue.instanceCount, packet[4]};
+}
+
+void WriteIndirectDrawOffsets(std::span<const std::uint32_t> packet, const DrawParameters& draw, QueueState& queue) {
+    const auto opcode = (packet[0] >> 8u) & 0xffu;
+    if (opcode != 0x24 && opcode != 0x25) return;
+    if (const auto vertexOffset = packet[2] & 0xffffu; vertexOffset != 0) queue.shader.insert_or_assign(vertexOffset, draw.firstVertex);
+    if (const auto instanceOffset = packet[3] & 0xffffu; instanceOffset != 0) queue.shader.insert_or_assign(instanceOffset, draw.firstInstance);
 }
 
 void Execute(std::span<const std::uint32_t> packet, QueueState& queue) {
