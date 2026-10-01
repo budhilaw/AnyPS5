@@ -8,6 +8,8 @@
 #include "prx/libc/include/General.hpp"
 #include <cstdlib>
 #include <algorithm>
+#include <atomic>
+#include <bit>
 #include <cstdint>
 #include <cstring>
 #include <mutex>
@@ -96,6 +98,13 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
         const auto guestBytes = ComputeSurfaceSize(mips, arrayLayers);
         const auto guestSliceBytes = guestBytes / tiledLayers;
         Require(snapshot.size() == guestBytes, "texture snapshot size mismatch");
+        if (descriptor.tileMode == TextureTileMode::Depth64KB) {
+            static std::atomic<std::uint32_t> reported{0};
+            const auto bit = 1u << std::countr_zero(elementBytes);
+            if ((reported.load(std::memory_order_relaxed) & bit) == 0 && (reported.fetch_or(bit, std::memory_order_relaxed) & bit) == 0) {
+                APS5_LOG_OUT("texture 0x%llx (%ux%u format 0x%x, %u mips, %u slices) is the first 64KB_Z_X texture of %u-byte elements detiled with the Z-order swizzle", static_cast<unsigned long long>(descriptor.baseAddress), descriptor.width, descriptor.height, descriptor.format, descriptor.mipCount, descriptor.depthOrLastArray + 1u, elementBytes);
+            }
+        }
 
         const auto sliceLinearBytes = SliceLinearBytes(mips);
         Require(tiledLayers == 0 || sliceLinearBytes <= UINT64_MAX / tiledLayers, "detiled texture buffer size overflows");

@@ -1,9 +1,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/TextureTiling.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Context.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureFormat.hpp"
-#include "prx/libc/include/General.hpp"
 #include <algorithm>
-#include <atomic>
 #include <bit>
 #include <cstddef>
 #include <cstdint>
@@ -404,16 +402,7 @@ std::vector<TileMipLayout> ComputeMipLayout(TextureTileMode tileMode, std::uint3
 
 std::vector<TileMipLayout> ComputeMipLayout(const GuestTextureResource& descriptor) {
     const auto thick = UsesThickTiling(descriptor);
-    auto mips = ComputeLayout(descriptor.tileMode, descriptor.format, descriptor.width, descriptor.height, thick ? descriptor.depthOrLastArray + 1u : 1u, descriptor.mipCount, thick);
-    if (descriptor.tileMode == TextureTileMode::Depth64KB) {
-        static std::atomic<std::uint32_t> reported{0};
-        const auto bytesPerElement = BytesPerElement(descriptor.format);
-        const auto bit = 1u << std::countr_zero(bytesPerElement);
-        if ((reported.load(std::memory_order_relaxed) & bit) == 0 && (reported.fetch_or(bit, std::memory_order_relaxed) & bit) == 0) {
-            APS5_LOG_OUT("texture 0x%llx (%ux%u format 0x%x, %u mips, %u slices) is the first 64KB_Z_X texture of %u-byte elements detiled with the Z-order swizzle", static_cast<unsigned long long>(descriptor.baseAddress), descriptor.width, descriptor.height, descriptor.format, descriptor.mipCount, descriptor.depthOrLastArray + 1u, bytesPerElement);
-        }
-    }
-    return mips;
+    return ComputeLayout(descriptor.tileMode, descriptor.format, descriptor.width, descriptor.height, thick ? descriptor.depthOrLastArray + 1u : 1u, descriptor.mipCount, thick);
 }
 
 TileSwizzleMasks ThickSwizzleMasks(TextureTileMode tileMode, std::uint32_t bytesPerElement) {
