@@ -5,6 +5,7 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
+#include "prx/libSceAgcDriver/Execution/include/PostedWrites.hpp"
 #include "prx/libSceAgcDriver/Execution/include/ProgramFailures.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PublishedPointer.hpp"
 #include "prx/libSceAgcDriver/Execution/include/ShaderMemory.hpp"
@@ -330,8 +331,10 @@ private:
     }
 
     void postGraphics(GraphicsJob job) {
-        for (const auto& range : job.writes) postedWriteRanges[{range.first, range.last}] = graphicsPosted + 1;
-        if (job.writesUnknown) postedUnknownWrites = graphicsPosted + 1;
+        const auto number = graphicsPosted + 1;
+        postedWrites.Prune(graphicsCompleted.load(std::memory_order_acquire));
+        for (const auto& range : job.writes) postedWrites.Post(number, range.first, range.last);
+        if (job.writesUnknown) postedWrites.PostUnknown(number);
         ++graphicsPosted;
         std::unique_lock lock(graphicsMutex);
         if (graphicsJobs.size() >= MaxGraphicsJobs && !graphicsStopping) {
@@ -366,19 +369,8 @@ private:
         watchdog.Stage(stage);
     }
 
-    std::uint64_t graphicsWriter(std::uint64_t address, std::size_t bytes) {
-        const auto completed = graphicsCompleted.load(std::memory_order_acquire);
-        auto writer = postedUnknownWrites > completed ? postedUnknownWrites : 0;
-        const auto end = address + bytes;
-        for (auto it = postedWriteRanges.begin(); it != postedWriteRanges.end();) {
-            if (it->second <= completed) {
-                it = postedWriteRanges.erase(it);
-                continue;
-            }
-            if (it->first.first < end && address < it->first.second) writer = std::max(writer, it->second);
-            ++it;
-        }
-        return writer;
+    std::uint64_t graphicsWriter(std::uint64_t address, std::size_t bytes) const {
+        return postedWrites.Writer(address, bytes, graphicsCompleted.load(std::memory_order_acquire));
     }
 
     static void resolveForHost(void* context, std::uint64_t address, std::size_t bytes, bool writable) {
@@ -691,8 +683,7 @@ private:
     std::condition_variable graphicsChanged;
     std::deque<GraphicsJob> graphicsJobs;
     bool graphicsBusy = false;
-    std::map<std::pair<std::uint64_t, std::uint64_t>, std::uint64_t> postedWriteRanges;
-    std::uint64_t postedUnknownWrites = 0;
+    PostedWrites postedWrites;
     std::uint64_t graphicsPosted = 0;
     std::atomic<std::uint64_t> graphicsCompleted{0};
     bool graphicsStopping = false;
