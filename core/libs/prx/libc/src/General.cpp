@@ -95,6 +95,8 @@ extern "C" char* APS5_VABI getcwd_nid_postfix(char* buffer, std::size_t size) {
 }
 
 extern "C" void NotImplemented_nid_no_patch(const char* funcName) {
+    std::fprintf(stderr, "[%9.3f][system] %s is not implemented; throwing\n", Aps5LogSeconds_nid_no_patch(), funcName);
+    std::fflush(stderr);
     throw std::runtime_error(std::string(funcName) + " not implemented");
 }
 
