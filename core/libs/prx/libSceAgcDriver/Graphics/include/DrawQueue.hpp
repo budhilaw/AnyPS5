@@ -66,6 +66,7 @@ public:
     bool CopiedWritesPending(std::uint64_t address, std::size_t bytes) const;
     std::uint64_t WriterEpoch() const { return writerEpoch.load(std::memory_order_acquire); }
     std::uint64_t NextSequence() const { return nextSequence; }
+    std::uint64_t RecordingBatch() const { return flushedBatches + 1; }
     void AppendWriteRanges(std::vector<std::pair<std::uint64_t, std::uint64_t>>& ranges) const {
         for (const auto& writer : writers) ranges.insert(ranges.end(), writer.resources->WriteRanges().begin(), writer.resources->WriteRanges().end());
     }
@@ -105,6 +106,7 @@ private:
     std::uint64_t nextSequence = 1;
     std::uint64_t retiredThrough = 0;
     std::uint64_t lastGdsSequence = 0;
+    std::uint64_t flushedBatches = 0;
     struct Writer {
         std::uint64_t sequence;
         const ShaderResources* resources;

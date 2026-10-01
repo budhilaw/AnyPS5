@@ -237,6 +237,7 @@ void DrawQueue::Flush() {
     EndPass();
     pending.push_back(std::move(recording));
     recording = Batch{};
+    ++flushedBatches;
     pending.back().commands->Submit();
     if (releases) releases->Collect();
 }

@@ -244,7 +244,15 @@ std::shared_ptr<Texture> TextureCache::Get(std::span<const std::uint32_t> words,
         }
         surface.stored = surface.stored || stores;
         if (hostBacked && surface.volatileUses != 0) {
+            const auto batch = context.drawQueue != nullptr ? context.drawQueue->RecordingBatch() : 0;
+            if (batch != 0 && surface.refreshedBatch == batch && !context.drawQueue->WritesPending(resource.baseAddress, static_cast<std::size_t>(surface.bytes))) {
+                auto result = it->texture;
+                entries.splice(entries.end(), entries, it);
+                timing.Mark("volatile_batch_hit");
+                return result;
+            }
             if (refresh(surface, resource.baseAddress, false)) {
+                surface.refreshedBatch = batch;
                 --surface.volatileUses;
                 auto result = it->texture;
                 entries.splice(entries.end(), entries, it);

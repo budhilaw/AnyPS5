@@ -34,6 +34,7 @@ private:
         std::weak_ptr<Texture> texture;
         std::uint32_t changedUses = 0;
         std::uint32_t volatileUses = 0;
+        std::uint64_t refreshedBatch = 0;
         bool stored = false;
         bool stale = false;
     };
