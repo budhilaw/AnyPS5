@@ -3,6 +3,7 @@
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <exception>
 #include <typeinfo>
 #include <unwind.h>
@@ -69,8 +70,14 @@ void describe(const char* label, std::uint64_t address) {
 
 }
 
+void reportCxxThrow(const EXCEPTION_POINTERS* exception);
+
 void ReportFatalException(const EXCEPTION_POINTERS* exception) {
     const auto* record = exception->ExceptionRecord;
+    if (record->ExceptionCode == 0x20474343u) {
+        reportCxxThrow(exception);
+        return;
+    }
     switch (record->ExceptionCode) {
     case EXCEPTION_ACCESS_VIOLATION:
     case EXCEPTION_ILLEGAL_INSTRUCTION:
@@ -152,4 +159,50 @@ LONG WINAPI unhandledFilter(EXCEPTION_POINTERS* exception) {
 
 const auto previousUnhandledFilter = SetUnhandledExceptionFilter(unhandledFilter);
 
+}
+
+bool firstThrowFrom(std::uint64_t site) {
+    static std::atomic<std::uint64_t> seen[512]{};
+    if (site == 0) return false;
+    for (std::size_t probe = 0; probe < 512; ++probe) {
+        auto& slot = seen[(site * 0x9e3779b97f4a7c15ull >> 55) + probe & 511];
+        auto expected = slot.load(std::memory_order_relaxed);
+        if (expected == site) return false;
+        if (expected == 0 && slot.compare_exchange_strong(expected, site)) return true;
+        if (expected == site) return false;
+    }
+    return false;
+}
+
+void reportCxxThrow(const EXCEPTION_POINTERS* exception) {
+    if (reporting) return;
+    const auto* context = exception->ContextRecord;
+    std::uint64_t site = 0;
+    for (std::uint64_t slot = context->Rsp; slot < context->Rsp + 4096; slot += 8) {
+        if (!readable(slot, 8)) break;
+        const auto value = *reinterpret_cast<const std::uint64_t*>(slot);
+        if (value < 0x10000 || !executable(value)) continue;
+        char path[MAX_PATH];
+        const char* name = nullptr;
+        std::uint64_t offset = 0;
+        if (!moduleOffset(value, name, offset, path)) continue;
+        if (std::strstr(name, "libgcc") != nullptr || std::strstr(name, "libstdc++") != nullptr || std::strstr(name, "KERNELBASE") != nullptr || std::strstr(name, "ntdll") != nullptr) continue;
+        site = value;
+        break;
+    }
+    if (!firstThrowFrom(site)) return;
+    reporting = true;
+    write("C++ throw on thread %lu\n", GetCurrentThreadId());
+    describeCxxException(exception->ExceptionRecord);
+    int found = 0;
+    for (std::uint64_t slot = context->Rsp; found < 6 && slot < context->Rsp + 4096; slot += 8) {
+        if (!readable(slot, 8)) break;
+        const auto value = *reinterpret_cast<const std::uint64_t*>(slot);
+        if (value < 0x10000 || !executable(value)) continue;
+        char label[32];
+        std::snprintf(label, sizeof(label), "[rsp+0x%03llx]", static_cast<unsigned long long>(slot - context->Rsp));
+        describe(label, value);
+        ++found;
+    }
+    reporting = false;
 }
