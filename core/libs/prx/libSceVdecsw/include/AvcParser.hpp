@@ -46,6 +46,7 @@ struct SequenceParameterSet {
     std::uint32_t cropRight = 0;
     std::uint32_t cropTop = 0;
     std::uint32_t cropBottom = 0;
+    bool vuiPresent = false;
     bool aspectRatioInfoPresent = false;
     std::uint8_t aspectRatioIdc = 0;
     std::uint16_t sarWidth = 0;
@@ -65,11 +66,15 @@ struct SequenceParameterSet {
     bool bitstreamRestriction = false;
     std::uint32_t maxNumReorderFrames = 0;
     std::uint32_t maxDecFrameBuffering = 0;
+    std::size_t vuiBit = 0;
+    std::size_t restrictionBit = 0;
+    std::size_t reorderBit = 0;
 
     std::uint32_t CodedWidth() const { return (picWidthInMbsMinus1 + 1) * 16; }
     std::uint32_t CodedHeight() const { return (2 - (frameMbsOnly ? 1 : 0)) * (picHeightInMapUnitsMinus1 + 1) * 16; }
     std::uint32_t CropUnitX() const { return chromaFormatIdc == 0 || separateColourPlane || chromaFormatIdc == 3 ? 1 : 2; }
     std::uint32_t CropUnitY() const { return (chromaFormatIdc == 1 ? 2 : 1) * (2 - (frameMbsOnly ? 1 : 0)); }
+    std::uint32_t DpbFrames() const;
     std::uint32_t ReorderDepth() const;
 };
 
@@ -90,6 +95,7 @@ struct SliceHeader {
 std::vector<NalUnit> SplitAnnexB(std::span<const std::uint8_t> stream);
 std::vector<std::uint8_t> Unescape(std::span<const std::uint8_t> payload);
 SequenceParameterSet ParseSps(std::span<const std::uint8_t> nal);
+std::vector<std::uint8_t> WithoutReordering(std::span<const std::uint8_t> nal);
 PictureParameterSet ParsePps(std::span<const std::uint8_t> nal);
 std::uint32_t SlicePpsId(std::span<const std::uint8_t> nal);
 SliceHeader ParseSliceHeader(std::span<const std::uint8_t> nal, const SequenceParameterSet& sps);

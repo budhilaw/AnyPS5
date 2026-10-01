@@ -1,6 +1,7 @@
 #include "prx/libSceVdecsw/include/AvcParser.hpp"
 #include <algorithm>
 #include <stdexcept>
+#include <utility>
 
 namespace Vdecsw::Avc {
 
@@ -36,10 +37,55 @@ public:
         return (code & 1u) != 0 ? static_cast<std::int32_t>((code + 1) / 2) : -static_cast<std::int32_t>(code / 2);
     }
 
+    std::size_t Position() const { return position; }
+
 private:
     std::span<const std::uint8_t> bytes;
     std::size_t position = 0;
 };
+
+class BitWriter {
+public:
+    void Bit(std::uint32_t bit) {
+        if (used == 0) bytes.push_back(0);
+        if (bit != 0) bytes.back() |= static_cast<std::uint8_t>(0x80u >> used);
+        used = (used + 1) % 8;
+    }
+
+    void Ue(std::uint32_t value) {
+        const std::uint64_t code = std::uint64_t{value} + 1;
+        std::uint32_t length = 0;
+        while ((code >> (length + 1)) != 0) ++length;
+        for (std::uint32_t i = 0; i < length; ++i) Bit(0);
+        for (std::uint32_t i = length + 1; i-- > 0;) Bit(static_cast<std::uint32_t>((code >> i) & 1u));
+    }
+
+    std::vector<std::uint8_t> Finish() {
+        Bit(1);
+        while (used != 0) Bit(0);
+        return std::move(bytes);
+    }
+
+private:
+    std::vector<std::uint8_t> bytes;
+    std::uint32_t used = 0;
+};
+
+std::vector<std::uint8_t> Escape(std::uint8_t header, std::span<const std::uint8_t> payload) {
+    std::vector<std::uint8_t> nal;
+    nal.reserve(payload.size() + payload.size() / 2 + 1);
+    nal.push_back(header);
+    std::size_t zeros = 0;
+    for (const auto byte : payload) {
+        if (zeros >= 2 && byte <= 3) {
+            nal.push_back(3);
+            zeros = 0;
+        }
+        zeros = byte == 0 ? zeros + 1 : 0;
+        nal.push_back(byte);
+    }
+    return nal;
+}
 
 void SkipScalingList(BitReader& reader, std::uint32_t size) {
     std::int32_t last = 8;
@@ -98,6 +144,7 @@ void ParseVui(BitReader& reader, SequenceParameterSet& sps) {
     if (vclHrd) SkipHrd(reader);
     if (nalHrd || vclHrd) reader.Bit();
     sps.picStructPresent = reader.Bit() != 0;
+    sps.restrictionBit = reader.Position();
     sps.bitstreamRestriction = reader.Bit() != 0;
     if (sps.bitstreamRestriction) {
         reader.Bit();
@@ -105,6 +152,7 @@ void ParseVui(BitReader& reader, SequenceParameterSet& sps) {
         reader.Ue();
         reader.Ue();
         reader.Ue();
+        sps.reorderBit = reader.Position();
         sps.maxNumReorderFrames = reader.Ue();
         sps.maxDecFrameBuffering = reader.Ue();
     }
@@ -128,11 +176,15 @@ std::uint32_t MaxDpbMbs(std::uint8_t levelIdc) {
 
 }
 
+std::uint32_t SequenceParameterSet::DpbFrames() const {
+    const auto frameMbs = (picWidthInMbsMinus1 + 1) * (CodedHeight() / 16);
+    return std::clamp<std::uint32_t>(MaxDpbMbs(levelIdc) / std::max<std::uint32_t>(frameMbs, 1), 1, 16);
+}
+
 std::uint32_t SequenceParameterSet::ReorderDepth() const {
     if (bitstreamRestriction) return maxNumReorderFrames;
     if (profileIdc == 66) return 0;
-    const auto frameMbs = (picWidthInMbsMinus1 + 1) * (CodedHeight() / 16);
-    return std::clamp<std::uint32_t>(MaxDpbMbs(levelIdc) / std::max<std::uint32_t>(frameMbs, 1), 1, 16);
+    return DpbFrames();
 }
 
 std::vector<NalUnit> SplitAnnexB(std::span<const std::uint8_t> stream) {
@@ -217,9 +269,34 @@ SequenceParameterSet ParseSps(std::span<const std::uint8_t> nal) {
         sps.cropTop = reader.Ue();
         sps.cropBottom = reader.Ue();
     }
-    if (reader.Bit() != 0) ParseVui(reader, sps);
+    sps.vuiBit = reader.Position();
+    sps.vuiPresent = reader.Bit() != 0;
+    if (sps.vuiPresent) ParseVui(reader, sps);
     if (sps.log2MaxFrameNum > 16 || sps.log2MaxPicOrderCntLsb > 16 || sps.picOrderCntType > 2) throw std::runtime_error("AVC sequence parameter set is out of range");
     return sps;
+}
+
+std::vector<std::uint8_t> WithoutReordering(std::span<const std::uint8_t> nal) {
+    const auto sps = ParseSps(nal);
+    const auto rbsp = Unescape(nal.subspan(1));
+    const auto kept = sps.bitstreamRestriction ? sps.reorderBit : sps.vuiPresent ? sps.restrictionBit : sps.vuiBit;
+    BitWriter writer;
+    for (std::size_t bit = 0; bit < kept; ++bit) writer.Bit((rbsp[bit / 8] >> (7 - bit % 8)) & 1u);
+    if (!sps.vuiPresent) {
+        writer.Bit(1);
+        for (std::uint32_t flag = 0; flag < 8; ++flag) writer.Bit(0);
+    }
+    if (!sps.bitstreamRestriction) {
+        writer.Bit(1);
+        writer.Bit(1);
+        writer.Ue(2);
+        writer.Ue(1);
+        writer.Ue(15);
+        writer.Ue(15);
+    }
+    writer.Ue(0);
+    writer.Ue(sps.bitstreamRestriction ? sps.maxDecFrameBuffering : std::max(sps.DpbFrames(), sps.maxNumRefFrames));
+    return Escape(nal[0], writer.Finish());
 }
 
 PictureParameterSet ParsePps(std::span<const std::uint8_t> nal) {
