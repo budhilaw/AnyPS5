@@ -2,7 +2,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <algorithm>
 #include <filesystem>
+#include <fstream>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include "SceTypes.hpp"
@@ -16,6 +19,66 @@ static bool g_initialized = false;
 
 static std::string save_root() {
     return std::string(SAVE_DIR);
+}
+
+namespace {
+
+struct MemoryData {
+    void* buffer;
+    std::uint64_t bytes;
+    std::int64_t offset;
+    std::uint8_t reserved[40];
+};
+
+struct MemorySetup2 {
+    std::uint32_t option;
+    std::int32_t userId;
+    std::uint64_t memoryBytes;
+    std::uint64_t iconMemoryBytes;
+    const void* initParam;
+    const void* initIcon;
+    std::uint32_t slotId;
+    std::uint8_t reserved[20];
+};
+
+struct MemorySetupResult {
+    std::uint64_t existedMemoryBytes;
+    std::uint8_t reserved[16];
+};
+
+struct MemoryGet2 {
+    std::int32_t userId;
+    std::uint8_t padding[4];
+    MemoryData* data;
+    void* param;
+    void* icon;
+    std::uint32_t slotId;
+    std::uint8_t reserved[28];
+};
+
+struct MemorySet2 {
+    std::int32_t userId;
+    std::uint8_t padding[4];
+    const MemoryData* data;
+    const void* param;
+    const void* icon;
+    std::uint32_t dataCount;
+    std::uint32_t slotId;
+    std::uint8_t reserved[24];
+};
+
+constexpr std::uint64_t MemoryLimit = std::uint64_t{256} << 20;
+
+std::mutex memoryMutex;
+
+std::filesystem::path memoryFile(std::int32_t userId, std::uint32_t slotId) {
+    return std::filesystem::path(save_root()) / ("memory_" + std::to_string(userId) + "_" + std::to_string(slotId) + ".bin");
+}
+
+bool validData(const MemoryData& data) {
+    return data.buffer != nullptr && data.offset >= 0 && data.bytes <= MemoryLimit && static_cast<std::uint64_t>(data.offset) <= MemoryLimit - data.bytes;
+}
+
 }
 
 static bool dir_name_match(const char* str, const char* pattern) {
@@ -163,9 +226,21 @@ int APS5_VABI sceSaveDataGetParam(const SaveDataMountPoint* mount_point, uint32_
 
 int APS5_VABI sceSaveDataGetSaveDataMemory2(SaveDataMemoryGet2* get_param) {
     Aps5TraceCall_nid_no_patch(__func__);
-    (void)get_param;
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    if (get_param == nullptr) return SAVE_DATA_ERROR_PARAMETER;
+    const auto& get = *reinterpret_cast<const MemoryGet2*>(get_param);
+    std::lock_guard lock(memoryMutex);
+    const auto path = memoryFile(get.userId, get.slotId);
+    std::error_code error;
+    if (!std::filesystem::exists(path, error)) return SAVE_DATA_ERROR_NOT_FOUND;
+    if (get.data == nullptr) return SAVE_DATA_OK;
+    const auto& data = *get.data;
+    if (!validData(data)) return SAVE_DATA_ERROR_PARAMETER;
+    auto* bytes = static_cast<char*>(data.buffer);
+    std::fill(bytes, bytes + data.bytes, char{0});
+    std::ifstream file(path, std::ios::binary);
+    file.seekg(data.offset);
+    if (file) file.read(bytes, static_cast<std::streamsize>(data.bytes));
+    return SAVE_DATA_OK;
 }
 
 int APS5_VABI sceSaveDataInitialize3(const void* init) {
@@ -290,24 +365,51 @@ int APS5_VABI sceSaveDataSetParam(const SaveDataMountPoint* mount_point, uint32_
 
 int APS5_VABI sceSaveDataSetSaveDataMemory2(const SaveDataMemorySet2* set_param) {
     Aps5TraceCall_nid_no_patch(__func__);
-    (void)set_param;
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    if (set_param == nullptr) return SAVE_DATA_ERROR_PARAMETER;
+    const auto& set = *reinterpret_cast<const MemorySet2*>(set_param);
+    std::lock_guard lock(memoryMutex);
+    const auto path = memoryFile(set.userId, set.slotId);
+    std::error_code error;
+    if (!std::filesystem::exists(path, error)) return SAVE_DATA_ERROR_NOT_FOUND;
+    if (set.data == nullptr) return SAVE_DATA_OK;
+    const auto count = std::max<std::uint32_t>(set.dataCount, 1u);
+    std::fstream file(path, std::ios::binary | std::ios::in | std::ios::out);
+    if (!file) return SAVE_DATA_ERROR_NOT_FOUND;
+    for (std::uint32_t index = 0; index < count; ++index) {
+        const auto& data = set.data[index];
+        if (!validData(data)) return SAVE_DATA_ERROR_PARAMETER;
+        file.seekp(data.offset);
+        file.write(static_cast<const char*>(data.buffer), static_cast<std::streamsize>(data.bytes));
+    }
+    file.flush();
+    return file ? SAVE_DATA_OK : SAVE_DATA_ERROR_OUT_OF_MEMORY;
 }
 
 int APS5_VABI sceSaveDataSetupSaveDataMemory2(const SaveDataMemorySetup2* setup_param, SaveDataMemorySetupResult* result) {
     Aps5TraceCall_nid_no_patch(__func__);
-    (void)setup_param;
-    (void)result;
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    if (setup_param == nullptr) return SAVE_DATA_ERROR_PARAMETER;
+    const auto& setup = *reinterpret_cast<const MemorySetup2*>(setup_param);
+    if (setup.memoryBytes == 0 || setup.memoryBytes > MemoryLimit) return SAVE_DATA_ERROR_PARAMETER;
+    std::lock_guard lock(memoryMutex);
+    const auto path = memoryFile(setup.userId, setup.slotId);
+    std::error_code error;
+    std::filesystem::create_directories(path.parent_path(), error);
+    std::uint64_t existed = 0;
+    if (std::filesystem::exists(path, error)) existed = std::filesystem::file_size(path, error);
+    else std::ofstream(path, std::ios::binary).close();
+    if (std::filesystem::file_size(path, error) < setup.memoryBytes) std::filesystem::resize_file(path, setup.memoryBytes, error);
+    if (error) return SAVE_DATA_ERROR_OUT_OF_MEMORY;
+    if (result != nullptr) {
+        auto& setupResult = *reinterpret_cast<MemorySetupResult*>(result);
+        setupResult.existedMemoryBytes = existed;
+    }
+    return SAVE_DATA_OK;
 }
 
 int APS5_VABI sceSaveDataSyncSaveDataMemory(const void* sync_param) {
     Aps5TraceCall_nid_no_patch(__func__);
     (void)sync_param;
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return SAVE_DATA_OK;
 }
 
 int APS5_VABI sceSaveDataTerminate(void) {
