@@ -1384,10 +1384,12 @@ void VulkanDevice::ResolveMemory(std::uint64_t address, std::size_t bytes, bool 
     slowTimer.Split("device resolve lock wait");
     state->drawQueue->Resolve(address, bytes);
     state->renderCache->Resolve(address, bytes, writable);
+    if (state->guestBufferCache) state->guestBufferCache->WriteBackResident(address, bytes);
     state->PublishHostRanges();
 }
 
 bool VulkanDevice::NeedsResolve(std::uint64_t address, std::size_t bytes) const {
+    if (state->guestBufferCache && state->guestBufferCache->ResidentDirty(address, bytes)) return true;
     using HostRanges = PublishedPointer<const std::vector<std::pair<std::uint64_t, std::uint64_t>>>;
     thread_local HostRanges::Cache* cache = nullptr;
     if (cache == nullptr) cache = new HostRanges::Cache();

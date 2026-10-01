@@ -71,6 +71,7 @@ public:
         for (const auto& writer : writers) ranges.insert(ranges.end(), writer.resources->WriteRanges().begin(), writer.resources->WriteRanges().end());
     }
     void Wait();
+    VkCommandBuffer UploadCommands(const Context& context);
     void WaitGds() { if (lastGdsSequence != 0) waitThrough(lastGdsSequence); }
     void MarkGds();
     void WaitGpu();
@@ -86,12 +87,14 @@ private:
     struct Batch {
         std::vector<Entry> entries;
         std::unique_ptr<CommandBatch> commands;
+        std::unique_ptr<CommandBatch> uploads;
         bool hasBarrier = false;
         std::size_t uploadBytes = 0;
         std::vector<std::function<void()>> completions;
         std::vector<std::pair<std::uint64_t, std::uint64_t>> reads;
     };
     VkCommandBuffer begin(const Context& context);
+    VkCommandBuffer ensureRecording(const Context& context);
     void retire(Batch batch);
     void throttle();
     void waitThrough(std::uint64_t sequence);
@@ -101,6 +104,8 @@ private:
     Batch recording;
     std::vector<Batch> pending;
     std::vector<std::unique_ptr<CommandBatch>> available;
+    std::vector<std::unique_ptr<CommandBatch>> availableUploads;
+    PFN_vkCmdPipelineBarrier uploadBarrier = nullptr;
     std::atomic<std::size_t> readRanges{0};
     std::size_t drawCount = 0;
     std::uint64_t nextSequence = 1;

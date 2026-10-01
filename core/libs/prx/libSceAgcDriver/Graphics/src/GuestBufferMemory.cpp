@@ -139,12 +139,13 @@ void GuestBufferMemory::Upload(bool addressable) {
         if ((region.writable || region.fromGuest) && context.guestBufferCache != nullptr) {
             static const bool inPlaceEnabled = std::getenv("ANYPS5_NO_BUFFERS_IN_PLACE") == nullptr;
             if (inPlaceEnabled && (!addressable || context.bufferDeviceAddress)) {
-                if (auto view = context.guestBufferCache->HostRange(region.begin - region.padding, region.end - region.begin + region.padding); view.buffer && (view.buffer->Usage() & usage) == usage) {
-                    resolveAccesses(true);
+                resolveAccesses(true);
+                if (auto view = context.guestBufferCache->HostRange(region.begin - region.padding, region.end - region.begin + region.padding, region.writable); view.buffer && (view.buffer->Usage() & usage) == usage) {
                     region.buffer = std::move(view.buffer);
                     region.bufferOffset = view.offset;
                     region.inPlace = true;
-                    regionWrites([&](std::uint64_t first, std::uint64_t last) { context.guestBufferCache->NoteGpuWrite(first, last); });
+                    region.resident = view.resident;
+                    if (!region.resident) regionWrites([&](std::uint64_t first, std::uint64_t last) { context.guestBufferCache->NoteGpuWrite(first, last); });
                     continue;
                 }
             }
@@ -194,13 +195,24 @@ std::vector<ShaderRecompiler::BdaAbi::Range> GuestBufferMemory::AddressRanges() 
     return result;
 }
 
+void GuestBufferMemory::NoteResidentWrites() {
+    if (!uploaded || committed || context.guestBufferCache == nullptr) return;
+    for (const auto& region : regions) {
+        if (!region.resident || !region.writable) continue;
+        for (const auto& [first, last] : writes) {
+            if (first >= region.begin && first < region.end) context.guestBufferCache->NoteResidentWrite(first, std::min(last, region.end));
+        }
+    }
+}
+
 std::vector<DispatchBindings::BoundRegion> GuestBufferMemory::CaptureRegions() const {
     Require(uploaded && !committed, "guest GPU memory is not available for capture");
     std::vector<DispatchBindings::BoundRegion> result;
     result.reserve(regions.size());
     for (const auto& region : regions) {
         Require(region.buffer != nullptr, "incomplete guest GPU upload");
-        const auto bytes = region.buffer->Bytes().subspan(static_cast<std::size_t>(region.bufferOffset), static_cast<std::size_t>(region.padding + region.end - region.begin));
+        const auto length = static_cast<std::size_t>(region.padding + region.end - region.begin);
+        const auto bytes = region.resident ? std::span<const std::byte>(reinterpret_cast<const std::byte*>(region.begin - region.padding), length) : region.buffer->Bytes().subspan(static_cast<std::size_t>(region.bufferOffset), length);
         result.push_back({region.begin, region.end, region.padding, region.writable, region.buffer->Imported(), region.image != nullptr, region.buffer->Properties(), bytes, region.buffer});
     }
     return result;
@@ -237,13 +249,13 @@ void GuestBufferMemory::WriteBack(std::uint64_t sequence) {
         Require(found != regions.begin(), "write-back range has no GPU owner");
         const auto& region = *std::prev(found);
         Require(region.buffer != nullptr && region.writable && end <= region.end, "write-back range exceeds its GPU owner");
-        sources.push_back(region.buffer->Bytes().subspan(static_cast<std::size_t>(region.bufferOffset + begin - region.begin + region.padding), static_cast<std::size_t>(end - begin)));
+        sources.push_back(region.inPlace ? std::span<const std::byte>{} : region.buffer->Bytes().subspan(static_cast<std::size_t>(region.bufferOffset + begin - region.begin + region.padding), static_cast<std::size_t>(end - begin)));
         inPlace.push_back(region.inPlace);
         if (inPlace.back() && gpuOrdered && context.guestBufferCache != nullptr) {
             if (context.renderCache != nullptr) {
                 for (const auto& [first, last] : context.renderCache->WatchedRanges(begin, end, sequence)) GuestMemory::CheckRange(reinterpret_cast<const void*>(first), static_cast<std::size_t>(last - first), 1, true);
             }
-            context.guestBufferCache->NoteGpuWrite(begin, end);
+            if (!region.resident) context.guestBufferCache->NoteGpuWrite(begin, end);
         } else if (inPlace.back() && context.renderCache != nullptr) {
             for (const auto& [first, last] : context.renderCache->UnadoptedRanges(begin, end, sequence)) GuestMemory::CheckRange(reinterpret_cast<const void*>(first), static_cast<std::size_t>(last - first), 1, true);
         } else {

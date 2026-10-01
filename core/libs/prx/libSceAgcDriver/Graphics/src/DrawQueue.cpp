@@ -89,7 +89,11 @@ bool WriteIntervals::Pending(std::uint64_t address, std::size_t bytes, std::uint
 
 DrawQueue::~DrawQueue() {
     recording.commands.reset();
-    for (auto& batch : pending) batch.commands.reset();
+    recording.uploads.reset();
+    for (auto& batch : pending) {
+        batch.commands.reset();
+        batch.uploads.reset();
+    }
 }
 
 VkCommandBuffer DrawQueue::Begin(const Context& context) {
@@ -102,6 +106,30 @@ VkCommandBuffer DrawQueue::begin(const Context& context) {
     EndPass();
     Collect();
     throttle();
+    return ensureRecording(context);
+}
+
+VkCommandBuffer DrawQueue::UploadCommands(const Context& context) {
+    releases = context.releaseQueue;
+    ensureRecording(context);
+    if (!recording.uploads) {
+        if (uploadBarrier == nullptr) uploadBarrier = context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier");
+        if (availableUploads.empty()) recording.uploads = std::make_unique<CommandBatch>(context, "upload");
+        else {
+            recording.uploads = std::move(availableUploads.back());
+            availableUploads.pop_back();
+            recording.uploads->Reset();
+        }
+        VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        barrier.srcAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+        uploadBarrier(recording.uploads->Handle(), VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
+    }
+    workSinceBarrier = true;
+    return recording.uploads->Handle();
+}
+
+VkCommandBuffer DrawQueue::ensureRecording(const Context& context) {
     if (!recording.commands) {
         if (available.empty()) recording.commands = std::make_unique<CommandBatch>(context);
         else {
@@ -161,6 +189,7 @@ void DrawQueue::Enqueue(std::shared_ptr<ShaderResources> resources, std::shared_
     if (resources->HasGuestWrites()) {
         writers.push_back({nextSequence, resources.get()});
         writerEpoch.fetch_add(1, std::memory_order_release);
+        resources->NoteResidentWrites();
     }
     if (resources->UsesGds()) lastGdsSequence = nextSequence;
     recording.entries.push_back({std::move(storage), std::move(resources), nextSequence++});
@@ -246,6 +275,13 @@ bool DrawQueue::CopiedWritesPending(std::uint64_t address, std::size_t bytes) co
 void DrawQueue::Flush() {
     if (!recording.commands) return;
     EndPass();
+    if (recording.uploads) {
+        VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+        uploadBarrier(recording.uploads->Handle(), VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
+        recording.uploads->Submit();
+    }
     pending.push_back(std::move(recording));
     recording = Batch{};
     ++flushedBatches;

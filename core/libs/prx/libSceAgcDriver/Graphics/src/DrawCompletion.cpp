@@ -42,6 +42,10 @@ void DrawQueue::retire(Batch batch) {
     batch.completions.clear();
     timing.Mark("completions");
     available.push_back(std::move(batch.commands));
+    if (batch.uploads) {
+        batch.uploads->Wait();
+        availableUploads.push_back(std::move(batch.uploads));
+    }
     timing.Mark("resources_release");
 }
 

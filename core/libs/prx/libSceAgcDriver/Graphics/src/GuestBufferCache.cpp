@@ -1,4 +1,5 @@
 #include "prx/libSceAgcDriver/Graphics/include/GuestBufferCache.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/DrawQueue.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ReleaseQueue.hpp"
 #include "prx/libc/include/SlowOperation.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
@@ -25,6 +26,14 @@ std::uint64_t ConfiguredBudget() {
     return 3ull << 30;
 }
 
+std::uint64_t ConfiguredResidentBudget() {
+    if (const char* value = std::getenv("ANYPS5_RESIDENT_MB")) {
+        const auto megabytes = std::strtoull(value, nullptr, 10);
+        if (megabytes != 0) return megabytes << 20;
+    }
+    return 2560ull << 20;
+}
+
 std::chrono::steady_clock::rep Ticks(std::chrono::steady_clock::duration duration) {
     return duration.count();
 }
@@ -39,7 +48,23 @@ bool TextureMemcmp() {
     return enabled;
 }
 
-GuestBufferCache::GuestBufferCache(const Context& context) : context(context), stateBlocks(new std::atomic<ChunkState*>[StateLimit >> StateBlockShift]()), budget(ConfiguredBudget()) {}
+namespace {
+
+std::atomic<int> residentOverride{-1};
+
+}
+
+bool GuestBufferCache::ResidentEnabled() {
+    if (const auto forced = residentOverride.load(std::memory_order_relaxed); forced >= 0) return forced != 0;
+    static const bool enabled = std::getenv("ANYPS5_NO_RESIDENT_BUFFERS") == nullptr && std::getenv("ANYPS5_CAPTURE_DISPATCH") == nullptr && !TextureMemcmp();
+    return enabled;
+}
+
+void GuestBufferCache::SetResidentEnabled(bool enabled) {
+    residentOverride.store(enabled ? 1 : 0, std::memory_order_relaxed);
+}
+
+GuestBufferCache::GuestBufferCache(const Context& context) : context(context), stateBlocks(new std::atomic<ChunkState*>[StateLimit >> StateBlockShift]()), budget(ConfiguredBudget()), residentBudget(ConfiguredResidentBudget()) {}
 
 GuestBufferCache::~GuestBufferCache() {
     std::lock_guard registryLock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
@@ -69,7 +94,7 @@ GuestBufferCache::ChunkState* GuestBufferCache::createState(std::uint64_t addres
 
 void GuestBufferCache::publish(const Chunk& chunk) {
     if (chunk.published == nullptr) return;
-    const auto flags = (chunk.protectedRead ? ProtectedState : 0) | (chunk.lost ? LostState : 0) | (chunk.untrackable ? UntrackableState : 0) | (chunk.written ? WrittenState : 0);
+    const auto flags = (chunk.protectedRead ? ProtectedState : 0) | (chunk.lost ? LostState : 0) | (chunk.untrackable ? UntrackableState : 0) | (chunk.written ? WrittenState : 0) | (chunk.gpuDirty ? GpuDirtyState : 0);
     chunk.published->immutableSince.store(chunk.immutableSince, std::memory_order_relaxed);
     chunk.published->state.store((chunk.generation << StateFlagBits) | flags, std::memory_order_release);
 }
@@ -101,6 +126,15 @@ void GuestBufferCache::resolve(void* owner, GuestMemoryTracking::Access access) 
     const auto it = cache.chunks.find(self->address);
     if (it == cache.chunks.end()) return;
     auto& chunk = *it->second;
+    if (chunk.gpuDirty) {
+        if (access == GuestMemoryTracking::Access::Invalidate) {
+            chunk.gpuDirty = false;
+            cache.dirtyChunks.fetch_sub(1, std::memory_order_relaxed);
+            cache.removeDirtyRange(chunk.address, chunk.address + chunkBytes);
+        } else {
+            cache.writeBackChunk(chunk);
+        }
+    }
     if (access == GuestMemoryTracking::Access::Read) return;
     chunk.generation = ++cache.generation;
     chunk.protectedRead = false;
@@ -353,12 +387,16 @@ bool GuestBufferCache::HostImportable(std::uint64_t address, std::uint64_t bytes
     return hostExtent(address, bytes, extent, importBytes);
 }
 
-GuestBufferCache::HostView GuestBufferCache::HostRange(std::uint64_t address, std::uint64_t bytes) {
+GuestBufferCache::HostView GuestBufferCache::HostRange(std::uint64_t address, std::uint64_t bytes, bool writable) {
     GuestMemoryBacking::GuestMemoryBackingExtentInfo extent{};
     std::uint64_t importBytes = 0;
     if (!hostExtent(address, bytes, extent, importBytes)) return {};
     std::lock_guard registryLock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
     std::lock_guard lock(mutex);
+    if (ResidentEnabled() && context.drawQueue != nullptr) {
+        if (auto view = residentRange(address, bytes, writable, extent, importBytes); view.buffer) return view;
+        WriteBackResident(address, bytes);
+    }
     if (const auto generation = GuestMemoryBacking::GuestMemoryBackingUnmapGeneration_nid_postfix(); generation != unmapGeneration) {
         unmapGeneration = generation;
         for (auto it = hostMappings.begin(); it != hostMappings.end();) {
@@ -412,6 +450,274 @@ GuestBufferCache::HostView GuestBufferCache::HostRange(std::uint64_t address, st
     if (reported++ < 8 || last - first > HostWindowBytes) APS5_LOG_OUT("guest range 0x%llx+%.1f MiB imported for vertex, index and buffer data (request 0x%llx+0x%llx, %.1f MiB imported in all)", static_cast<unsigned long long>(first), (last - first) / 1048576.0, static_cast<unsigned long long>(address), static_cast<unsigned long long>(bytes), hostBytes / 1048576.0);
     trimHost();
     return {std::move(buffer), address - first};
+}
+
+GuestBufferCache::HostView GuestBufferCache::residentRange(std::uint64_t address, std::uint64_t bytes, bool writable, const GuestMemoryBacking::GuestMemoryBackingExtentInfo& extent, std::uint64_t importBytes) {
+    if (const auto generation = GuestMemoryBacking::GuestMemoryBackingUnmapGeneration_nid_postfix(); generation != residentUnmapGeneration) {
+        residentUnmapGeneration = generation;
+        for (auto it = residentWindows.begin(); it != residentWindows.end();) {
+            GuestMemoryBacking::GuestMemoryBackingExtentInfo current{};
+            const bool live = GuestMemoryBacking::GuestMemoryBackingExtent_nid_postfix(it->first, 1, &current) && current.serial == it->second.serial;
+            if (live) ++it;
+            else dropResidentWindow(it++);
+        }
+    }
+    const auto first = extent.address + (address - extent.address) / HostWindowBytes * HostWindowBytes;
+    const auto last = std::min(extent.address + importBytes, first + HostWindowBytes);
+    if (address + bytes > last) return {};
+    if (writable && !residentWritable(address, bytes)) return {};
+    auto it = residentWindows.find(first);
+    if (it != residentWindows.end() && (it->second.serial != extent.serial || it->second.bytes != last - first)) {
+        dropResidentWindow(it);
+        it = residentWindows.end();
+    }
+    if (it == residentWindows.end()) {
+        trimResident();
+        std::shared_ptr<Buffer> buffer;
+        try {
+            const VkBufferUsageFlags usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | (context.bufferDeviceAddress ? VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT : 0u);
+            buffer = std::make_shared<Buffer>(context, static_cast<std::size_t>(last - first), usage, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        } catch (const std::exception& error) {
+            static int reported = 0;
+            if (reported++ < 4) APS5_LOG_OUT("guest range 0x%llx+%.1f MiB cannot be made resident in GPU memory (%s); importing it instead", static_cast<unsigned long long>(first), (last - first) / 1048576.0, error.what());
+            return {};
+        }
+        it = residentWindows.emplace(first, ResidentWindow{extent.serial, last - first, std::move(buffer), 0}).first;
+        residentBytes += last - first;
+        static int reported = 0;
+        if (reported++ < 8) APS5_LOG_OUT("guest range 0x%llx+%.1f MiB resident in GPU memory (request 0x%llx+0x%llx, %.1f MiB resident in all)", static_cast<unsigned long long>(first), (last - first) / 1048576.0, static_cast<unsigned long long>(address), static_cast<unsigned long long>(bytes), residentBytes / 1048576.0);
+    }
+    auto& window = it->second;
+    window.lastUse = ++hostUses;
+    syncResident(first, window, address, bytes);
+    return {window.buffer, address - first, true};
+}
+
+bool GuestBufferCache::residentWritable(std::uint64_t address, std::uint64_t bytes) {
+    const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
+    const auto protection = GuestAllocations::GuestAllocationsProtectionGeneration_nid_postfix();
+    for (auto base = address - address % chunkBytes; base < address + bytes; base += chunkBytes) {
+        auto& chunk = this->chunk(base);
+        if (chunk.gpuDirty) continue;
+        protectChunk(chunk, now);
+        if (chunk.untrackable || !chunk.watch || (chunk.immutableSince != 0 && chunk.immutableSince == protection)) return false;
+    }
+    return true;
+}
+
+void GuestBufferCache::syncResident(std::uint64_t first, const ResidentWindow& window, std::uint64_t address, std::uint64_t bytes) {
+    const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
+    const auto protection = GuestAllocations::GuestAllocationsProtectionGeneration_nid_postfix();
+    const auto end = address + bytes;
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> stale;
+    for (auto base = address - address % chunkBytes; base < end; base += chunkBytes) {
+        auto& chunk = this->chunk(base);
+        if (chunk.gpuDirty) continue;
+        protectChunk(chunk, now);
+        const bool immutable = chunk.immutableSince != 0 && chunk.immutableSince == protection;
+        const bool tracked = immutable || (!chunk.untrackable && !chunk.lost && chunk.protectedRead && chunk.generation <= chunk.residentSynced);
+        if (chunk.residentWindow == first && chunk.residentSynced != 0 && tracked) continue;
+        const auto from = std::max(base, first);
+        const auto to = std::min(base + chunkBytes, first + window.bytes);
+        if (from >= to) continue;
+        if (!stale.empty() && stale.back().second == from) stale.back().second = to;
+        else stale.emplace_back(from, to);
+        chunk.residentWindow = first;
+        chunk.residentSynced = chunk.untrackable ? 0 : generation;
+        publish(chunk);
+    }
+    if (stale.empty()) return;
+    PerformanceTimer timing("Graphics.GuestBufferCache.Upload");
+    const auto copyBuffer = context.Function<PFN_vkCmdCopyBuffer>("vkCmdCopyBuffer");
+    for (const auto& [from, to] : stale) {
+        const auto count = static_cast<std::size_t>(to - from);
+        auto staging = std::make_shared<Buffer>(context, count, VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+        GuestMemory::Read(from, staging->Bytes());
+        const auto commands = context.drawQueue->UploadCommands(context);
+        const VkBufferCopy copy{0, from - first, count};
+        copyBuffer(commands, staging->Handle(), window.buffer->Handle(), 1, &copy);
+        context.drawQueue->EnqueueUpload([staging] {}, count);
+        copiedBytes += count;
+    }
+}
+
+void GuestBufferCache::addDirtyRange(std::uint64_t begin, std::uint64_t end) {
+    auto it = residentDirty.upper_bound(begin);
+    if (it != residentDirty.begin()) {
+        const auto previous = std::prev(it);
+        if (previous->second >= begin) {
+            begin = previous->first;
+            end = std::max(end, previous->second);
+            residentDirty.erase(previous);
+        }
+    }
+    while (it != residentDirty.end() && it->first <= end) {
+        end = std::max(end, it->second);
+        it = residentDirty.erase(it);
+    }
+    residentDirty.emplace(begin, end);
+}
+
+void GuestBufferCache::removeDirtyRange(std::uint64_t begin, std::uint64_t end) {
+    auto it = residentDirty.lower_bound(begin);
+    if (it != residentDirty.begin() && std::prev(it)->second > begin) --it;
+    while (it != residentDirty.end() && it->first < end) {
+        const auto first = it->first;
+        const auto last = it->second;
+        it = residentDirty.erase(it);
+        if (first < begin) residentDirty.emplace(first, begin);
+        if (last > end) {
+            residentDirty.emplace(end, last);
+            break;
+        }
+    }
+}
+
+bool GuestBufferCache::dirtyOverlaps(std::uint64_t begin, std::uint64_t end) const {
+    const auto it = residentDirty.upper_bound(begin);
+    if (it != residentDirty.begin() && std::prev(it)->second > begin) return true;
+    return it != residentDirty.end() && it->first < end;
+}
+
+void GuestBufferCache::writeBackChunk(Chunk& chunk) {
+    if (!chunk.gpuDirty) return;
+    chunk.gpuDirty = false;
+    dirtyChunks.fetch_sub(1, std::memory_order_relaxed);
+    const auto window = residentWindows.find(chunk.residentWindow);
+    const auto chunkEnd = chunk.address + chunkBytes;
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> ranges;
+    if (window != residentWindows.end()) {
+        auto it = residentDirty.lower_bound(chunk.address);
+        if (it != residentDirty.begin() && std::prev(it)->second > chunk.address) --it;
+        for (; it != residentDirty.end() && it->first < chunkEnd; ++it) {
+            const auto first = std::max({it->first, chunk.address, window->first});
+            const auto last = std::min({it->second, chunkEnd, window->first + window->second.bytes});
+            if (first < last) ranges.emplace_back(first, last);
+        }
+    }
+    removeDirtyRange(chunk.address, chunkEnd);
+    if (window == residentWindows.end() || context.drawQueue == nullptr || ranges.empty()) {
+        chunk.protectedRead = false;
+        if (chunk.watch) chunk.watch->Protect(GuestMemoryTracking::Protection::ReadWrite);
+        chunk.generation = ++generation;
+        publish(chunk);
+        return;
+    }
+    SlowOperationTimer slowTimer("resident buffer write-back");
+    PerformanceTimer timing("Graphics.GuestBufferCache.WriteBack");
+    context.drawQueue->Resolve(ranges.front().first, static_cast<std::size_t>(ranges.back().second - ranges.front().first));
+    timing.Mark("draw_wait");
+    std::size_t total = 0;
+    for (const auto& [first, last] : ranges) total += static_cast<std::size_t>(last - first);
+    Buffer staging(context, total, VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
+    {
+        CommandBatch batch(context, "cpu_access");
+        VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        barrier.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(batch.Handle(), VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
+        std::vector<VkBufferCopy> copies;
+        std::size_t offset = 0;
+        for (const auto& [first, last] : ranges) {
+            copies.push_back({first - window->first, offset, last - first});
+            offset += static_cast<std::size_t>(last - first);
+        }
+        context.Function<PFN_vkCmdCopyBuffer>("vkCmdCopyBuffer")(batch.Handle(), window->second.buffer->Handle(), staging.Handle(), static_cast<std::uint32_t>(copies.size()), copies.data());
+        batch.SubmitAndWait();
+    }
+    timing.Mark("download_wait");
+    staging.Invalidate();
+    if (chunk.watch) chunk.watch->Protect(GuestMemoryTracking::Protection::ReadWrite);
+    chunk.protectedRead = false;
+    std::size_t offset = 0;
+    for (const auto& [first, last] : ranges) {
+        std::memcpy(reinterpret_cast<void*>(first), staging.Bytes().data() + offset, static_cast<std::size_t>(last - first));
+        offset += static_cast<std::size_t>(last - first);
+    }
+    protectChunk(chunk, std::chrono::steady_clock::now().time_since_epoch().count());
+    chunk.residentSynced = generation;
+    publish(chunk);
+    timing.Mark("guest_writeback");
+}
+
+void GuestBufferCache::dropResidentWindow(std::map<std::uint64_t, ResidentWindow>::iterator window) {
+    const auto first = window->first;
+    const auto end = first + window->second.bytes;
+    removeDirtyRange(first, end);
+    for (auto it = chunks.lower_bound(first - first % chunkBytes); it != chunks.end() && it->first < end; ++it) {
+        auto& chunk = *it->second;
+        if (chunk.residentWindow != first) continue;
+        if (chunk.gpuDirty) {
+            chunk.gpuDirty = false;
+            dirtyChunks.fetch_sub(1, std::memory_order_relaxed);
+            chunk.protectedRead = false;
+            if (chunk.watch) chunk.watch->Protect(GuestMemoryTracking::Protection::ReadWrite);
+            chunk.generation = ++generation;
+        }
+        chunk.residentWindow = 0;
+        chunk.residentSynced = 0;
+        publish(chunk);
+    }
+    residentBytes -= window->second.bytes;
+    residentWindows.erase(window);
+}
+
+void GuestBufferCache::trimResident() {
+    while (residentBytes > residentBudget) {
+        auto oldest = residentWindows.end();
+        for (auto it = residentWindows.begin(); it != residentWindows.end(); ++it) {
+            if (it->second.buffer.use_count() == 1 && (oldest == residentWindows.end() || it->second.lastUse < oldest->second.lastUse)) oldest = it;
+        }
+        if (oldest == residentWindows.end()) return;
+        const auto first = oldest->first;
+        const auto end = first + oldest->second.bytes;
+        for (auto it = chunks.lower_bound(first - first % chunkBytes); it != chunks.end() && it->first < end; ++it) {
+            if (it->second->gpuDirty && it->second->residentWindow == first) writeBackChunk(*it->second);
+        }
+        dropResidentWindow(oldest);
+    }
+}
+
+void GuestBufferCache::NoteResidentWrite(std::uint64_t begin, std::uint64_t end) {
+    if (begin >= end) return;
+    std::lock_guard registryLock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
+    std::lock_guard lock(mutex);
+    const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
+    addDirtyRange(begin, end);
+    for (auto base = begin - begin % chunkBytes; base < end; base += chunkBytes) {
+        auto& chunk = this->chunk(base);
+        if (chunk.gpuDirty) continue;
+        protectChunk(chunk, now);
+        if (!chunk.watch || chunk.untrackable) continue;
+        chunk.gpuDirty = true;
+        dirtyChunks.fetch_add(1, std::memory_order_relaxed);
+        chunk.protectedRead = false;
+        chunk.watch->Protect(GuestMemoryTracking::Protection::None);
+        publish(chunk);
+    }
+}
+
+void GuestBufferCache::WriteBackResident(std::uint64_t address, std::uint64_t bytes) {
+    if (!ResidentEnabled() || bytes == 0 || dirtyChunks.load(std::memory_order_relaxed) == 0) return;
+    const auto end = address + std::min<std::uint64_t>(bytes, StateLimit);
+    std::lock_guard registryLock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
+    std::lock_guard lock(mutex);
+    for (auto it = chunks.lower_bound(address - address % chunkBytes); it != chunks.end() && it->first < end; ++it) {
+        if (it->second->gpuDirty) writeBackChunk(*it->second);
+    }
+}
+
+bool GuestBufferCache::ResidentDirty(std::uint64_t address, std::uint64_t bytes) const {
+    if (!ResidentEnabled() || bytes == 0 || dirtyChunks.load(std::memory_order_acquire) == 0) return false;
+    if (bytes > (std::uint64_t{1} << 30)) return true;
+    bool flagged = false;
+    for (auto base = address - address % chunkBytes; base < address + bytes && !flagged; base += chunkBytes) {
+        const auto* entry = stateOf(base);
+        flagged = entry != nullptr && (entry->state.load(std::memory_order_acquire) & GpuDirtyState) != 0;
+    }
+    if (!flagged) return false;
+    std::lock_guard lock(mutex);
+    return dirtyOverlaps(address, address + bytes);
 }
 
 std::vector<std::pair<std::uint64_t, std::uint64_t>> GuestBufferCache::AddressWindows(std::uint64_t begin, std::uint64_t end, std::span<const std::pair<std::uint64_t, std::uint64_t>> required) {
@@ -482,6 +788,7 @@ void GuestBufferCache::ReleaseTracking(std::uint64_t address, std::size_t bytes)
         const auto it = chunks.find(base);
         if (it == chunks.end()) continue;
         auto& chunk = *it->second;
+        if (chunk.gpuDirty) writeBackChunk(chunk);
         chunk.watch.reset();
         chunk.generation = ++generation;
         chunk.protectedRead = false;

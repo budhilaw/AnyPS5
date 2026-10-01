@@ -29,6 +29,7 @@ namespace {
 
 struct DrawStorage {
     std::unique_ptr<Buffer> indices;
+    std::vector<std::byte> indexCopy;
     std::vector<std::unique_ptr<Buffer>> vertices;
     std::vector<std::shared_ptr<Buffer>> hostViews;
     std::shared_ptr<ResidentColor> color;
@@ -129,7 +130,13 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
         if (view.buffer && view.offset % 4u == 0) {
             indexHandle = view.buffer->Handle();
             indexOffset = view.offset;
-            indexData = view.buffer->Bytes().subspan(static_cast<std::size_t>(view.offset), static_cast<std::size_t>(indexBytes));
+            if (view.resident) {
+                storage->indexCopy.resize(static_cast<std::size_t>(indexBytes));
+                GuestMemory::Read(draw.indexAddress, storage->indexCopy);
+                indexData = storage->indexCopy;
+            } else {
+                indexData = view.buffer->Bytes().subspan(static_cast<std::size_t>(view.offset), static_cast<std::size_t>(indexBytes));
+            }
             storage->hostViews.push_back(std::move(view.buffer));
         } else {
             indices = std::make_unique<Buffer>(context, static_cast<std::size_t>(indexBytes), VK_BUFFER_USAGE_INDEX_BUFFER_BIT);

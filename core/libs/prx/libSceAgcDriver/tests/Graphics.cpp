@@ -2204,6 +2204,7 @@ std::vector<std::uint32_t> linearTextureDescriptor(std::uint64_t address, std::u
 }
 
 void textureRefreshTests() {
+    AgcDriver::Graphics::GuestBufferCache::SetResidentEnabled(false);
     using namespace AgcDriver::Graphics;
     mock = MockVulkan{};
     auto context = mockContext();
