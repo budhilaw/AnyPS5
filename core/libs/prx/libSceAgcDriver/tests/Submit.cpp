@@ -18,6 +18,7 @@
 #include <future>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -231,6 +232,20 @@ void testPublishedPointer() {
     device.GetOrCreate(creator, [] { return std::make_shared<int>(8); });
     polling.join();
     check(observed, "a polling cache never observed a value created on another thread");
+    AgcDriver::PublishedPointer<int> first;
+    AgcDriver::PublishedPointer<int> second;
+    AgcDriver::PublishedPointer<int>::Cache shared;
+    const auto firstValue = std::make_shared<int>(9);
+    const auto secondValue = std::make_shared<int>(10);
+    first.Publish(firstValue);
+    second.Publish(secondValue);
+    check(first.Get(shared) == firstValue && second.Get(shared) == secondValue && first.Get(shared) == firstValue, "a cache shared by two published pointers served the value of one for the other");
+    std::optional<AgcDriver::PublishedPointer<int>> replaced(std::in_place);
+    replaced->Publish(firstValue);
+    check(replaced->Get(shared) == firstValue, "a cache shared by published pointers missed a published value");
+    replaced.emplace();
+    replaced->Publish(secondValue);
+    check(replaced->Get(shared) == secondValue, "a cache served the value of a replaced published pointer instead of its replacement's");
 }
 
 alignas(256) std::array<std::uint32_t, 64> programCode{};
