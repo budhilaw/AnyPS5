@@ -75,7 +75,7 @@ ScriptedInput ScriptedControls(std::chrono::steady_clock::time_point now) {
                     std::string entry;
                     for (std::size_t at = consumed; at <= lineEnd; ++at) {
                         const char c = content[at];
-                        if (c != ',' && c != '\n' && c != ' ') { entry += c; continue; }
+                        if (c != ',' && c != '\n' && c != '\r' && c != ' ') { entry += c; continue; }
                         if (entry.empty()) continue;
                         double duration = 0.5;
                         if (const auto colon = entry.find(':'); colon != std::string::npos) { duration = std::atof(entry.c_str() + colon + 1); entry.resize(colon); }
