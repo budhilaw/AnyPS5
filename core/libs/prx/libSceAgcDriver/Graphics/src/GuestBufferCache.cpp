@@ -24,15 +24,49 @@ std::uint64_t ConfiguredBudget() {
     return 3ull << 30;
 }
 
+std::chrono::steady_clock::rep Ticks(std::chrono::steady_clock::duration duration) {
+    return duration.count();
 }
 
-GuestBufferCache::GuestBufferCache(const Context& context) : context(context), budget(ConfiguredBudget()) {}
+}
+
+GuestBufferCache::GuestBufferCache(const Context& context) : context(context), stateBlocks(new std::atomic<ChunkState*>[StateLimit >> StateBlockShift]()), budget(ConfiguredBudget()) {}
 
 GuestBufferCache::~GuestBufferCache() {
     std::lock_guard registryLock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
     std::lock_guard lock(mutex);
     mirrors.clear();
     chunks.clear();
+}
+
+GuestBufferCache::ChunkState* GuestBufferCache::stateOf(std::uint64_t address) const {
+    if (address >= StateLimit) return nullptr;
+    auto* block = stateBlocks[address >> StateBlockShift].load(std::memory_order_acquire);
+    if (block == nullptr) return nullptr;
+    return &block[(address & ((std::uint64_t{1} << StateBlockShift) - 1)) / chunkBytes];
+}
+
+GuestBufferCache::ChunkState* GuestBufferCache::createState(std::uint64_t address) {
+    if (address >= StateLimit) return nullptr;
+    auto& slot = stateBlocks[address >> StateBlockShift];
+    auto* block = slot.load(std::memory_order_acquire);
+    if (block == nullptr) {
+        stateStorage.push_back(std::make_unique<ChunkState[]>(StateBlockChunks));
+        block = stateStorage.back().get();
+        slot.store(block, std::memory_order_release);
+    }
+    return &block[(address & ((std::uint64_t{1} << StateBlockShift) - 1)) / chunkBytes];
+}
+
+void GuestBufferCache::publish(const Chunk& chunk) {
+    if (chunk.published == nullptr) return;
+    const auto flags = (chunk.protectedRead ? ProtectedState : 0) | (chunk.lost ? LostState : 0) | (chunk.untrackable ? UntrackableState : 0) | (chunk.written ? WrittenState : 0);
+    chunk.published->immutableSince.store(chunk.immutableSince, std::memory_order_relaxed);
+    chunk.published->state.store((chunk.generation << StateFlagBits) | flags, std::memory_order_release);
+}
+
+void GuestBufferCache::touch(ChunkState& state, std::chrono::steady_clock::rep now) {
+    if (now - state.touched.load(std::memory_order_relaxed) >= Ticks(TouchGranularity)) state.touched.store(now, std::memory_order_relaxed);
 }
 
 GuestBufferCache::Chunk& GuestBufferCache::chunk(std::uint64_t address) {
@@ -43,6 +77,8 @@ GuestBufferCache::Chunk& GuestBufferCache::chunk(std::uint64_t address) {
         created->address = base;
         created->owner = std::make_unique<Owner>(Owner{this, base});
         created->generation = generation;
+        created->published = createState(base);
+        publish(*created);
         it = chunks.emplace(base, std::move(created)).first;
     }
     return *it->second;
@@ -59,31 +95,34 @@ void GuestBufferCache::resolve(void* owner, GuestMemoryTracking::Access access) 
     if (access == GuestMemoryTracking::Access::Read) return;
     chunk.generation = ++cache.generation;
     chunk.protectedRead = false;
+    chunk.written = true;
     if (chunk.watch) chunk.watch->Protect(GuestMemoryTracking::Protection::ReadWrite);
     if (access == GuestMemoryTracking::Access::Invalidate) chunk.lost = true;
+    publish(chunk);
 }
 
 void GuestBufferCache::ageChunks() {
-    const auto now = std::chrono::steady_clock::now();
-    if (now - swept < ChunkSweep) return;
-    swept = now;
+    const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
+    if (now - swept.load(std::memory_order_relaxed) < Ticks(ChunkSweep)) return;
+    swept.store(now, std::memory_order_relaxed);
     for (auto& [address, chunk] : chunks) {
-        if (!chunk->watch || !chunk->protectedRead || now - chunk->touched < ChunkAge) continue;
+        if (!chunk->watch || !chunk->protectedRead || chunk->published == nullptr || now - chunk->published->touched.load(std::memory_order_relaxed) < Ticks(ChunkAge)) continue;
         chunk->watch->Protect(GuestMemoryTracking::Protection::ReadWrite);
         chunk->protectedRead = false;
         chunk->generation = ++generation;
+        publish(*chunk);
     }
 }
 
 bool GuestBufferCache::current(const Mirror& mirror) {
     const auto protection = GuestAllocations::GuestAllocationsProtectionGeneration_nid_postfix();
-    const auto now = std::chrono::steady_clock::now();
+    const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
     const auto first = mirror.begin - mirror.begin % chunkBytes;
     auto it = chunks.find(first);
     for (auto address = first; address < mirror.end; address += chunkBytes, ++it) {
         if (it == chunks.end() || it->first != address) return false;
         auto& chunk = *it->second;
-        chunk.touched = now;
+        if (chunk.published != nullptr) touch(*chunk.published, now);
         if (chunk.immutableSince != 0 && chunk.immutableSince == protection) continue;
         if (chunk.untrackable || chunk.lost || !chunk.protectedRead || chunk.generation > mirror.synced) return false;
     }
@@ -91,51 +130,57 @@ bool GuestBufferCache::current(const Mirror& mirror) {
 }
 
 void GuestBufferCache::protect(const Mirror& mirror) {
-    const auto now = std::chrono::steady_clock::now();
+    const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
     for (auto address = mirror.begin - mirror.begin % chunkBytes; address < mirror.end; address += chunkBytes) {
         auto& chunk = this->chunk(address);
-        chunk.touched = now;
-        if (chunk.immutableSince != 0) {
-            if (chunk.immutableSince == GuestAllocations::GuestAllocationsProtectionGeneration_nid_postfix()) continue;
-            chunk.immutableSince = 0;
-            chunk.untrackable = false;
-            chunk.generation = ++generation;
-        }
-        if (chunk.untrackable) continue;
-        if (chunk.lost) {
-            chunk.watch.reset();
-            chunk.lost = false;
-        }
-        if (!chunk.watch) {
+        protectChunk(chunk, now);
+        publish(chunk);
+    }
+}
+
+void GuestBufferCache::protectChunk(Chunk& chunk, std::chrono::steady_clock::rep now) {
+    if (chunk.published != nullptr) touch(*chunk.published, now);
+    if (chunk.immutableSince != 0) {
+        if (chunk.immutableSince == GuestAllocations::GuestAllocationsProtectionGeneration_nid_postfix()) return;
+        chunk.immutableSince = 0;
+        chunk.untrackable = false;
+        chunk.generation = ++generation;
+    }
+    if (chunk.untrackable) return;
+    if (chunk.lost) {
+        chunk.watch.reset();
+        chunk.lost = false;
+    }
+    if (!chunk.watch) {
+        try {
+            chunk.watch = std::make_unique<GuestMemoryTracking::Watch>(chunk.address, chunkBytes, chunk.owner.get(), &GuestBufferCache::resolve);
+        } catch (const std::exception& error) {
+            bool readable = true, writable = true;
             try {
-                chunk.watch = std::make_unique<GuestMemoryTracking::Watch>(chunk.address, chunkBytes, chunk.owner.get(), &GuestBufferCache::resolve);
-            } catch (const std::exception& error) {
-                bool readable = true, writable = true;
-                try {
-                    GuestMemory::CheckRange(reinterpret_cast<const void*>(chunk.address), chunkBytes, 1, false);
-                } catch (...) {
-                    readable = false;
-                }
-                try {
-                    GuestMemory::CheckRange(reinterpret_cast<const void*>(chunk.address), chunkBytes, 1, true);
-                } catch (...) {
-                    writable = false;
-                }
-                if (readable && !writable) {
-                    chunk.immutableSince = GuestAllocations::GuestAllocationsProtectionGeneration_nid_postfix();
-                    continue;
-                }
-                static int reported = 0;
-                if (reported++ < 8) APS5_LOG_OUT("guest buffer chunk 0x%llx is not watchable (%s); buffers there copy on every use", static_cast<unsigned long long>(chunk.address), error.what());
-                chunk.untrackable = true;
-                chunk.untrackableReason = 'w';
-                continue;
+                GuestMemory::CheckRange(reinterpret_cast<const void*>(chunk.address), chunkBytes, 1, false);
+            } catch (...) {
+                readable = false;
             }
+            try {
+                GuestMemory::CheckRange(reinterpret_cast<const void*>(chunk.address), chunkBytes, 1, true);
+            } catch (...) {
+                writable = false;
+            }
+            if (readable && !writable) {
+                chunk.immutableSince = GuestAllocations::GuestAllocationsProtectionGeneration_nid_postfix();
+                return;
+            }
+            static int reported = 0;
+            if (reported++ < 8) APS5_LOG_OUT("guest buffer chunk 0x%llx is not watchable (%s); buffers there copy on every use", static_cast<unsigned long long>(chunk.address), error.what());
+            chunk.untrackable = true;
+            chunk.untrackableReason = 'w';
+            return;
         }
-        if (!chunk.protectedRead) {
-            chunk.watch->Protect(GuestMemoryTracking::Protection::Read);
-            chunk.protectedRead = true;
-        }
+    }
+    if (!chunk.protectedRead) {
+        chunk.watch->Protect(GuestMemoryTracking::Protection::Read);
+        chunk.protectedRead = true;
+        chunk.written = false;
     }
 }
 
@@ -433,6 +478,7 @@ void GuestBufferCache::ReleaseTracking(std::uint64_t address, std::size_t bytes)
         chunk.protectedRead = false;
         chunk.untrackable = true;
         chunk.untrackableReason = 'r';
+        publish(chunk);
     }
 }
 
@@ -445,12 +491,38 @@ std::uint64_t GuestBufferCache::Track(std::uint64_t begin, std::uint64_t end) {
     return generation;
 }
 
-bool GuestBufferCache::Current(std::uint64_t begin, std::uint64_t end, std::uint64_t stamp) {
-    std::lock_guard registryLock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
+void GuestBufferCache::NoteGpuWrite(std::uint64_t begin, std::uint64_t end) {
+    if (begin >= end) return;
     std::lock_guard lock(mutex);
-    ageChunks();
-    Mirror range{begin, end, nullptr, stamp, 0};
-    return current(range);
+    for (auto it = chunks.lower_bound(begin - begin % chunkBytes); it != chunks.end() && it->first < end; ++it) {
+        auto& chunk = *it->second;
+        chunk.generation = ++generation;
+        publish(chunk);
+    }
+}
+
+GuestBufferCache::RangeState GuestBufferCache::Check(std::uint64_t begin, std::uint64_t end, std::uint64_t stamp) {
+    const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
+    if (now - swept.load(std::memory_order_relaxed) >= Ticks(ChunkSweep)) {
+        std::lock_guard registryLock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
+        std::lock_guard lock(mutex);
+        ageChunks();
+    }
+    const auto protection = GuestAllocations::GuestAllocationsProtectionGeneration_nid_postfix();
+    auto result = RangeState::Current;
+    for (auto address = begin - begin % chunkBytes; address < end; address += chunkBytes) {
+        auto* entry = stateOf(address);
+        if (entry == nullptr) return RangeState::Untracked;
+        const auto state = entry->state.load(std::memory_order_acquire);
+        if (state == 0) return RangeState::Untracked;
+        touch(*entry, now);
+        const auto immutableSince = entry->immutableSince.load(std::memory_order_relaxed);
+        if (immutableSince != 0 && immutableSince == protection) continue;
+        if ((state & (UntrackableState | LostState)) != 0) return RangeState::Untracked;
+        if ((state & ProtectedState) == 0 && (state & WrittenState) != 0) result = RangeState::Written;
+        else if (result == RangeState::Current && ((state & ProtectedState) == 0 || (state >> StateFlagBits) > stamp)) result = RangeState::Changed;
+    }
+    return result;
 }
 
 std::string GuestBufferCache::Describe(std::uint64_t begin, std::uint64_t end, std::uint64_t stamp) {
@@ -459,10 +531,10 @@ std::string GuestBufferCache::Describe(std::uint64_t begin, std::uint64_t end, s
     std::string result;
     for (auto address = begin - begin % chunkBytes; address < end; address += chunkBytes) {
         const auto it = chunks.find(address);
-        char text[96];
+        char text[112];
         if (it == chunks.end()) { std::snprintf(text, sizeof(text), " 0x%llx:none", static_cast<unsigned long long>(address)); result += text; continue; }
         const auto& chunk = *it->second;
-        std::snprintf(text, sizeof(text), " 0x%llx:%s%c%s%s%s", static_cast<unsigned long long>(address), chunk.untrackable ? "untrackable" : "", chunk.untrackable ? chunk.untrackableReason : ' ', chunk.lost ? "lost" : "", chunk.protectedRead ? "" : "unprotected", chunk.generation > stamp ? "aged" : "");
+        std::snprintf(text, sizeof(text), " 0x%llx:%s%c%s%s%s%s", static_cast<unsigned long long>(address), chunk.untrackable ? "untrackable" : "", chunk.untrackable ? chunk.untrackableReason : ' ', chunk.lost ? "lost" : "", chunk.protectedRead ? "" : "unprotected", chunk.written ? "written" : "", chunk.generation > stamp ? "aged" : "");
         result += text;
     }
     return result;

@@ -8,6 +8,7 @@
 namespace AgcDriver::GuestMemory {
 
 void CheckRange(const void* pointer, std::size_t bytes, std::size_t alignment, bool writable = false);
+void CheckAccess(const void* pointer, std::size_t bytes, std::size_t alignment, bool writable = false);
 void DescribeRegions(std::uint64_t address, std::size_t bytes);
 std::size_t MappedGpuBytes(const void* pointer, std::size_t bytes, bool writable);
 void CheckGpuRange(const void* pointer, std::size_t bytes, std::size_t alignment, bool writable = false);

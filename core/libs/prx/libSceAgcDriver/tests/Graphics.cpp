@@ -26,6 +26,7 @@
 #include <random>
 #include <set>
 #include <string_view>
+#include <thread>
 #include <type_traits>
 #include <vector>
 
@@ -2027,6 +2028,91 @@ void drawQueueBarrierTests() {
     Require(mock.live == 0, "draw queue barrier tests leaked Vulkan objects");
 }
 
+AgcDriver::Graphics::GuestBufferCache::RangeState describedState(AgcDriver::Graphics::GuestBufferCache& cache, std::uint64_t begin, std::uint64_t end, std::uint64_t stamp) {
+    using State = AgcDriver::Graphics::GuestBufferCache::RangeState;
+    const auto text = cache.Describe(begin, end, stamp);
+    auto state = State::Current;
+    for (std::size_t at = text.find(" 0x"); at != std::string::npos;) {
+        const auto next = text.find(" 0x", at + 1);
+        const auto entry = text.substr(at, next == std::string::npos ? std::string::npos : next - at);
+        at = next;
+        const auto has = [&](std::string_view part) { return entry.find(part) != std::string::npos; };
+        if (has("none") || has("untrackable") || has("lost")) return State::Untracked;
+        if (has("written")) state = State::Written;
+        else if (state == State::Current && (has("unprotected") || has("aged"))) state = State::Changed;
+    }
+    return state;
+}
+
+void guestBufferCacheTests() {
+    using AgcDriver::Graphics::GuestBufferCache;
+    using State = GuestBufferCache::RangeState;
+    mock = MockVulkan{};
+    const auto context = mockContext();
+    constexpr std::uint64_t chunk = 1u << 16u;
+    constexpr std::size_t chunks = 8;
+    const std::size_t mapped = chunks * chunk;
+    void* memory = GuestMemoryBacking::GuestMemoryBackingMap_nid_postfix(nullptr, mapped, chunk, 3);
+    const auto base = reinterpret_cast<std::uint64_t>(memory);
+    const auto write = [](std::uint64_t address) { GuestMemoryTracking::GuestMemoryTrackingResolve_nid_postfix(address, 4, true); };
+    {
+        GuestBufferCache cache(context);
+        Require(cache.Check(base, base + chunk, 1) == State::Untracked, "an untracked range was reported as current");
+        const auto stamp = cache.Track(base, base + 4 * chunk);
+        Require(cache.Check(base, base + 4 * chunk, stamp) == State::Current && cache.Current(base + 16, base + 4 * chunk - 16, stamp), "a tracked range was not current");
+        Require(cache.Check(base, base + 5 * chunk, stamp) == State::Untracked, "a range reaching past the tracked chunks was reported as tracked");
+        cache.NoteGpuWrite(base + chunk + 64, base + chunk + 128);
+        Require(cache.Check(base, base + 4 * chunk, stamp) == State::Changed && cache.Check(base, base + chunk, stamp) == State::Current && cache.Check(base + 2 * chunk, base + 4 * chunk, stamp) == State::Current, "a GPU write did not age exactly its chunk");
+        const auto noted = cache.Describe(base + chunk, base + 2 * chunk, stamp);
+        Require(noted.find("aged") != std::string::npos && noted.find("unprotected") == std::string::npos, "a GPU write changed the protection of its chunk: " + noted);
+        write(base + chunk + 8);
+        Require(cache.Check(base, base + 4 * chunk, stamp) == State::Written && cache.Check(base + 2 * chunk, base + 3 * chunk, stamp) == State::Current, "a CPU write after a GPU write did not fault on the still protected chunk");
+        const auto restamp = cache.Track(base, base + 4 * chunk);
+        Require(restamp > stamp && cache.Check(base, base + 4 * chunk, restamp) == State::Current && cache.Describe(base, base + 4 * chunk, restamp).find("unprotected") == std::string::npos, "tracking again did not protect the written chunk");
+        GuestMemoryTracking::GuestMemoryTrackingResolve_nid_postfix(base + 2 * chunk, 4, false);
+        Require(cache.Check(base, base + 4 * chunk, restamp) == State::Current, "a CPU read changed a protected chunk");
+        cache.NoteGpuWrite(base + 6 * chunk, base + 7 * chunk);
+        Require(cache.Check(base, base + 4 * chunk, restamp) == State::Current && cache.Check(base + 6 * chunk, base + 7 * chunk, restamp) == State::Untracked, "a GPU write into untracked memory created or aged chunks");
+        GuestMemoryTracking::GuestMemoryTrackingInvalidate_nid_postfix(base + 3 * chunk, chunk);
+        Require(cache.Check(base, base + 4 * chunk, restamp) == State::Untracked && cache.Check(base, base + 3 * chunk, restamp) == State::Current, "an invalidated chunk was not reported as lost");
+        const auto revived = cache.Track(base + 3 * chunk, base + 4 * chunk);
+        Require(cache.Check(base, base + 4 * chunk, revived) == State::Current, "tracking a lost chunk again did not watch it");
+        cache.ReleaseTracking(base + 3 * chunk + 4096, 16);
+        Require(cache.Check(base, base + 4 * chunk, revived) == State::Untracked && cache.Check(base, base + 3 * chunk, revived) == State::Current, "a chunk whose tracking was released was still tracked");
+        std::mt19937_64 random(0x21u);
+        std::vector<std::uint64_t> stamps{revived};
+        const auto range = [&](std::uint64_t& first, std::uint64_t& last) {
+            first = base + random() % (3 * chunk);
+            last = std::min(base + 3 * chunk, first + 1 + random() % (2 * chunk));
+        };
+        for (int step = 0; step < 400; ++step) {
+            std::uint64_t first = 0, last = 0;
+            range(first, last);
+            switch (random() % 4) {
+                case 0: stamps.push_back(cache.Track(first, last)); break;
+                case 1: cache.NoteGpuWrite(first, last); break;
+                case 2: write(first & ~std::uint64_t{3}); break;
+                default: GuestMemoryTracking::GuestMemoryTrackingResolve_nid_postfix(first & ~std::uint64_t{3}, 4, false); break;
+            }
+            for (int query = 0; query < 4; ++query) {
+                range(first, last);
+                const auto stamp = stamps[random() % stamps.size()];
+                const auto state = cache.Check(first, last, stamp);
+                Require(state == describedState(cache, first, last, stamp), "the lock-free chunk table disagrees with the chunk map");
+            }
+        }
+        const auto aging = cache.Track(base, base + chunk);
+        const auto kept = cache.Track(base + chunk, base + 2 * chunk);
+        for (int touch = 0; touch < 20; ++touch) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            Require(cache.Check(base + chunk, base + 2 * chunk, kept) == State::Current, "a chunk checked every 20 ms aged out");
+        }
+        Require(cache.Check(base, base + chunk, aging) == State::Changed && cache.Describe(base, base + chunk, aging).find("written") == std::string::npos, "a chunk unused for 400 ms did not age out, or aging was taken for a CPU write");
+    }
+    GuestMemoryBacking::GuestMemoryBackingUnmap_nid_postfix(memory, mapped);
+    Require(mock.live == 0, "guest buffer cache tests leaked Vulkan objects");
+}
+
 void renderCacheTests() {
     using AgcDriver::Graphics::ColorTarget;
     using AgcDriver::Graphics::ColorTileMode;
@@ -2668,6 +2754,7 @@ int main() {
         writeIntervalTests();
         drawQueueWriterTests();
         drawQueueBarrierTests();
+        guestBufferCacheTests();
         renderCacheTests();
         depthWriteTests();
         depthViewTests();

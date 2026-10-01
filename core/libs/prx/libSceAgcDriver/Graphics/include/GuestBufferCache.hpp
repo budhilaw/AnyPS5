@@ -5,6 +5,7 @@
 #include "prx/libc/include/GuestAllocations.hpp"
 #include "prx/libc/include/GuestMemoryTracking.hpp"
 #include "prx/libc/include/GuestMemoryBacking.hpp"
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <list>
@@ -28,6 +29,7 @@ public:
         std::uint64_t lastUse = 0;
         bool imported = false;
     };
+    enum class RangeState { Current, Changed, Written, Untracked };
 
     explicit GuestBufferCache(const Context& context);
     ~GuestBufferCache();
@@ -48,7 +50,9 @@ public:
     void ReleaseTracking(std::uint64_t address, std::size_t bytes);
     void Flush();
     std::uint64_t Track(std::uint64_t begin, std::uint64_t end);
-    bool Current(std::uint64_t begin, std::uint64_t end, std::uint64_t stamp);
+    void NoteGpuWrite(std::uint64_t begin, std::uint64_t end);
+    RangeState Check(std::uint64_t begin, std::uint64_t end, std::uint64_t stamp);
+    bool Current(std::uint64_t begin, std::uint64_t end, std::uint64_t stamp) { return Check(begin, end, stamp) == RangeState::Current; }
     std::string Describe(std::uint64_t begin, std::uint64_t end, std::uint64_t stamp);
 
 private:
@@ -56,34 +60,56 @@ private:
         GuestBufferCache* cache;
         std::uint64_t address;
     };
+    struct ChunkState {
+        std::atomic<std::uint64_t> state{0};
+        std::atomic<std::uint64_t> immutableSince{0};
+        std::atomic<std::chrono::steady_clock::rep> touched{0};
+    };
     struct Chunk {
         std::uint64_t address;
         std::unique_ptr<Owner> owner;
         std::unique_ptr<GuestMemoryTracking::Watch> watch;
+        ChunkState* published = nullptr;
         std::uint64_t generation = 0;
         bool protectedRead = false;
         bool untrackable = false;
         char untrackableReason = 0;
         std::uint64_t immutableSince = 0;
         bool lost = false;
-        std::chrono::steady_clock::time_point touched{};
+        bool written = false;
     };
     static constexpr std::uint64_t chunkBytes = 1u << 16;
+    static constexpr unsigned StateBlockShift = 30;
+    static constexpr std::uint64_t StateLimit = std::uint64_t{1} << 48;
+    static constexpr std::uint64_t StateBlockChunks = (std::uint64_t{1} << StateBlockShift) / chunkBytes;
+    static constexpr unsigned StateFlagBits = 4;
+    static constexpr std::uint64_t ProtectedState = 1;
+    static constexpr std::uint64_t LostState = 2;
+    static constexpr std::uint64_t UntrackableState = 4;
+    static constexpr std::uint64_t WrittenState = 8;
     static constexpr std::chrono::milliseconds ChunkAge{250};
     static constexpr std::chrono::milliseconds ChunkSweep{100};
+    static constexpr std::chrono::milliseconds TouchGranularity{1};
     void ageChunks();
-    std::chrono::steady_clock::time_point swept{};
+    std::atomic<std::chrono::steady_clock::rep> swept{0};
     static constexpr std::uint64_t IncrementalBytes = 16ull << 20;
     static constexpr std::uint64_t ImportBytes = 1ull << 20;
     std::shared_ptr<Mirror> import(std::uint64_t begin, std::uint64_t end, VkBufferUsageFlags usage);
     Chunk& chunk(std::uint64_t address);
     bool current(const Mirror& mirror);
     void protect(const Mirror& mirror);
+    void protectChunk(Chunk& chunk, std::chrono::steady_clock::rep now);
     void trim();
     static void resolve(void* owner, GuestMemoryTracking::Access access);
+    ChunkState* stateOf(std::uint64_t address) const;
+    ChunkState* createState(std::uint64_t address);
+    static void publish(const Chunk& chunk);
+    static void touch(ChunkState& state, std::chrono::steady_clock::rep now);
 
     Context context;
     std::recursive_mutex mutex;
+    std::unique_ptr<std::atomic<ChunkState*>[]> stateBlocks;
+    std::vector<std::unique_ptr<ChunkState[]>> stateStorage;
     std::map<std::uint64_t, std::unique_ptr<Chunk>> chunks;
     std::map<std::pair<std::uint64_t, std::uint64_t>, std::shared_ptr<Mirror>> mirrors;
     std::uint64_t generation = 1;

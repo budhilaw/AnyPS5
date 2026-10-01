@@ -35,14 +35,8 @@ namespace {
 void require(bool condition, const char* reason) {
     if (!condition) throw std::runtime_error(std::string("AGC driver: ") + reason);
 }
-}
 
-MemoryAccessScope::State& MemoryAccessScope::current() {
-    thread_local State state;
-    return state;
-}
-
-void CheckRange(const void* pointer, std::size_t bytes, std::size_t alignment, bool writable) {
+std::uintptr_t checkedAddress(const void* pointer, std::size_t bytes, std::size_t alignment) {
     require(alignment != 0, "zero guest memory alignment");
     const auto address = reinterpret_cast<std::uintptr_t>(pointer);
     if (address == 0 || address % alignment != 0) {
@@ -51,17 +45,19 @@ void CheckRange(const void* pointer, std::size_t bytes, std::size_t alignment, b
         throw std::runtime_error(std::string("AGC driver: ") + message);
     }
     require(bytes <= std::numeric_limits<std::uintptr_t>::max() - address, "address range overflow");
-    PerformanceTimer timing("GuestMemory.CheckRange");
-    MemoryAccessScope::Resolve(address, bytes, writable);
-    timing.Mark("scope_resolve");
-    GuestMemoryTracking::GuestMemoryTrackingResolve_nid_postfix(address, bytes, writable);
-    timing.Mark("tracking_resolve");
+    return address;
+}
+
+#if defined(_WIN32) || defined(__APPLE__)
+struct VerifiedRegion { std::uint64_t epoch = 0; std::uintptr_t first = 0; std::uintptr_t end = 0; bool writable = false; };
+thread_local std::array<VerifiedRegion, 8> verified{};
+thread_local std::size_t nextVerified = 0;
+#endif
+
+void checkPermissions(std::uintptr_t address, std::size_t bytes, bool writable, PerformanceTimer& timing) {
     auto cursor = address;
     const auto end = address + bytes;
 #if defined(_WIN32) || defined(__APPLE__)
-    struct VerifiedRegion { std::uint64_t epoch = 0; std::uintptr_t first = 0; std::uintptr_t end = 0; bool writable = false; };
-    thread_local std::array<VerifiedRegion, 8> verified{};
-    thread_local std::size_t nextVerified = 0;
     const auto epoch = GuestAllocations::GuestAllocationsMapEpoch_nid_postfix();
     for (const auto& region : verified) {
         if (region.epoch == epoch && address >= region.first && end <= region.end && (region.writable || !writable)) return;
@@ -121,6 +117,7 @@ void CheckRange(const void* pointer, std::size_t bytes, std::size_t alignment, b
         cursor = std::min(end, static_cast<std::uintptr_t>(first + size));
     }
 #else
+    (void)timing;
     std::ifstream maps("/proc/self/maps");
     require(maps.is_open(), "cannot query guest memory maps");
     std::string line;
@@ -142,6 +139,33 @@ void CheckRange(const void* pointer, std::size_t bytes, std::size_t alignment, b
             throw std::runtime_error(std::string("AGC driver: ") + message);
         }
 #endif
+}
+
+}
+
+MemoryAccessScope::State& MemoryAccessScope::current() {
+    thread_local State state;
+    return state;
+}
+
+void CheckRange(const void* pointer, std::size_t bytes, std::size_t alignment, bool writable) {
+    const auto address = checkedAddress(pointer, bytes, alignment);
+    PerformanceTimer timing("GuestMemory.CheckRange");
+    MemoryAccessScope::Resolve(address, bytes, writable);
+    timing.Mark("scope_resolve");
+    GuestMemoryTracking::GuestMemoryTrackingResolve_nid_postfix(address, bytes, writable);
+    timing.Mark("tracking_resolve");
+    checkPermissions(address, bytes, writable, timing);
+}
+
+void CheckAccess(const void* pointer, std::size_t bytes, std::size_t alignment, bool writable) {
+    const auto address = checkedAddress(pointer, bytes, alignment);
+    PerformanceTimer timing("GuestMemory.CheckAccess");
+    if (GuestAllocations::GuestAllocationsCovers_nid_postfix(address, bytes, writable)) return;
+    require(!writable || !GuestAllocations::GuestAllocationsCovers_nid_postfix(address, bytes, false), "guest memory has no write permission");
+    GuestMemoryTracking::GuestMemoryTrackingValidate_nid_postfix(address, bytes, [&](std::uint64_t first, std::size_t count) {
+        checkPermissions(static_cast<std::uintptr_t>(first), count, writable, timing);
+    });
 }
 
 void Read(std::uint64_t address, std::span<std::byte> destination, std::size_t alignment) {
