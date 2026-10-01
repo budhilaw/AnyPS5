@@ -15,9 +15,7 @@
 #include "prx/libSceAgcDriver/Execution/include/VulkanDevice.hpp"
 #include "prx/libSceAgcDriver/Execution/include/VideoOutput.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ShaderInputState.hpp"
-#include "prx/libSceAgcDriver/Graphics/include/GuestTextureResource.hpp"
-#include "prx/libSceAgcDriver/Graphics/include/Texture.hpp"
-#include "prx/libSceAgcDriver/Graphics/include/TextureTiling.hpp"
+#include "prx/libSceAgcDriver/Execution/include/WriteRanges.hpp"
 #include "prx/libc/include/Shutdown.hpp"
 #include "prx/libSceAgcDriver/Execution/include/MemoryAccessScope.hpp"
 #include "prx/libSceAgcDriver/Eq/include/Event.hpp"
@@ -217,30 +215,37 @@ void ReportUnresolvedImages(const char* kind, std::uint64_t address, const Shade
     if (reported.insert(address).second) { std::fprintf(stderr, "AGC driver: %s program 0x%llx samples %u image(s) whose descriptors are selected at run time; they read as null textures\n", kind, static_cast<unsigned long long>(address), result.unresolvedImages); std::fflush(stderr); }
 }
 
-bool StorageImageWrites(const ShaderRecompiler::DescriptorBinding& binding, std::vector<std::pair<std::uint64_t, std::uint64_t>>& writes) {
-    if (binding.count == 0 || binding.guestDescriptor.size() != static_cast<std::size_t>(binding.count) * 8) return false;
-    for (std::size_t element = 0; element < binding.count; ++element) {
-        const auto words = std::span<const std::uint32_t>(binding.guestDescriptor).subspan(element * 8, 8);
-        if (words[0] == 0 && (words[1] & 0xffu) == 0) continue;
-        try {
-            const auto resource = Graphics::DecodeTextureResource(words);
-            if (resource.baseAddress == 0) continue;
-            const auto mips = Graphics::ComputeMipLayout(resource);
-            const auto bytes = Graphics::ComputeSurfaceSize(mips, Graphics::FullArrayLayers(resource));
-            if (bytes == 0 || bytes > std::numeric_limits<std::uint64_t>::max() - resource.baseAddress) return false;
-            writes.emplace_back(resource.baseAddress, resource.baseAddress + bytes);
-        } catch (const std::exception&) {
-            return false;
-        }
+enum class JobKind : std::uint8_t { Draw, Dispatch, Transfer, Gds, Occlusion, Barrier };
+
+const char* JobKindName(JobKind kind) {
+    switch (kind) {
+        case JobKind::Draw: return "draw";
+        case JobKind::Dispatch: return "dispatch";
+        case JobKind::Transfer: return "transfer";
+        case JobKind::Gds: return "gds";
+        case JobKind::Occlusion: return "occlusion";
+        case JobKind::Barrier: return "barrier";
     }
-    return true;
+    return "job";
+}
+
+const char* WriteOriginName(WriteOrigin origin) {
+    switch (origin) {
+        case WriteOrigin::ColorTarget: return "color target";
+        case WriteOrigin::BufferElement: return "buffer element";
+        case WriteOrigin::StorageImage: return "storage image";
+        case WriteOrigin::AllocationFallback: return "allocation fallback";
+        case WriteOrigin::Destination: return "destination";
+    }
+    return "range";
 }
 
 class Driver {
     struct GraphicsJob {
         std::function<void()> run;
-        std::vector<std::pair<std::uint64_t, std::uint64_t>> writes;
+        std::vector<WriteRange> writes;
         bool writesUnknown = false;
+        JobKind kind = JobKind::Barrier;
     };
 
 public:
@@ -325,7 +330,7 @@ private:
     }
 
     void postGraphics(GraphicsJob job) {
-        for (const auto& range : job.writes) postedWriteRanges[range] = graphicsPosted + 1;
+        for (const auto& range : job.writes) postedWriteRanges[{range.first, range.last}] = graphicsPosted + 1;
         if (job.writesUnknown) postedUnknownWrites = graphicsPosted + 1;
         ++graphicsPosted;
         std::unique_lock lock(graphicsMutex);
@@ -392,12 +397,23 @@ private:
                 std::string ranges;
                 {
                     std::lock_guard lock(self.graphicsMutex);
+                    auto number = self.graphicsCompleted.load(std::memory_order_acquire);
                     for (const auto& job : self.graphicsJobs) {
-                        if (job.writesUnknown) { ranges += " unknown"; continue; }
-                        for (const auto& [first, last] : job.writes) if (first < address + bytes && address < last) { char item[64]; std::snprintf(item, sizeof(item), " 0x%llx+0x%llx", static_cast<unsigned long long>(first), static_cast<unsigned long long>(last - first)); ranges += item; }
+                        ++number;
+                        char item[112];
+                        if (job.writesUnknown) {
+                            std::snprintf(item, sizeof(item), " %s#%llu unknown", JobKindName(job.kind), static_cast<unsigned long long>(number));
+                            ranges += item;
+                            continue;
+                        }
+                        for (const auto& range : job.writes) {
+                            if (range.first >= address + bytes || address >= range.last) continue;
+                            std::snprintf(item, sizeof(item), " %s#%llu %s 0x%llx+0x%llx", JobKindName(job.kind), static_cast<unsigned long long>(number), WriteOriginName(range.origin), static_cast<unsigned long long>(range.first), static_cast<unsigned long long>(range.last - range.first));
+                            ranges += item;
+                        }
                     }
                 }
-                std::fprintf(stderr, "[drain] 0x%llx+0x%zx %s queued %d recorded %d:%s\n", static_cast<unsigned long long>(address), bytes, writable ? "write" : "read", queuedWrite ? 1 : 0, recorded ? 1 : 0, ranges.c_str());
+                std::fprintf(stderr, "[drain] 0x%llx+0x%zx %s from %s in %s queued %d recorded %d writer %llu:%s\n", static_cast<unsigned long long>(address), bytes, writable ? "write" : "read", self.resolveCaller, Pm4::Name(self.resolveHeader).c_str(), queuedWrite ? 1 : 0, recorded ? 1 : 0, static_cast<unsigned long long>(writer), ranges.c_str());
                 std::fflush(stderr);
             }
         }
@@ -412,7 +428,25 @@ private:
         auto& self = *static_cast<Driver*>(context);
         return self.graphicsDevice == nullptr || (self.graphicsWriter(address, bytes) == 0 && !self.graphicsDevice->NeedsResolve(address, bytes));
     }
+
+    void resolveDrawArguments(std::span<const std::uint32_t> packet, const QueueState& queue) {
+        std::uint64_t address = 0;
+        std::size_t bytes = 0;
+        if (!Pm4::DrawIndirectArguments(packet, queue, address, bytes)) return;
+        graphicsDevice = workerDevice(true);
+        if (deferredOverlaps(address, bytes)) {
+            const auto stage = watchdog.Stage("indirect arguments wait");
+            drainGraphics("drain indirect draw arguments");
+            graphicsDevice->WaitDraws();
+            watchdog.Stage(stage);
+        }
+        resolveCaller = "indirect draw arguments";
+        resolveForHost(this, address, bytes, false);
+    }
+
     std::shared_ptr<VulkanDevice> graphicsDevice;
+    const char* resolveCaller = "PM4 execution";
+    std::uint32_t resolveHeader = 0;
     PublishedPointer<VulkanDevice>::Cache workerDeviceCache;
 
     const std::shared_ptr<VulkanDevice>& workerDevice(bool create = false) {
@@ -823,6 +857,7 @@ private:
         const std::array<ShaderRecompiler::MemoryRegion, 2> memory{{{snapshot.codeAddress, std::as_bytes(std::span(snapshot.code))}, {snapshot.headerAddress, snapshot.header}}};
         const auto current = workerDevice(true);
         graphicsDevice = current;
+        resolveCaller = "dispatch SRT capture";
         const GuestMemory::MemoryAccessScope memoryScope(this, &Driver::resolveForHost, &Driver::quietForHost);
         const auto codeOffset = static_cast<std::size_t>((address - snapshot.codeAddress) / sizeof(std::uint32_t));
         ShaderRecompiler::RecompileRequest request{
@@ -944,21 +979,8 @@ private:
             GpuJournal::Record(text);
         }
         GraphicsJob job;
-        for (const auto& binding : compiled.bindings) {
-            if (binding.role == ShaderRecompiler::DescriptorRole::GuestBuffers) {
-                for (std::size_t element = 0; element < binding.elementWritten.size() && element * 4 + 4 <= binding.guestDescriptor.size(); ++element) {
-                    if (!binding.elementWritten[element]) continue;
-                    const auto* words = binding.guestDescriptor.data() + element * 4;
-                    const auto base = (words[0] | (static_cast<std::uint64_t>(words[1]) << 32u)) & 0xffffffffffffull;
-                    const auto stride = (words[1] >> 16u) & 0x3fffu;
-                    const auto bytes = stride == 0 ? static_cast<std::uint64_t>(words[2]) : static_cast<std::uint64_t>(stride) * words[2];
-                    if (base == 0 || bytes == 0 || (element < binding.elementOptional.size() && binding.elementOptional[element] && bytes > (64ull << 20u))) continue;
-                    job.writes.emplace_back(base, base + bytes);
-                }
-            } else if (!binding.readOnly && binding.kind == ShaderRecompiler::DescriptorKind::StorageImage && !StorageImageWrites(binding, job.writes)) {
-                job.writesUnknown = true;
-            }
-        }
+        job.kind = JobKind::Dispatch;
+        CollectWrites(compiled.bindings, job.writes, job.writesUnknown);
         struct DispatchWork {
             std::shared_ptr<VulkanDevice> device;
             std::shared_ptr<FrameTiming> timing;
@@ -987,7 +1009,9 @@ private:
             std::call_once(reported[colorMode], [colorMode] { std::fprintf(stderr, "AGC driver: skipping color metadata passes (CB_COLOR_CONTROL mode %u); compression metadata is not emulated\n", colorMode); std::fflush(stderr); });
             return;
         }
+        resolveDrawArguments(packet, queue);
         auto drawParameters = Pm4::ResolveDraw(packet, queue);
+        Pm4::WriteIndirectDrawOffsets(packet, drawParameters, queue);
         if (!drawParameters.indexed && (drawParameters.indexCount == 0 || drawParameters.instanceCount == 0)) return;
         std::optional<Graphics::State> decoded;
         try {
@@ -1136,6 +1160,7 @@ private:
         const auto current = workerDevice(true);
         timing.Mark("device_setup");
         graphicsDevice = current;
+        resolveCaller = "draw SRT capture";
         const GuestMemory::MemoryAccessScope memoryScope(this, &Driver::resolveForHost, &Driver::quietForHost);
         auto shaderMemoryOwner = std::make_unique<ShaderMemory>(memory, std::move(memoryOwners));
         auto& shaderMemory = *shaderMemoryOwner;
@@ -1240,27 +1265,12 @@ private:
         }
         timing.Mark("post_compile_prepare");
         GraphicsJob job;
+        job.kind = JobKind::Draw;
         if (graphics.hasColorTarget) {
-            job.writes.emplace_back(graphics.color.address, graphics.color.address + graphics.color.bytes);
-            for (const auto& extra : graphics.extraColors) job.writes.emplace_back(extra.address, extra.address + extra.bytes);
+            job.writes.push_back({graphics.color.address, graphics.color.address + graphics.color.bytes, WriteOrigin::ColorTarget});
+            for (const auto& extra : graphics.extraColors) job.writes.push_back({extra.address, extra.address + extra.bytes, WriteOrigin::ColorTarget});
         }
-        for (const auto& result : results) {
-            for (const auto& binding : result.bindings) {
-                if (binding.role == ShaderRecompiler::DescriptorRole::GuestBuffers) {
-                    for (std::size_t element = 0; element < binding.elementWritten.size() && element * 4 + 4 <= binding.guestDescriptor.size(); ++element) {
-                        if (!binding.elementWritten[element]) continue;
-                        const auto* words = binding.guestDescriptor.data() + element * 4;
-                        const auto base = (words[0] | (static_cast<std::uint64_t>(words[1]) << 32u)) & 0xffffffffffffull;
-                        const auto stride = (words[1] >> 16u) & 0x3fffu;
-                        const auto bytes = stride == 0 ? static_cast<std::uint64_t>(words[2]) : static_cast<std::uint64_t>(stride) * words[2];
-                        if (base == 0 || bytes == 0 || (element < binding.elementOptional.size() && binding.elementOptional[element] && bytes > (64ull << 20u))) continue;
-                        job.writes.emplace_back(base, base + bytes);
-                    }
-                } else if (!binding.readOnly && binding.kind == ShaderRecompiler::DescriptorKind::StorageImage && !StorageImageWrites(binding, job.writes)) {
-                    job.writesUnknown = true;
-                }
-            }
-        }
+        for (const auto& result : results) CollectWrites(result.bindings, job.writes, job.writesUnknown);
         struct DrawWork {
             std::shared_ptr<VulkanDevice> device;
             std::shared_ptr<FrameTiming> timing;
@@ -1365,6 +1375,7 @@ private:
             const auto count = static_cast<std::size_t>((header >> 16u) & 0x3fffu) + 2;
             const auto packet = std::span(submission.commands).subspan(cursor, count);
             const auto opcode = (header >> 8u) & 0xffu;
+            resolveHeader = header;
             watchdog.Enter(submission.queue, header, "failure_check");
             {
                 PerformanceContext timingContext(frameTiming.get());
@@ -1429,7 +1440,8 @@ private:
                             const auto destination = Pm4::OcclusionDumpAddress(packet);
                             const bool afterDeferredWrites = deferredOverlaps(destination, Pm4::OcclusionDumpBytes);
                             GraphicsJob job;
-                            job.writes.emplace_back(destination, destination + Pm4::OcclusionDumpBytes);
+                            job.kind = JobKind::Occlusion;
+                            job.writes.push_back({destination, destination + Pm4::OcclusionDumpBytes, WriteOrigin::Destination});
                             job.run = [current, frame = frameTiming, destination, afterDeferredWrites] {
                                 PerformanceContext timingContext(frame.get());
                                 PerformanceTimer dumpTiming("Driver.OcclusionDump");
@@ -1452,7 +1464,8 @@ private:
                             std::size_t destinationBytes = 0, sourceBytes = 0;
                             Pm4::TransferRanges(packet, destination, destinationBytes, source, sourceBytes);
                             GraphicsJob job;
-                            if (destinationBytes != 0) job.writes.emplace_back(destination, destination + destinationBytes);
+                            job.kind = JobKind::Transfer;
+                            if (destinationBytes != 0) job.writes.push_back({destination, destination + destinationBytes, WriteOrigin::Destination});
                             QueueState* queuePointer = &queue;
                             job.run = [current, frame = frameTiming, copy = std::vector<std::uint32_t>(packet.begin(), packet.end()), queuePointer, destination, destinationBytes, source, sourceBytes] {
                                 PerformanceContext timingContext(frame.get());
@@ -1469,10 +1482,11 @@ private:
                             return execution.cursor >= submission.commands.size() ? Step::Finished : Step::Progressed;
                         } else if (memoryTransfer) {
                             GraphicsJob job;
+                            job.kind = JobKind::Gds;
                             if (Pm4::DmaGdsSource(packet)) {
                                 const auto destination = static_cast<std::uint64_t>(packet[4]) | (static_cast<std::uint64_t>(packet[5]) << 32u);
                                 const auto bytes = static_cast<std::uint64_t>(packet[6] & 0x3ffffffu);
-                                if (bytes != 0) job.writes.emplace_back(destination, destination + bytes);
+                                if (bytes != 0) job.writes.push_back({destination, destination + bytes, WriteOrigin::Destination});
                             }
                             job.run = [current, frame = frameTiming, copy = std::vector<std::uint32_t>(packet.begin(), packet.end())] {
                                 PerformanceContext timingContext(frame.get());
@@ -1546,6 +1560,7 @@ private:
                 } else if (opcode != 0x42 && opcode != 0x58 && (opcode != 0x46 || Pm4::EventWritesMemory(packet))) {
                     watchdog.Stage("pm4_execute");
                     graphicsDevice = current;
+                    resolveCaller = "PM4 execution";
                     const GuestMemory::MemoryAccessScope memoryScope(this, &Driver::resolveForHost, &Driver::quietForHost);
                     Pm4::Execute(packet, queue);
                     timing.Mark("pm4_execute");

@@ -50,6 +50,7 @@ add_library(libSceAgcDriver SHARED EXCLUDE_FROM_ALL
         ${CMAKE_CURRENT_SOURCE_DIR}/MissingImports.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/DisplayBuffer.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/Driver.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/WriteRanges.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/GuestMemory.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/ShaderMemory.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/ShaderWarmup.cpp
@@ -239,6 +240,7 @@ add_executable(agc_driver_graphics_tests EXCLUDE_FROM_ALL
         ${agcTextureDetileShaderHeader}
         Execution/src/GuestMemory.cpp
         Execution/src/GpuJournal.cpp
+        Execution/src/WriteRanges.cpp
 )
 
 target_include_directories(agc_driver_graphics_tests PRIVATE
