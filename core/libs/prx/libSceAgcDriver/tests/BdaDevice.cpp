@@ -438,6 +438,7 @@ int main(int argc, char** argv) {
         buffer.Bytes()[255] = std::byte{0x5a};
         Require(buffer.Bytes()[255] == std::byte{0x5a}, "real BDA buffer mapping failed");
         RunBdaExecutionTests(device.GetContext());
+        RunRecompiledShaderTests(device.GetContext());
         RunColorTransferTests(device.GetContext());
         checkDepthViews(device.GetContext(), device.GraphicsQueue());
         checkGpuTimestamps(device.GetContext());

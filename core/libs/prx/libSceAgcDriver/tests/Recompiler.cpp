@@ -1,5 +1,6 @@
 #include "../../../../shader/recompiler/BdaAbi.hpp"
 #include "../../../../shader/recompiler/Recompiler.hpp"
+#include "../../../../shader/recompiler/tests/SyntheticPrograms.hpp"
 #include "RecompilerRequests.hpp"
 #include <algorithm>
 #include <array>
@@ -441,10 +442,156 @@ void planeSampleOfVolumeTextureKeepsTheInstructionShape() {
     requireImage(result, Texture3D, DescriptorImageShape::Image2D, "a 2D sample of a 3D texture was not specialized as 2D");
 }
 
+namespace Synthetic = ShaderRecompiler::SyntheticPrograms;
+
+constexpr std::uint32_t OpExecutionMode = 16u;
+constexpr std::uint32_t OpCapability = 17u;
+constexpr std::uint32_t OpTypeInt = 21u;
+constexpr std::uint32_t OpTypeVector = 23u;
+constexpr std::uint32_t OpTypeRuntimeArray = 29u;
+constexpr std::uint32_t OpDecorate = 71u;
+constexpr std::uint32_t ExecutionModeLocalSize = 17u;
+constexpr std::uint32_t DecorationArrayStride = 6u;
+constexpr std::uint32_t CapabilityGroupNonUniform = 61u;
+constexpr std::uint64_t SyntheticInput = 0x40000u;
+constexpr std::uint64_t SyntheticOutput = 0x50000u;
+constexpr std::uint32_t SyntheticRecords = 4096u;
+
+template<typename TVisit>
+void forEachInstruction(const RecompileResult& result, TVisit&& visit) {
+    const std::span<const std::uint32_t> spirv(result.spirv.data(), result.spirv.size());
+    for (std::size_t word = 5; word < spirv.size();) {
+        const auto count = spirv[word] >> 16u;
+        require(count != 0u && word + count <= spirv.size(), "the SPIR-V module is malformed");
+        visit(spirv[word] & 0xffffu, spirv.subspan(word, count));
+        word += count;
+    }
+}
+
+std::array<std::uint32_t, 3> localSize(const RecompileResult& result) {
+    std::array<std::uint32_t, 3> size{};
+    forEachInstruction(result, [&](std::uint32_t opcode, std::span<const std::uint32_t> instruction) {
+        if (opcode == OpExecutionMode && instruction.size() == 6u && instruction[2] == ExecutionModeLocalSize) {
+            size = {instruction[3], instruction[4], instruction[5]};
+        }
+    });
+    return size;
+}
+
+bool declaresCapability(const RecompileResult& result, std::uint32_t capability) {
+    bool found = false;
+    forEachInstruction(result, [&](std::uint32_t opcode, std::span<const std::uint32_t> instruction) {
+        found = found || (opcode == OpCapability && instruction[1] == capability);
+    });
+    return found;
+}
+
+bool declaresVectorView(const RecompileResult& result, std::uint32_t components) {
+    std::vector<std::uint32_t> uintTypes;
+    std::vector<std::uint32_t> vectorTypes;
+    std::vector<std::uint32_t> arrays;
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> strides;
+    forEachInstruction(result, [&](std::uint32_t opcode, std::span<const std::uint32_t> instruction) {
+        if (opcode == OpTypeInt && instruction.size() == 4u && instruction[2] == 32u && instruction[3] == 0u) {
+            uintTypes.push_back(instruction[1]);
+        } else if (opcode == OpTypeVector && instruction.size() == 4u && instruction[3] == components && std::ranges::find(uintTypes, instruction[2]) != uintTypes.end()) {
+            vectorTypes.push_back(instruction[1]);
+        } else if (opcode == OpTypeRuntimeArray && instruction.size() == 3u && std::ranges::find(vectorTypes, instruction[2]) != vectorTypes.end()) {
+            arrays.push_back(instruction[1]);
+        } else if (opcode == OpDecorate && instruction.size() == 4u && instruction[2] == DecorationArrayStride) {
+            strides.emplace_back(instruction[1], instruction[3]);
+        }
+    });
+    return std::ranges::any_of(arrays, [&](std::uint32_t array) {
+        return std::ranges::find(strides, std::make_pair(array, components * 4u)) != strides.end();
+    });
+}
+
+RecompileResult compileSynthetic(const Synthetic::ComputeProgram& program, std::uint32_t waveSize, bool dualLane) {
+    return Recompile(program.Request(waveSize, 32u, dualLane));
+}
+
+void perThreadWave64ProgramRunsOneLanePerInvocation() {
+    const auto program = Synthetic::PerThreadProgram({16u, 16u, 1u}, 300u, 100u, SyntheticInput, SyntheticOutput, SyntheticRecords);
+    const auto result = compileSynthetic(program, 64u, false);
+    require(result.lanesPerInvocation == 1u, "a wave64 program without wave operations or LDS was compiled with two guest lanes per invocation");
+    require(localSize(result) == std::array<std::uint32_t, 3>{16u, 16u, 1u}, "a single-lane wave64 program did not keep the guest workgroup size");
+    require(!declaresCapability(result, CapabilityGroupNonUniform), "a single-lane wave64 program still requires subgroup operations");
+}
+
+void dualLaneSwitchKeepsTwoLanesPerInvocation() {
+    const auto program = Synthetic::PerThreadProgram({16u, 16u, 1u}, 300u, 100u, SyntheticInput, SyntheticOutput, SyntheticRecords);
+    const auto result = compileSynthetic(program, 64u, true);
+    require(result.lanesPerInvocation == 2u, "the dual-lane switch did not keep two guest lanes per invocation");
+    require(localSize(result) == std::array<std::uint32_t, 3>{128u, 1u, 1u}, "a dual-lane wave64 program did not fold its workgroup into half as many invocations");
+    require(!(result.spirv == compileSynthetic(program, 64u, false).spirv), "the dual-lane switch did not change the compiled program");
+}
+
+void readFirstLaneKeepsTwoLanesPerInvocation() {
+    const auto result = compileSynthetic(Synthetic::ReadFirstLaneProgram(SyntheticInput, SyntheticOutput, SyntheticRecords), 64u, false);
+    require(result.lanesPerInvocation == 2u, "a wave64 program with v_readfirstlane was compiled with one guest lane per invocation");
+    require(localSize(result) == std::array<std::uint32_t, 3>{32u, 1u, 1u}, "a dual-lane wave64 program did not fold its workgroup into half as many invocations");
+}
+
+void execReadAsScalarKeepsTwoLanesPerInvocation() {
+    const auto result = compileSynthetic(Synthetic::ExecMaskProgram(SyntheticInput, SyntheticOutput, SyntheticRecords), 64u, false);
+    require(result.lanesPerInvocation == 2u, "a wave64 program that reads EXEC as a scalar was compiled with one guest lane per invocation");
+    require(declaresCapability(result, CapabilityGroupNonUniform), "a wave64 program that reads EXEC as a scalar does not ballot the entry EXEC");
+}
+
+void sharedMemoryKeepsTwoLanesPerInvocation() {
+    const auto result = compileSynthetic(Synthetic::SharedMemoryProgram(SyntheticInput, SyntheticOutput, SyntheticRecords), 64u, false);
+    require(result.lanesPerInvocation == 2u, "a wave64 program that uses LDS was compiled with one guest lane per invocation");
+}
+
+void vccBranchKeepsTwoLanesPerInvocation() {
+    const auto result = compileSynthetic(Synthetic::VccBranchProgram({64u, 1u, 1u}, 100u, SyntheticInput, SyntheticOutput, SyntheticRecords), 64u, false);
+    require(result.lanesPerInvocation == 2u, "a wave64 program that branches on VCC was compiled with one guest lane per invocation");
+}
+
+void barrierKeepsTwoLanesPerInvocation() {
+    const auto result = compileSynthetic(Synthetic::BarrierProgram(SyntheticInput, SyntheticOutput, SyntheticRecords), 64u, false);
+    require(result.lanesPerInvocation == 2u, "a wave64 program with s_barrier was compiled with one guest lane per invocation");
+}
+
+void workgroupAboveDeviceLimitsKeepsTwoLanesPerInvocation() {
+    const auto program = Synthetic::PerThreadProgram({1u, 1u, 128u}, 128u, 64u, SyntheticInput, SyntheticOutput, SyntheticRecords);
+    const auto result = compileSynthetic(program, 64u, false);
+    require(result.lanesPerInvocation == 2u, "a wave64 workgroup deeper than the device allows was compiled with one guest lane per invocation");
+    require(localSize(result) == std::array<std::uint32_t, 3>{64u, 1u, 1u}, "a dual-lane wave64 program did not fold its workgroup into half as many invocations");
+}
+
+void wave32ProgramRunsOneLanePerInvocation() {
+    const auto program = Synthetic::PerThreadProgram({8u, 8u, 1u}, 64u, 32u, SyntheticInput, SyntheticOutput, SyntheticRecords);
+    const auto result = compileSynthetic(program, 32u, false);
+    require(result.lanesPerInvocation == 1u && localSize(result) == std::array<std::uint32_t, 3>{8u, 8u, 1u}, "a wave32 program on a 32-wide subgroup did not keep one lane per invocation");
+}
+
+void rawWideLoadsReadThroughVectorViews() {
+    for (const std::uint32_t dwords : {2u, 4u}) {
+        const auto program = Synthetic::WideLoadProgram(dwords, {64u, 1u, 1u}, 4u, 0u, SyntheticInput, 256u, SyntheticOutput, 1024u);
+        const auto result = compileSynthetic(program, 64u, false);
+        require(declaresVectorView(result, dwords), "a raw buffer_load_dwordx" + std::to_string(dwords) + " did not read through a vector view");
+    }
+    const auto program = Synthetic::WideLoadProgram(3u, {64u, 1u, 1u}, 4u, 0u, SyntheticInput, 256u, SyntheticOutput, 1024u);
+    const auto result = compileSynthetic(program, 64u, false);
+    require(!declaresVectorView(result, 3u) && !declaresVectorView(result, 4u), "a raw buffer_load_dwordx3 declared a vector view");
+}
+
 }
 
 int main() {
-    const std::array<std::pair<const char*, void (*)()>, 26> tests{{
+    const std::array<std::pair<const char*, void (*)()>, 36> tests{{
+        {"a wave64 compute program without wave operations or LDS runs one guest lane per invocation with the guest workgroup size", &perThreadWave64ProgramRunsOneLanePerInvocation},
+        {"the dual-lane switch keeps two guest lanes per invocation", &dualLaneSwitchKeepsTwoLanesPerInvocation},
+        {"a wave64 program with v_readfirstlane keeps two guest lanes per invocation", &readFirstLaneKeepsTwoLanesPerInvocation},
+        {"a wave64 program that reads EXEC as a scalar keeps two guest lanes per invocation", &execReadAsScalarKeepsTwoLanesPerInvocation},
+        {"a wave64 program that uses LDS keeps two guest lanes per invocation", &sharedMemoryKeepsTwoLanesPerInvocation},
+        {"a wave64 program that branches on VCC keeps two guest lanes per invocation", &vccBranchKeepsTwoLanesPerInvocation},
+        {"a wave64 program with s_barrier keeps two guest lanes per invocation", &barrierKeepsTwoLanesPerInvocation},
+        {"a wave64 workgroup above the device limits keeps two guest lanes per invocation", &workgroupAboveDeviceLimitsKeepsTwoLanesPerInvocation},
+        {"a wave32 program on a 32-wide subgroup runs one lane per invocation", &wave32ProgramRunsOneLanePerInvocation},
+        {"raw buffer_load_dwordx2 and x4 read through vector views and x3 does not", &rawWideLoadsReadThroughVectorViews},
         {"skipped lighting programs from run 27 compile", &skippedLightingProgramsCompile},
         {"a 2D sample of a cube-majority table binds its 2D entry", &planeSampleOfCubeMajorityTableBindsItsPlaneEntry},
         {"a cube sample of a cube-majority table binds a cube entry", &cubeSampleOfCubeMajorityTableBindsACubeEntry},

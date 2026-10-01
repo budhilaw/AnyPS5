@@ -8,5 +8,6 @@
 std::vector<std::uint32_t> MakeBdaTestShader(std::uint64_t address, std::uint32_t bits, std::int64_t offset = 0);
 void RunBdaExecutionTests(const AgcDriver::Graphics::Context& context);
 void RunBdaContractTests();
+void RunRecompiledShaderTests(const AgcDriver::Graphics::Context& context);
 
 #endif
