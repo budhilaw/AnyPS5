@@ -1,7 +1,9 @@
 #include "prx/libSceAgcDriver/Graphics/include/GuestTextureResource.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureFormat.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/TextureTiling.hpp"
 #include "prx/libc/include/General.hpp"
 #include <array>
+#include <limits>
 #include <mutex>
 #include "prx/libSceAgcDriver/Graphics/include/Context.hpp"
 #include <stdexcept>
@@ -168,6 +170,30 @@ GuestTextureResource DecodeTextureResource(std::span<const std::uint32_t> words)
     result.dstSelZ = static_cast<std::uint8_t>(dstSelZ);
     result.dstSelW = static_cast<std::uint8_t>(dstSelW);
     return result;
+}
+
+bool DecodeTextureExtent(std::span<const std::uint32_t> words, std::uint64_t& base, std::uint64_t& bytes) {
+    if (words.size() != 8) return false;
+    GuestTextureResource resource{};
+    resource.baseAddress = ((static_cast<std::uint64_t>(words[0]) | (static_cast<std::uint64_t>(words[1]) << 32u)) & 0xffffffffffull) << 8u;
+    if (resource.baseAddress == 0) return false;
+    resource.format = (words[1] >> 20u) & 0x1ffu;
+    resource.width = (((words[1] >> 30u) & 0x3u) | ((words[2] & 0xfffu) << 2u)) + 1u;
+    resource.height = ((words[2] >> 14u) & 0x3fffu) + 1u;
+    resource.depthOrLastArray = words[4] & 0x1fffu;
+    resource.mipCount = ((words[5] >> 4u) & 0xfu) + 1u;
+    try {
+        resource.tileMode = resolveTileMode((words[3] >> 20u) & 0x1fu);
+        resource.dimension = resolveDimension((words[3] >> 28u) & 0xfu);
+        const auto layers = resource.dimension == TextureDimension::k1D || resource.dimension == TextureDimension::k2D ? 1u : resource.depthOrLastArray + 1u;
+        const auto size = ComputeSurfaceSize(ComputeMipLayout(resource.tileMode, resource.format, resource.width, resource.height, resource.mipCount), layers);
+        if (size == 0 || size > std::numeric_limits<std::uint64_t>::max() - resource.baseAddress) return false;
+        base = resource.baseAddress;
+        bytes = size;
+        return true;
+    } catch (...) {
+        return false;
+    }
 }
 
 bool MatchesGuestDimension(ShaderRecompiler::DescriptorImageShape shape, TextureDimension dimension) {

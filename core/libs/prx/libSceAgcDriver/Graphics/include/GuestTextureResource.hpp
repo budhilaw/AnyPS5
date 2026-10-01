@@ -45,6 +45,7 @@ struct GuestTextureResource {
 };
 
 GuestTextureResource DecodeTextureResource(std::span<const std::uint32_t> words);
+bool DecodeTextureExtent(std::span<const std::uint32_t> words, std::uint64_t& base, std::uint64_t& bytes);
 bool MatchesGuestDimension(ShaderRecompiler::DescriptorImageShape shape, TextureDimension dimension);
 
 }
