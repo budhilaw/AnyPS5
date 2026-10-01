@@ -59,11 +59,19 @@ constexpr std::array<std::uint32_t, 2> Ds(std::uint32_t op, std::uint32_t addres
     return {0xd8000000u | (op << 18u), (vdst << 24u) | (data << 8u) | address};
 }
 
+constexpr std::array<std::uint32_t, 2> Smem(std::uint32_t op, std::uint32_t sdata, std::uint32_t sbase, std::uint32_t soffset, std::uint32_t offset) {
+    return {0xf4000000u | (op << 18u) | (sdata << 6u) | (sbase / 2u), (soffset << 25u) | offset};
+}
+
 constexpr std::array<std::uint32_t, 4> BufferDescriptor(std::uint64_t address, std::uint32_t stride, std::uint32_t records) {
     return {static_cast<std::uint32_t>(address), static_cast<std::uint32_t>(address >> 32u) | (stride << 16u), records, BufferFields};
 }
 
 namespace Op {
+inline constexpr std::uint32_t SLoadDword = 0x00u;
+inline constexpr std::uint32_t SLoadDwordx2 = 0x01u;
+inline constexpr std::uint32_t SLoadDwordx4 = 0x02u;
+inline constexpr std::uint32_t SLshlB32 = 0x1eu;
 inline constexpr std::uint32_t VMovB32 = 0x01u;
 inline constexpr std::uint32_t VReadfirstlaneB32 = 0x02u;
 inline constexpr std::uint32_t VMulU32U24 = 0x0bu;
@@ -257,6 +265,33 @@ inline ComputeProgram SharedMemoryProgram(std::uint64_t input, std::uint64_t out
     ComputeProgram program {assembler.code, {in[0], in[1], in[2], in[3], out[0], out[1], out[2], out[3]}, {64u, 1u, 1u}};
     program.ldsSizeDwords = 64u;
     return program;
+}
+
+inline constexpr std::uint32_t ScalarAddressOutputDwords = 12u;
+
+inline ComputeProgram ScalarAddressLoadProgram(std::uint64_t left, std::uint64_t right, std::uint64_t output, std::uint32_t records) {
+    Assembler assembler;
+    EmitFlatThreadIndex(assembler, {64u, 1u, 1u});
+    assembler.Emit({Vop1(Op::VReadfirstlaneB32, 10u, Vgpr(0u))});
+    assembler.Emit({Sop2(Op::SLshlB32, 11u, 10u, InlineInteger(4u))});
+    assembler.Emit(Smem(Op::SLoadDwordx4, 12u, 0u, 11u, 0u));
+    assembler.Emit(Smem(Op::SLoadDwordx4, 16u, 2u, 11u, 0u));
+    assembler.Emit(Smem(Op::SLoadDwordx2, 20u, 0u, 11u, 16u));
+    assembler.Emit(Smem(Op::SLoadDword, 22u, 2u, 11u, 20u));
+    assembler.Emit({Vop2(Op::VMulU32U24, 9u, Literal, 3u), ScalarAddressOutputDwords * 4u});
+    for (std::uint32_t store = 0; store < 3u; ++store) {
+        for (std::uint32_t component = 0; component < 4u; ++component) {
+            assembler.Emit({Vop1(Op::VMovB32, 12u + component, store == 2u && component == 3u ? 10u : 12u + store * 4u + component)});
+        }
+        assembler.Emit(Mubuf(Op::BufferStoreDwordx4, true, false, store * 16u, 9u, 12u, 4u));
+    }
+    assembler.Emit({EndProgram});
+    const auto out = BufferDescriptor(output, 0u, records);
+    return {assembler.code, {static_cast<std::uint32_t>(left), static_cast<std::uint32_t>(left >> 32u), static_cast<std::uint32_t>(right), static_cast<std::uint32_t>(right >> 32u), out[0], out[1], out[2], out[3]}, {64u, 1u, 1u}};
+}
+
+inline std::array<std::uint32_t, ScalarAddressOutputDwords> ScalarAddressLoadExpected(std::uint32_t (*left)(std::size_t), std::uint32_t (*right)(std::size_t)) {
+    return {left(0), left(1), left(2), left(3), right(0), right(1), right(2), right(3), left(4), left(5), right(5), 0u};
 }
 
 inline ComputeProgram WideLoadProgram(std::uint32_t dwords, const std::array<std::uint32_t, 3>& numThreads, std::uint32_t loadStrideBytes, std::uint32_t instructionOffset, std::uint64_t input, std::uint32_t inputBytes, std::uint64_t output, std::uint32_t outputBytes) {

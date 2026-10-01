@@ -105,27 +105,35 @@ void RunBdaExecutionTests(const Context& context) {
     Buffer fault(context, sizeof(Abi::Fault), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
     Buffer output(context, 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
     const auto run = [&](std::uint64_t address, std::uint32_t bits, std::uint32_t expected, Abi::FaultReason reason, std::uint32_t count = 3, std::uint32_t groups = 1, std::int64_t offset = 0) {
-        const Abi::Header header{Abi::Version, count, sizeof(Abi::Range), 0};
-        std::memcpy(table.Bytes().data(), &header, sizeof(header));
-        std::memcpy(table.Bytes().data() + sizeof(header), ranges.data(), sizeof(ranges));
-        std::memset(fault.Bytes().data(), 0, fault.Bytes().size());
-        const std::uint32_t sentinel = 0xdeadbeef;
-        std::memcpy(output.Bytes().data(), &sentinel, sizeof(sentinel));
-        Pipeline pipeline(context, MakeBdaTestShader(address, bits, offset), {&table, &fault, &output});
-        pipeline.Run(groups);
-        Abi::Fault report{};
-        std::uint32_t result = 0;
-        std::memcpy(&report, fault.Bytes().data(), sizeof(report));
-        std::memcpy(&result, output.Bytes().data(), sizeof(result));
-        if (static_cast<std::uint32_t>(reason) == 0) {
-            Require(report.state == Abi::FaultState::Empty && result == expected, "BDA GPU read produced incorrect data or a fault: address " + std::to_string(address) + " bits " + std::to_string(bits) + " result " + std::to_string(result) + " fault state " + std::to_string(static_cast<std::uint32_t>(report.state)) + " reason " + std::to_string(static_cast<std::uint32_t>(report.reason)));
-        } else {
-            Require(report.state == Abi::FaultState::Ready && report.reason == reason && report.instruction == 0x1234, "BDA GPU fault was not published correctly");
-            Require(result == sentinel, "faulting BDA shader continued to output a substitute value");
+        std::array<Abi::Fault, 2> reports{};
+        std::array<std::uint32_t, 2> results{};
+        for (const bool singleCache : {true, false}) {
+            const Abi::Header header{Abi::Version, count, sizeof(Abi::Range), 0};
+            std::memcpy(table.Bytes().data(), &header, sizeof(header));
+            std::memcpy(table.Bytes().data() + sizeof(header), ranges.data(), sizeof(ranges));
+            std::memset(fault.Bytes().data(), 0, fault.Bytes().size());
+            const std::uint32_t sentinel = 0xdeadbeef;
+            std::memcpy(output.Bytes().data(), &sentinel, sizeof(sentinel));
+            Pipeline pipeline(context, MakeBdaTestShader(address, bits, offset, singleCache), {&table, &fault, &output});
+            pipeline.Run(groups);
+            auto& report = reports[singleCache ? 0u : 1u];
+            auto& result = results[singleCache ? 0u : 1u];
+            std::memcpy(&report, fault.Bytes().data(), sizeof(report));
+            std::memcpy(&result, output.Bytes().data(), sizeof(result));
+            if (static_cast<std::uint32_t>(reason) == 0) {
+                Require(report.state == Abi::FaultState::Empty && result == expected, "BDA GPU read produced incorrect data or a fault: address " + std::to_string(address) + " bits " + std::to_string(bits) + " result " + std::to_string(result) + " fault state " + std::to_string(static_cast<std::uint32_t>(report.state)) + " reason " + std::to_string(static_cast<std::uint32_t>(report.reason)));
+            } else {
+                Require(report.state == Abi::FaultState::Ready && report.reason == reason && report.instruction == 0x1234, "BDA GPU fault was not published correctly");
+                Require(result == sentinel, "faulting BDA shader continued to output a substitute value");
+            }
         }
+        Require(std::memcmp(&reports[0], &reports[1], sizeof(Abi::Fault)) == 0 && results[0] == results[1], "a BDA read through per-resource caches differs from the single cache: address " + std::to_string(address) + " bits " + std::to_string(bits) + " offset " + std::to_string(offset) + " fault address " + std::to_string(reports[1].address) + " instead of " + std::to_string(reports[0].address) + " bytes " + std::to_string(reports[1].bytes) + " instead of " + std::to_string(reports[0].bytes));
     };
     run(guest, 8, 0x11, static_cast<Abi::FaultReason>(0));
     run(guest + 1, 16, 0x3322, static_cast<Abi::FaultReason>(0));
+    run(guest + 2, 16, 0x4433, static_cast<Abi::FaultReason>(0));
+    run(guest + 4, 16, 0, Abi::FaultReason::Unmapped);
+    run(guest + 3, 32, 0, Abi::FaultReason::Unmapped);
     run(guest + 1, 32, 0x55443322, static_cast<Abi::FaultReason>(0));
     run(aligned, 32, 0x13121110, static_cast<Abi::FaultReason>(0));
     run(aligned + 4, 32, 0x17161514, static_cast<Abi::FaultReason>(0), 3, 64);

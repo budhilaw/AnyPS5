@@ -15,7 +15,28 @@
 #include <span>
 #include <string>
 
-std::vector<std::uint32_t> MakeBdaTestShader(std::uint64_t address, std::uint32_t bits, std::int64_t offset) {
+namespace {
+
+void defineBdaReads(ShaderRecompiler::SpirvEmitterState& state, bool singleCache, std::uint32_t slots) {
+    if (singleCache) {
+        ShaderRecompiler::DefineGetBdaPointer(state);
+        return;
+    }
+    state.bdaSlotCount = slots;
+    state.bdaReadWidths = 7u;
+    ShaderRecompiler::DefineBdaFunctions(state);
+}
+
+std::uint32_t emitSingleCacheRead(ShaderRecompiler::SpirvValueEmitContext& ctx, const ShaderRecompiler::IrValue& instruction, std::uint32_t base, std::int64_t immediate, std::uint32_t bits) {
+    using namespace ShaderRecompiler;
+    auto& state = ctx.state;
+    if (immediate != 0) base = AddBdaAddress(ctx, instruction, base, BdaConstant(state, immediate < 0 ? std::uint64_t{0} - static_cast<std::uint64_t>(immediate) : static_cast<std::uint64_t>(immediate)), immediate < 0);
+    return EmitBdaRead(ctx, instruction, base, bits);
+}
+
+}
+
+std::vector<std::uint32_t> MakeBdaTestShader(std::uint64_t address, std::uint32_t bits, std::int64_t offset, bool singleCache) {
     using namespace ShaderRecompiler;
     IrProgram program;
     program.Resources().stage = IrShaderStage::Compute;
@@ -31,7 +52,7 @@ std::vector<std::uint32_t> MakeBdaTestShader(std::uint64_t address, std::uint32_
     state.bdaPagetableVariable = define(0);
     state.faultBufferVariable = define(1);
     const auto output = define(2);
-    DefineGetBdaPointer(state);
+    defineBdaReads(state, singleCache, 1u);
     const auto main = state.module.AllocateId();
     state.module.AddFunction(spv::OpFunction, TypeVoid(state), main, spv::FunctionControlMaskNone, TypeFunction(state));
     EmitLabel(state, state.module.AllocateId());
@@ -40,9 +61,8 @@ std::vector<std::uint32_t> MakeBdaTestShader(std::uint64_t address, std::uint32_
     MemoryFlags flags{};
     flags.pc = 0x1234;
     instruction.SetFlags(flags);
-    auto base = BdaConstant(state, address);
-    if (offset != 0) base = AddBdaAddress(ctx, instruction, base, BdaConstant(state, offset < 0 ? std::uint64_t{0} - static_cast<std::uint64_t>(offset) : static_cast<std::uint64_t>(offset)), offset < 0);
-    const auto value = EmitBdaRead(ctx, instruction, base, bits);
+    const std::array<BdaLaneAddress, 1> lanes{{{BdaConstant(state, address), 0u, 0u}}};
+    const auto value = singleCache ? emitSingleCacheRead(ctx, instruction, lanes[0].base, offset, bits) : EmitBdaGroupRead(state, BdaReadGroup{0u, bits, 0x1234u, {offset}}, lanes).front().front();
     state.module.AddFunction(spv::OpStore, BdaWord(state, output, ConstantU32(state, 0u)), value);
     state.module.AddFunction(spv::OpReturn);
     state.module.AddFunction(spv::OpFunctionEnd);
@@ -214,8 +234,9 @@ std::uint32_t guestWord(const GuestRegion& region, std::uint64_t address) {
     return value;
 }
 
-std::vector<GuestRegion> runRecompiled(const Context& context, const ShaderRecompiler::RecompileResult& result, std::vector<GuestRegion> memory, std::uint32_t groups) {
+std::vector<GuestRegion> runRecompiled(const Context& context, const ShaderRecompiler::RecompileResult& result, std::vector<GuestRegion> memory, std::uint32_t groups, ShaderRecompiler::BdaAbi::Fault* fault = nullptr, std::span<const std::uint64_t> unmapped = {}) {
     using ShaderRecompiler::DescriptorRole;
+    namespace Abi = ShaderRecompiler::BdaAbi;
     struct Mirror {
         Buffer* buffer;
         std::uint64_t address;
@@ -224,8 +245,28 @@ std::vector<GuestRegion> runRecompiled(const Context& context, const ShaderRecom
     std::vector<std::unique_ptr<Buffer>> owned;
     std::vector<Mirror> mirrors;
     std::vector<StorageBinding> bindings;
-    const auto makeBuffer = [&](std::size_t size) {
-        return owned.emplace_back(std::make_unique<Buffer>(context, std::max<std::size_t>(size, sizeof(std::uint32_t)), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT)).get();
+    Buffer* faultBuffer = nullptr;
+    const auto makeBuffer = [&](std::size_t size, VkBufferUsageFlags usage = 0u) {
+        return owned.emplace_back(std::make_unique<Buffer>(context, std::max<std::size_t>(size, sizeof(std::uint32_t)), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | usage)).get();
+    };
+    const auto makeTable = [&] {
+        std::vector<const GuestRegion*> mapped;
+        for (const auto& region : memory) {
+            if (std::find(unmapped.begin(), unmapped.end(), region.address) == unmapped.end()) mapped.push_back(&region);
+        }
+        std::sort(mapped.begin(), mapped.end(), [](const GuestRegion* left, const GuestRegion* right) { return left->address < right->address; });
+        std::vector<Abi::Range> entries;
+        for (const auto* region : mapped) {
+            auto* buffer = makeBuffer(region->bytes.size(), VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
+            std::memcpy(buffer->Bytes().data(), region->bytes.data(), region->bytes.size());
+            entries.push_back({region->address, region->address + region->bytes.size(), buffer->DeviceAddress(), Abi::Read, 0});
+        }
+        auto* table = makeBuffer(sizeof(Abi::Header) + entries.size() * sizeof(Abi::Range));
+        const Abi::Header header{Abi::Version, static_cast<std::uint32_t>(entries.size()), sizeof(Abi::Range), 0};
+        std::memcpy(table->Bytes().data(), &header, sizeof(header));
+        if (!entries.empty()) std::memcpy(table->Bytes().data() + sizeof(header), entries.data(), entries.size() * sizeof(Abi::Range));
+        Require(Abi::IsValidTable(table->Bytes().first(sizeof(Abi::Header) + entries.size() * sizeof(Abi::Range))), "the recompiled program's BDA table is malformed");
+        return VkDescriptorBufferInfo{table->Handle(), 0, sizeof(Abi::Header) + entries.size() * sizeof(Abi::Range)};
     };
     for (const auto& binding : result.bindings) {
         Require(binding.kind == ShaderRecompiler::DescriptorKind::StorageBuffer, "the synthetic program binds a descriptor other than a storage buffer");
@@ -249,6 +290,12 @@ std::vector<GuestRegion> runRecompiled(const Context& context, const ShaderRecom
             auto* buffer = makeBuffer(size);
             std::memcpy(buffer->Bytes().data(), binding.guestDescriptor.data(), size);
             storage.buffers.push_back({buffer->Handle(), 0, std::max<std::size_t>(size, sizeof(std::uint32_t))});
+        } else if (binding.role == DescriptorRole::BdaPagetable) {
+            storage.buffers.push_back(makeTable());
+        } else if (binding.role == DescriptorRole::FaultBuffer) {
+            faultBuffer = makeBuffer(sizeof(Abi::Fault));
+            std::memset(faultBuffer->Bytes().data(), 0, sizeof(Abi::Fault));
+            storage.buffers.push_back({faultBuffer->Handle(), 0, sizeof(Abi::Fault)});
         } else {
             throw std::runtime_error("the synthetic program binds an unsupported descriptor role");
         }
@@ -258,6 +305,10 @@ std::vector<GuestRegion> runRecompiled(const Context& context, const ShaderRecom
     dispatch.Run(groups, result.pushConstants);
     for (const auto& mirror : mirrors) {
         std::memcpy(guestBytes(memory, mirror.address, mirror.size).data(), mirror.buffer->Bytes().data(), mirror.size);
+    }
+    if (fault != nullptr) {
+        *fault = {};
+        if (faultBuffer != nullptr) std::memcpy(fault, faultBuffer->Bytes().data(), sizeof(Abi::Fault));
     }
     return memory;
 }
@@ -375,7 +426,25 @@ void wideLoadsKeepPerDwordBounds(const Context& context) {
     }
 }
 
-std::vector<std::uint32_t> makeBdaLaneTestShader() {
+struct BdaTestRead {
+    std::uint32_t slot = 0;
+    std::vector<std::int64_t> immediates;
+};
+
+struct BdaTestShape {
+    std::uint32_t lanes = 1u;
+    std::uint32_t slots = 1u;
+    std::uint32_t localSize = LaneGroupSize;
+    bool countMisses = false;
+};
+
+std::size_t bdaTestValues(std::span<const BdaTestRead> reads, const BdaTestShape& shape) {
+    std::size_t values = 0;
+    for (const auto& read : reads) values += read.immediates.size() * shape.lanes;
+    return values;
+}
+
+std::vector<std::uint32_t> makeBdaReadsShader(bool singleCache, const BdaTestShape& shape, std::span<const BdaTestRead> reads) {
     using namespace ShaderRecompiler;
     IrProgram program;
     program.Resources().stage = IrShaderStage::Compute;
@@ -392,9 +461,10 @@ std::vector<std::uint32_t> makeBdaLaneTestShader() {
     state.faultBufferVariable = define(1);
     const auto output = define(2);
     const auto addresses = define(3);
+    if (shape.countMisses) state.bdaMissCounterVariable = define(4);
     const auto invocation = state.module.DefineGlobalVariable(TypePointer(state, spv::StorageClassInput, TypeU32Vector(state, 3u)), spv::StorageClassInput);
     state.module.AddAnnotation(spv::OpDecorate, invocation, spv::DecorationBuiltIn, spv::BuiltInGlobalInvocationId);
-    DefineGetBdaPointer(state);
+    defineBdaReads(state, singleCache, shape.slots);
     const auto main = state.module.AllocateId();
     state.module.AddFunction(spv::OpFunction, TypeVoid(state), main, spv::FunctionControlMaskNone, TypeFunction(state));
     EmitLabel(state, state.module.AllocateId());
@@ -407,18 +477,37 @@ std::vector<std::uint32_t> makeBdaLaneTestShader() {
     state.module.AddFunction(spv::OpLoad, TypeU32Vector(state, 3u), invocationId, invocation);
     const auto index = state.module.AllocateId();
     state.module.AddFunction(spv::OpCompositeExtract, TypeU32(state), index, invocationId, 0u);
-    const auto addressWord = [&](std::uint32_t half) {
-        const auto word = Binary(state, spv::OpIAdd, TypeU32(state), Binary(state, spv::OpIMul, TypeU32(state), index, ConstantU32(state, 2u)), ConstantU32(state, half));
-        const auto value = state.module.AllocateId();
-        state.module.AddFunction(spv::OpLoad, TypeU32(state), value, BdaWord(state, addresses, word));
-        return Unary(state, spv::OpUConvert, TypeScalarU64(state), value);
+    const auto address = [&](std::uint32_t lane, std::uint32_t slot) {
+        const auto entry = Binary(state, spv::OpIAdd, TypeU32(state), Binary(state, spv::OpIMul, TypeU32(state), index, ConstantU32(state, shape.lanes * shape.slots)), ConstantU32(state, lane * shape.slots + slot));
+        const auto word = [&](std::uint32_t half) {
+            const auto value = state.module.AllocateId();
+            state.module.AddFunction(spv::OpLoad, TypeU32(state), value, BdaWord(state, addresses, Binary(state, spv::OpIAdd, TypeU32(state), Binary(state, spv::OpIMul, TypeU32(state), entry, ConstantU32(state, 2u)), ConstantU32(state, half))));
+            return Unary(state, spv::OpUConvert, TypeScalarU64(state), value);
+        };
+        return Binary(state, spv::OpBitwiseOr, TypeScalarU64(state), word(0u), Binary(state, spv::OpShiftLeftLogical, TypeScalarU64(state), word(1u), BdaConstant(state, 32u)));
     };
-    const auto address = Binary(state, spv::OpBitwiseOr, TypeScalarU64(state), addressWord(0u), Binary(state, spv::OpShiftLeftLogical, TypeScalarU64(state), addressWord(1u), BdaConstant(state, 32u)));
-    const auto value = EmitBdaRead(ctx, instruction, address, 32u);
-    state.module.AddFunction(spv::OpStore, BdaWord(state, output, index), value);
+    std::vector<std::uint32_t> values;
+    for (const auto& read : reads) {
+        if (singleCache) {
+            for (const auto immediate : read.immediates) {
+                for (std::uint32_t lane = 0; lane < shape.lanes; ++lane) values.push_back(emitSingleCacheRead(ctx, instruction, address(lane, read.slot), immediate, 32u));
+            }
+            continue;
+        }
+        std::vector<BdaLaneAddress> lanes;
+        for (std::uint32_t lane = 0; lane < shape.lanes; ++lane) lanes.push_back({address(lane, read.slot), 0u, 0u});
+        const auto loaded = EmitBdaGroupRead(state, BdaReadGroup{read.slot, 32u, 0x1234u, read.immediates}, lanes);
+        for (std::size_t member = 0; member < read.immediates.size(); ++member) {
+            for (std::uint32_t lane = 0; lane < shape.lanes; ++lane) values.push_back(loaded[lane][member]);
+        }
+    }
+    const auto first = Binary(state, spv::OpIMul, TypeU32(state), index, ConstantU32(state, static_cast<std::uint32_t>(values.size())));
+    for (std::size_t value = 0; value < values.size(); ++value) {
+        state.module.AddFunction(spv::OpStore, BdaWord(state, output, Binary(state, spv::OpIAdd, TypeU32(state), first, ConstantU32(state, static_cast<std::uint32_t>(value)))), values[value]);
+    }
     state.module.AddFunction(spv::OpReturn);
     state.module.AddFunction(spv::OpFunctionEnd);
-    state.module.AddExecutionMode(main, spv::ExecutionModeLocalSize, LaneGroupSize, 1u, 1u);
+    state.module.AddExecutionMode(main, spv::ExecutionModeLocalSize, shape.localSize, 1u, 1u);
     state.module.EmitEntryPoint(spv::ExecutionModelGLCompute, main, "main", {invocation});
     return state.module.Finalize();
 }
@@ -427,18 +516,81 @@ struct GuestBda {
     std::uint64_t address;
     std::vector<std::byte> bytes;
     std::unique_ptr<Buffer> buffer;
+    std::uint32_t permissions = ShaderRecompiler::BdaAbi::Read;
 };
+
+void addGuestBda(const Context& context, std::vector<GuestBda>& ranges, std::uint64_t address, std::size_t size, std::uint32_t seed, std::uint32_t permissions = ShaderRecompiler::BdaAbi::Read) {
+    GuestBda range{address, std::vector<std::byte>(size), std::make_unique<Buffer>(context, size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT), permissions};
+    for (std::size_t byte = 0; byte < size; ++byte) range.bytes[byte] = static_cast<std::byte>(seed + byte * 7u);
+    std::memcpy(range.buffer->Bytes().data(), range.bytes.data(), size);
+    ranges.push_back(std::move(range));
+}
+
+std::unique_ptr<Buffer> makeGuestBdaTable(const Context& context, const std::vector<GuestBda>& ranges) {
+    namespace Abi = ShaderRecompiler::BdaAbi;
+    std::vector<Abi::Range> entries;
+    for (const auto& range : ranges) entries.push_back({range.address, range.address + range.bytes.size(), range.buffer->DeviceAddress(), range.permissions, 0});
+    std::sort(entries.begin(), entries.end(), [](const Abi::Range& left, const Abi::Range& right) { return left.begin < right.begin; });
+    auto table = std::make_unique<Buffer>(context, sizeof(Abi::Header) + entries.size() * sizeof(Abi::Range), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    const Abi::Header header{Abi::Version, static_cast<std::uint32_t>(entries.size()), sizeof(Abi::Range), 0};
+    std::memcpy(table->Bytes().data(), &header, sizeof(header));
+    std::memcpy(table->Bytes().data() + sizeof(header), entries.data(), entries.size() * sizeof(Abi::Range));
+    Require(Abi::IsValidTable(table->Bytes()), "the BDA test table is malformed");
+    return table;
+}
 
 std::optional<std::uint32_t> readGuestDword(const std::vector<GuestBda>& ranges, std::uint64_t address) {
     std::uint32_t value = 0;
     for (std::uint32_t byte = 0; byte < 4u; ++byte) {
         const auto found = std::find_if(ranges.begin(), ranges.end(), [&](const GuestBda& range) { return address + byte >= range.address && address + byte < range.address + range.bytes.size(); });
-        if (found == ranges.end()) {
+        if (found == ranges.end() || (found->permissions & ShaderRecompiler::BdaAbi::Read) == 0u) {
             return std::nullopt;
         }
         value |= static_cast<std::uint32_t>(found->bytes[address + byte - found->address]) << (byte * 8u);
     }
     return value;
+}
+
+struct BdaReadsResult {
+    std::vector<std::uint32_t> output;
+    ShaderRecompiler::BdaAbi::Fault fault{};
+    std::uint32_t misses = 0;
+};
+
+BdaReadsResult runBdaReads(const Context& context, std::span<const std::uint32_t> shader, Buffer& table, std::span<const std::uint64_t> addresses, std::size_t outputWords, std::uint32_t groups, bool countMisses) {
+    namespace Abi = ShaderRecompiler::BdaAbi;
+    Buffer fault(context, sizeof(Abi::Fault), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    Buffer output(context, outputWords * sizeof(std::uint32_t), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    Buffer addressBuffer(context, addresses.size_bytes(), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    Buffer counter(context, sizeof(std::uint32_t), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    std::memset(fault.Bytes().data(), 0, fault.Bytes().size());
+    std::memset(counter.Bytes().data(), 0, counter.Bytes().size());
+    std::memcpy(addressBuffer.Bytes().data(), addresses.data(), addresses.size_bytes());
+    for (std::size_t word = 0; word < outputWords; ++word) std::memcpy(output.Bytes().data() + word * sizeof(Sentinel), &Sentinel, sizeof(Sentinel));
+    std::vector<StorageBinding> bindings{
+        {0u, {{table.Handle(), 0, table.Bytes().size()}}},
+        {1u, {{fault.Handle(), 0, fault.Bytes().size()}}},
+        {2u, {{output.Handle(), 0, output.Bytes().size()}}},
+        {3u, {{addressBuffer.Handle(), 0, addressBuffer.Bytes().size()}}},
+    };
+    if (countMisses) bindings.push_back({4u, {{counter.Handle(), 0, counter.Bytes().size()}}});
+    ComputeDispatch dispatch(context, shader, bindings, false);
+    dispatch.Run(groups, {});
+    BdaReadsResult result;
+    result.output.resize(outputWords);
+    std::memcpy(result.output.data(), output.Bytes().data(), outputWords * sizeof(std::uint32_t));
+    std::memcpy(&result.fault, fault.Bytes().data(), sizeof(Abi::Fault));
+    std::memcpy(&result.misses, counter.Bytes().data(), sizeof(result.misses));
+    return result;
+}
+
+std::string describeFault(const ShaderRecompiler::BdaAbi::Fault& fault) {
+    return "state " + std::to_string(static_cast<std::uint32_t>(fault.state)) + " reason " + std::to_string(static_cast<std::uint32_t>(fault.reason)) + " address " + std::to_string(fault.address) + " bytes " + std::to_string(fault.bytes) + " instruction " + std::to_string(fault.instruction);
+}
+
+void requireSameBdaRuns(const BdaReadsResult& single, const BdaReadsResult& slots, const std::string& label) {
+    Require(single.output == slots.output, label + " read different values through the per-resource cache than through the single cache");
+    Require(std::memcmp(&single.fault, &slots.fault, sizeof(single.fault)) == 0, label + " published fault " + describeFault(slots.fault) + " through the per-resource cache instead of " + describeFault(single.fault));
 }
 
 void tableValidationRejectsMalformedTables() {
@@ -475,34 +627,13 @@ void bdaLaneReadsMatchGuestMemory(const Context& context) {
     constexpr std::uint64_t wide = 0x7fff12360000ULL;
     constexpr std::uint64_t unmapped = 0x7fff12370000ULL;
     std::vector<GuestBda> ranges;
-    const auto addRange = [&](std::uint64_t address, std::size_t size, std::uint32_t seed) {
-        GuestBda range{address, std::vector<std::byte>(size), std::make_unique<Buffer>(context, size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT)};
-        for (std::size_t byte = 0; byte < size; ++byte) range.bytes[byte] = static_cast<std::byte>(seed + byte * 7u);
-        std::memcpy(range.buffer->Bytes().data(), range.bytes.data(), size);
-        ranges.push_back(std::move(range));
-    };
-    addRange(guest, 3u, 0x11u);
-    addRange(guest + 3u, 2u, 0x44u);
-    addRange(aligned, 8u, 0x10u);
-    addRange(wide, 256u, 0x80u);
-    std::vector<Abi::Range> entries;
-    for (const auto& range : ranges) entries.push_back({range.address, range.address + range.bytes.size(), range.buffer->DeviceAddress(), Abi::Read, 0});
-    Buffer table(context, sizeof(Abi::Header) + entries.size() * sizeof(Abi::Range), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-    const Abi::Header header{Abi::Version, static_cast<std::uint32_t>(entries.size()), sizeof(Abi::Range), 0};
-    std::memcpy(table.Bytes().data(), &header, sizeof(header));
-    std::memcpy(table.Bytes().data() + sizeof(header), entries.data(), entries.size() * sizeof(Abi::Range));
-    Require(Abi::IsValidTable(table.Bytes()), "the BDA test table is malformed");
-    Buffer fault(context, sizeof(Abi::Fault), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-    Buffer output(context, LaneInvocations * sizeof(std::uint32_t), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-    Buffer addresses(context, LaneInvocations * sizeof(std::uint64_t), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-    const std::array<StorageBinding, 4> bindings{{
-        {0u, {{table.Handle(), 0, table.Bytes().size()}}},
-        {1u, {{fault.Handle(), 0, fault.Bytes().size()}}},
-        {2u, {{output.Handle(), 0, output.Bytes().size()}}},
-        {3u, {{addresses.Handle(), 0, addresses.Bytes().size()}}},
-    }};
-    const auto shader = makeBdaLaneTestShader();
-    ComputeDispatch dispatch(context, shader, bindings, false);
+    addGuestBda(context, ranges, guest, 3u, 0x11u);
+    addGuestBda(context, ranges, guest + 3u, 2u, 0x44u);
+    addGuestBda(context, ranges, aligned, 8u, 0x10u);
+    addGuestBda(context, ranges, wide, 256u, 0x80u);
+    const auto table = makeGuestBdaTable(context, ranges);
+    const std::array<BdaTestRead, 1> reads{{{0u, {0}}}};
+    const std::array<std::vector<std::uint32_t>, 2> shaders{makeBdaReadsShader(true, {}, reads), makeBdaReadsShader(false, {}, reads)};
     struct Pattern {
         const char* name;
         std::uint64_t (*address)(std::uint32_t invocation);
@@ -518,24 +649,22 @@ void bdaLaneReadsMatchGuestMemory(const Context& context) {
         {"mapped even lanes and unmapped odd lanes", [](std::uint32_t invocation) { return invocation % 2u == 0u ? wide + 4u * (invocation % 60u) : unmapped + invocation; }},
     }};
     for (const auto& pattern : patterns) {
-        for (std::uint32_t invocation = 0; invocation < LaneInvocations; ++invocation) {
-            const auto address = pattern.address(invocation);
-            std::memcpy(addresses.Bytes().data() + invocation * sizeof(address), &address, sizeof(address));
-            std::memcpy(output.Bytes().data() + invocation * sizeof(Sentinel), &Sentinel, sizeof(Sentinel));
+        std::vector<std::uint64_t> addresses(LaneInvocations);
+        for (std::uint32_t invocation = 0; invocation < LaneInvocations; ++invocation) addresses[invocation] = pattern.address(invocation);
+        std::array<BdaReadsResult, 2> results;
+        for (std::size_t mode = 0; mode < shaders.size(); ++mode) {
+            results[mode] = runBdaReads(context, shaders[mode], *table, addresses, LaneInvocations, LaneGroups, false);
+            const std::string label = std::string("a BDA read of ") + pattern.name + (mode == 0u ? " through the single cache" : " through the per-resource cache");
+            bool faulted = false;
+            for (std::uint32_t invocation = 0; invocation < LaneInvocations; ++invocation) {
+                const auto expected = readGuestDword(ranges, addresses[invocation]);
+                faulted = faulted || !expected.has_value();
+                Require(results[mode].output[invocation] == expected.value_or(Sentinel), label + " returned " + std::to_string(results[mode].output[invocation]) + " for invocation " + std::to_string(invocation));
+            }
+            const auto& report = results[mode].fault;
+            Require(faulted ? report.state == Abi::FaultState::Ready && report.reason == Abi::FaultReason::Unmapped && report.instruction == 0x1234u : report.state == Abi::FaultState::Empty, label + " published the wrong fault " + describeFault(report));
         }
-        std::memset(fault.Bytes().data(), 0, fault.Bytes().size());
-        dispatch.Run(LaneGroups, {});
-        bool faulted = false;
-        for (std::uint32_t invocation = 0; invocation < LaneInvocations; ++invocation) {
-            std::uint32_t value = 0;
-            std::memcpy(&value, output.Bytes().data() + invocation * sizeof(value), sizeof(value));
-            const auto expected = readGuestDword(ranges, pattern.address(invocation));
-            faulted = faulted || !expected.has_value();
-            Require(value == expected.value_or(Sentinel), std::string("a BDA read of ") + pattern.name + " returned " + std::to_string(value) + " for invocation " + std::to_string(invocation));
-        }
-        Abi::Fault report{};
-        std::memcpy(&report, fault.Bytes().data(), sizeof(report));
-        Require(faulted ? report.state == Abi::FaultState::Ready && report.reason == Abi::FaultReason::Unmapped && report.instruction == 0x1234u : report.state == Abi::FaultState::Empty, std::string("a BDA read of ") + pattern.name + " published the wrong fault");
+        Require(results[0].output == results[1].output, std::string("a BDA read of ") + pattern.name + " read different values through the per-resource cache than through the single cache");
     }
 }
 
@@ -543,36 +672,181 @@ void shortBdaTablesReportInvalidTable(const Context& context) {
     namespace Abi = ShaderRecompiler::BdaAbi;
     constexpr std::uint64_t address = 0x7fff12350000ULL;
     const std::array<std::uint32_t, 4> header{Abi::Version, 1u, sizeof(Abi::Range), 0u};
-    const auto shader = makeBdaLaneTestShader();
-    for (const std::uint32_t words : {1u, 3u, 4u}) {
-        Buffer table(context, words * sizeof(std::uint32_t), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-        std::memcpy(table.Bytes().data(), header.data(), words * sizeof(std::uint32_t));
-        Buffer fault(context, sizeof(Abi::Fault), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-        Buffer output(context, LaneInvocations * sizeof(std::uint32_t), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-        Buffer addresses(context, LaneInvocations * sizeof(std::uint64_t), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-        for (std::uint32_t invocation = 0; invocation < LaneInvocations; ++invocation) {
-            const std::uint64_t lane = address + invocation * 4u;
-            std::memcpy(addresses.Bytes().data() + invocation * sizeof(lane), &lane, sizeof(lane));
-            std::memcpy(output.Bytes().data() + invocation * sizeof(Sentinel), &Sentinel, sizeof(Sentinel));
+    const std::array<BdaTestRead, 1> reads{{{0u, {0}}}};
+    std::vector<std::uint64_t> addresses(LaneInvocations);
+    for (std::uint32_t invocation = 0; invocation < LaneInvocations; ++invocation) addresses[invocation] = address + invocation * 4u;
+    for (const bool singleCache : {true, false}) {
+        const auto shader = makeBdaReadsShader(singleCache, {}, reads);
+        for (const std::uint32_t words : {1u, 3u, 4u}) {
+            Buffer table(context, words * sizeof(std::uint32_t), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+            std::memcpy(table.Bytes().data(), header.data(), words * sizeof(std::uint32_t));
+            const auto result = runBdaReads(context, shader, table, addresses, LaneInvocations, LaneGroups, false);
+            const std::string label = "a BDA read through a table of " + std::to_string(words) + " dword(s) that counts one range" + (singleCache ? " and a single cache" : " and per-resource caches");
+            for (std::uint32_t invocation = 0; invocation < LaneInvocations; ++invocation) {
+                Require(result.output[invocation] == Sentinel, label + " returned " + std::to_string(result.output[invocation]) + " for invocation " + std::to_string(invocation));
+            }
+            Require(result.fault.state == Abi::FaultState::Ready && result.fault.reason == Abi::FaultReason::InvalidTable && result.fault.instruction == 0x1234u && result.fault.bytes == 4u, label + " did not publish an InvalidTable fault");
         }
-        std::memset(fault.Bytes().data(), 0, fault.Bytes().size());
-        const std::array<StorageBinding, 4> bindings{{
-            {0u, {{table.Handle(), 0, table.Bytes().size()}}},
-            {1u, {{fault.Handle(), 0, fault.Bytes().size()}}},
-            {2u, {{output.Handle(), 0, output.Bytes().size()}}},
-            {3u, {{addresses.Handle(), 0, addresses.Bytes().size()}}},
-        }};
-        ComputeDispatch dispatch(context, shader, bindings, false);
-        dispatch.Run(LaneGroups, {});
-        const std::string label = "a BDA read through a table of " + std::to_string(words) + " dword(s) that counts one range";
-        for (std::uint32_t invocation = 0; invocation < LaneInvocations; ++invocation) {
-            std::uint32_t value = 0;
-            std::memcpy(&value, output.Bytes().data() + invocation * sizeof(value), sizeof(value));
-            Require(value == Sentinel, label + " returned " + std::to_string(value) + " for invocation " + std::to_string(invocation));
+    }
+}
+
+void groupedReadsMatchSingleCache(const Context& context) {
+    namespace Abi = ShaderRecompiler::BdaAbi;
+    constexpr std::uint64_t first = 0x7fff12400000ULL;
+    constexpr std::uint64_t second = 0x7fff12410000ULL;
+    constexpr std::uint64_t third = 0x7fff12420000ULL;
+    constexpr std::uint64_t denied = 0x7fff12430000ULL;
+    constexpr std::uint64_t odd = 0x7fff12440001ULL;
+    std::vector<GuestBda> ranges;
+    addGuestBda(context, ranges, first, 64u, 0x21u);
+    addGuestBda(context, ranges, first + 64u, 64u, 0x52u);
+    addGuestBda(context, ranges, second, 64u, 0x13u);
+    addGuestBda(context, ranges, third, 64u, 0x77u);
+    addGuestBda(context, ranges, denied, 64u, 0x35u, 0u);
+    addGuestBda(context, ranges, odd, 5u, 0x91u);
+    addGuestBda(context, ranges, odd + 5u, 35u, 0x0bu);
+    const auto table = makeGuestBdaTable(context, ranges);
+    const std::array<BdaTestRead, 1> reads{{{0u, {0, 4, 8, 12}}}};
+    const BdaTestShape shape{2u, 1u, 1u, true};
+    const std::array<std::vector<std::uint32_t>, 2> shaders{makeBdaReadsShader(true, shape, reads), makeBdaReadsShader(false, shape, reads)};
+    struct Pattern {
+        const char* name;
+        std::uint64_t first;
+        std::uint64_t second;
+        Abi::FaultReason reason;
+        std::uint64_t faultAddress;
+        std::uint32_t faultBytes;
+        std::uint32_t singleMisses;
+        std::uint32_t slotMisses;
+    };
+    const std::array<Pattern, 8> patterns{{
+        {"two lanes inside their ranges", first + 8u, second + 16u, Abi::FaultReason{}, 0u, 0u, 8u, 2u},
+        {"a lane crossing into the adjacent range", first + 56u, second, Abi::FaultReason{}, 0u, 0u, 0u, 0u},
+        {"unaligned lanes crossing ranges", odd + 2u, first + 2u, Abi::FaultReason{}, 0u, 0u, 0u, 0u},
+        {"an aligned read crossing ranges", odd + 3u, first, Abi::FaultReason::Unmapped, odd + 3u, 4u, 0u, 0u},
+        {"unmapped reads in both lanes", second + 56u, third + 60u, Abi::FaultReason::Unmapped, third + 64u, 4u, 0u, 0u},
+        {"an unmapped third read in the first lane", second + 56u, first + 4u, Abi::FaultReason::Unmapped, second + 64u, 4u, 0u, 0u},
+        {"a read without permission", denied + 4u, first, Abi::FaultReason::Permission, denied + 4u, 4u, 0u, 0u},
+        {"an unaligned read crossing into unmapped memory", odd + 30u, first, Abi::FaultReason::Unmapped, odd + 40u, 1u, 0u, 0u},
+    }};
+    const auto values = bdaTestValues(reads, shape);
+    for (const auto& pattern : patterns) {
+        const std::array<std::uint64_t, 2> addresses{pattern.first, pattern.second};
+        const auto single = runBdaReads(context, shaders[0], *table, addresses, values, 1u, true);
+        const auto slots = runBdaReads(context, shaders[1], *table, addresses, values, 1u, true);
+        const std::string label = std::string("a grouped BDA read of ") + pattern.name;
+        requireSameBdaRuns(single, slots, label);
+        if (pattern.reason == Abi::FaultReason{}) {
+            Require(slots.fault.state == Abi::FaultState::Empty, label + " published fault " + describeFault(slots.fault));
+            for (std::size_t member = 0; member < 4u; ++member) {
+                for (std::size_t lane = 0; lane < 2u; ++lane) {
+                    const auto expected = readGuestDword(ranges, addresses[lane] + member * 4u);
+                    Require(expected.has_value() && slots.output[member * 2u + lane] == *expected, label + " returned " + std::to_string(slots.output[member * 2u + lane]) + " for lane " + std::to_string(lane) + " dword " + std::to_string(member));
+                }
+            }
+        } else {
+            Require(slots.fault.state == Abi::FaultState::Ready && slots.fault.reason == pattern.reason && slots.fault.address == pattern.faultAddress && slots.fault.bytes == pattern.faultBytes && slots.fault.instruction == 0x1234u && slots.fault.stage == static_cast<std::uint32_t>(ShaderRecompiler::IrShaderStage::Compute), label + " published fault " + describeFault(slots.fault));
+            Require(std::all_of(slots.output.begin(), slots.output.end(), [](std::uint32_t value) { return value == Sentinel; }), label + " stored values after its fault");
         }
-        Abi::Fault report{};
-        std::memcpy(&report, fault.Bytes().data(), sizeof(report));
-        Require(report.state == Abi::FaultState::Ready && report.reason == Abi::FaultReason::InvalidTable && report.instruction == 0x1234u, label + " did not publish an InvalidTable fault");
+        if (pattern.slotMisses != 0u) {
+            Require(single.misses == pattern.singleMisses && slots.misses == pattern.slotMisses, label + " searched the BDA table " + std::to_string(slots.misses) + " times through per-resource caches and " + std::to_string(single.misses) + " times through the single cache instead of " + std::to_string(pattern.slotMisses) + " and " + std::to_string(pattern.singleMisses));
+        }
+    }
+}
+
+void alternatingResourcesMissOncePerResource(const Context& context) {
+    constexpr std::uint64_t left = 0x7fff12500000ULL;
+    constexpr std::uint64_t right = 0x7fff12510000ULL;
+    constexpr std::uint32_t invocations = LaneGroupSize;
+    std::vector<GuestBda> ranges;
+    addGuestBda(context, ranges, left, invocations * 16u, 0x3du);
+    addGuestBda(context, ranges, right, invocations * 16u, 0x6au);
+    const auto table = makeGuestBdaTable(context, ranges);
+    std::vector<std::uint64_t> addresses;
+    for (std::uint32_t invocation = 0; invocation < invocations; ++invocation) {
+        addresses.push_back(left + invocation * 16u);
+        addresses.push_back(right + invocation * 16u);
+    }
+    struct Case {
+        const char* name;
+        std::vector<BdaTestRead> reads;
+        std::uint32_t singleMisses;
+        std::uint32_t slotMisses;
+    };
+    const std::array<Case, 2> cases{{
+        {"reads alternating between two resources", {{0u, {0}}, {1u, {0}}, {0u, {4}}, {1u, {4}}, {0u, {8}}, {1u, {8}}, {0u, {12}}, {1u, {12}}}, 8u, 2u},
+        {"reads of one resource", {{0u, {0}}, {0u, {4}}, {0u, {8}}, {0u, {12}}}, 1u, 1u},
+    }};
+    const BdaTestShape shape{1u, 2u, invocations, true};
+    for (const auto& testCase : cases) {
+        const auto values = bdaTestValues(testCase.reads, shape);
+        const auto single = runBdaReads(context, makeBdaReadsShader(true, shape, testCase.reads), *table, addresses, values * invocations, 1u, true);
+        const auto slots = runBdaReads(context, makeBdaReadsShader(false, shape, testCase.reads), *table, addresses, values * invocations, 1u, true);
+        const std::string label = std::string("BDA ") + testCase.name;
+        requireSameBdaRuns(single, slots, label);
+        for (std::uint32_t invocation = 0; invocation < invocations; ++invocation) {
+            for (std::size_t read = 0; read < testCase.reads.size(); ++read) {
+                const auto& entry = testCase.reads[read];
+                const auto expected = readGuestDword(ranges, addresses[invocation * 2u + entry.slot] + static_cast<std::uint64_t>(entry.immediates.front()));
+                Require(expected.has_value() && slots.output[invocation * values + read] == *expected, label + " returned the wrong value for invocation " + std::to_string(invocation) + " read " + std::to_string(read));
+            }
+        }
+        Require(single.misses == testCase.singleMisses * invocations, label + " searched the BDA table " + std::to_string(single.misses) + " times through the single cache instead of " + std::to_string(testCase.singleMisses * invocations));
+        Require(slots.misses == testCase.slotMisses * invocations, label + " searched the BDA table " + std::to_string(slots.misses) + " times through the per-resource cache instead of once per resource and invocation (" + std::to_string(testCase.slotMisses * invocations) + ")");
+    }
+}
+
+std::uint32_t leftPattern(std::size_t word) {
+    return static_cast<std::uint32_t>(word) * 0x01010101u + 0x10203040u;
+}
+
+std::uint32_t rightPattern(std::size_t word) {
+    return static_cast<std::uint32_t>(word) * 0x11111111u + 0x0a0b0c0du;
+}
+
+bool declaresName(std::span<const std::uint32_t> words, std::string_view name) {
+    const std::string_view text(reinterpret_cast<const char*>(words.data()), words.size_bytes());
+    return text.find(name) != std::string_view::npos;
+}
+
+void recompiledScalarLoadsMatchSingleCache(const Context& context) {
+    namespace Abi = ShaderRecompiler::BdaAbi;
+    constexpr std::uint64_t left = 0x50000u;
+    constexpr std::uint64_t right = 0x58000u;
+    constexpr std::uint64_t output = 0x60000u;
+    constexpr std::uint32_t groups = 3u;
+    constexpr std::uint32_t total = 64u * groups;
+    constexpr std::array<std::uint32_t, 3> capabilities{spv::CapabilityInt64, spv::CapabilityPhysicalStorageBufferAddresses, spv::CapabilityStorageBuffer8BitAccess};
+    constexpr std::array<std::string_view, 2> extensions{"SPV_KHR_physical_storage_buffer", "SPV_KHR_8bit_storage"};
+    const auto program = Synthetic::ScalarAddressLoadProgram(left, right, output, total * Synthetic::ScalarAddressOutputDwords * 4u);
+    const auto expected = Synthetic::ScalarAddressLoadExpected(leftPattern, rightPattern);
+    for (const bool unmappedRight : {false, true}) {
+        std::array<std::vector<std::byte>, 2> outputs;
+        std::array<Abi::Fault, 2> faults{};
+        for (const bool singleCache : {true, false}) {
+            auto request = program.Request(64u, 32u, true);
+            request.target.bdaAbiVersion = Abi::Version;
+            request.target.supportedCapabilities = capabilities;
+            request.target.supportedExtensions = extensions;
+            request.target.bdaSingleCache = singleCache;
+            const auto result = ShaderRecompiler::Recompile(request);
+            const std::string label = std::string("a recompiled program reading two scalar pointers") + (unmappedRight ? " with an unmapped second pointer" : "") + (singleCache ? " through the single cache" : " through per-resource caches");
+            Require(std::any_of(result.bindings.begin(), result.bindings.end(), [](const ShaderRecompiler::DescriptorBinding& binding) { return binding.role == ShaderRecompiler::DescriptorRole::BdaPagetable; }), label + " does not read through the BDA table");
+            Require(declaresName(result.spirv.Words(), "bda_slot1_begin") != singleCache && declaresName(result.spirv.Words(), "bda_slot2_begin") == false, label + " does not give each scalar pointer its own cache slot");
+            const std::array<std::uint64_t, 1> unmapped{right};
+            auto& fault = faults[singleCache ? 0u : 1u];
+            const auto memory = runRecompiled(context, result, {wordRegion(left, 16u, leftPattern), wordRegion(right, 16u, rightPattern), wordRegion(output, total * Synthetic::ScalarAddressOutputDwords, sentinelPattern)}, groups, &fault, unmappedRight ? std::span<const std::uint64_t>(unmapped) : std::span<const std::uint64_t>());
+            for (std::uint32_t thread = 0; thread < total; ++thread) {
+                for (std::uint32_t dword = 0; dword < Synthetic::ScalarAddressOutputDwords; ++dword) {
+                    const auto actual = guestWord(memory[2], output + (thread * Synthetic::ScalarAddressOutputDwords + dword) * 4u);
+                    const auto wanted = unmappedRight ? Sentinel : expected[dword];
+                    Require(actual == wanted, label + " wrote " + std::to_string(actual) + " instead of " + std::to_string(wanted) + " for thread " + std::to_string(thread) + " dword " + std::to_string(dword));
+                }
+            }
+            Require(unmappedRight ? fault.state == Abi::FaultState::Ready && fault.reason == Abi::FaultReason::Unmapped && fault.address == right && fault.bytes == 4u : fault.state == Abi::FaultState::Empty, label + " published fault " + describeFault(fault));
+            outputs[singleCache ? 0u : 1u] = memory[2].bytes;
+        }
+        Require(outputs[0] == outputs[1] && std::memcmp(&faults[0], &faults[1], sizeof(Abi::Fault)) == 0, std::string("a recompiled program reading two scalar pointers") + (unmappedRight ? " with an unmapped second pointer" : "") + " behaved differently through per-resource caches than through the single cache");
     }
 }
 
@@ -582,6 +856,8 @@ void RunRecompiledShaderTests(const AgcDriver::Graphics::Context& context) {
     tableValidationRejectsMalformedTables();
     bdaLaneReadsMatchGuestMemory(context);
     shortBdaTablesReportInvalidTable(context);
+    groupedReadsMatchSingleCache(context);
+    alternatingResourcesMissOncePerResource(context);
     const auto subgroupSize = measuredSubgroupSize(context);
     if (subgroupSize != 32u) {
         std::cout << "skipped the single-lane and dual-lane wave64 GPU tests: they compile for 32-wide subgroups and the device runs " << subgroupSize << "-wide subgroups\n";
@@ -591,4 +867,5 @@ void RunRecompiledShaderTests(const AgcDriver::Graphics::Context& context) {
     execReadAsScalarSeesTheWholeWave(context);
     vccBranchesAreWaveWide(context);
     wideLoadsKeepPerDwordBounds(context);
+    recompiledScalarLoadsMatchSingleCache(context);
 }
