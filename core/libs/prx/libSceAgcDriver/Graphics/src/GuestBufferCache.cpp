@@ -361,7 +361,30 @@ std::shared_ptr<GuestBufferCache::Mirror> GuestBufferCache::import(std::uint64_t
 bool GuestBufferCache::hostExtent(std::uint64_t address, std::uint64_t bytes, GuestMemoryBacking::GuestMemoryBackingExtentInfo& extent, std::uint64_t& importBytes) const {
     static const bool disabled = std::getenv("ANYPS5_NO_HOST_VERTEX") != nullptr;
     if (disabled || !context.hostPointerImport || bytes == 0) return false;
-    const bool found = GuestMemoryBacking::GuestMemoryBackingExtent_nid_postfix(address, static_cast<std::size_t>(bytes), &extent);
+    bool found = false;
+    {
+        std::lock_guard lock(extentMutex);
+        const auto generation = GuestMemoryBacking::GuestMemoryBackingUnmapGeneration_nid_postfix();
+        if (generation != extentGeneration) {
+            extents.clear();
+            extentGeneration = generation;
+        }
+        if (auto it = extents.upper_bound(address); it != extents.begin()) {
+            --it;
+            if (address >= it->first && bytes <= it->second.bytes && address + bytes <= it->first + it->second.bytes) {
+                extent = it->second;
+                found = true;
+            }
+        }
+    }
+    if (!found) {
+        found = GuestMemoryBacking::GuestMemoryBackingExtent_nid_postfix(address, static_cast<std::size_t>(bytes), &extent);
+        if (found) {
+            std::lock_guard lock(extentMutex);
+            if (extents.size() >= 4096) extents.clear();
+            extents[extent.address] = extent;
+        }
+    }
     const auto alignment = static_cast<std::uint64_t>(context.hostPointerAlignment);
     importBytes = extent.bytes / alignment * alignment;
     if (!found || reinterpret_cast<std::uintptr_t>(extent.alias) % alignment != 0 || address + bytes > extent.address + importBytes) {

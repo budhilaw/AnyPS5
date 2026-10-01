@@ -149,6 +149,9 @@ private:
     std::map<std::uint64_t, HostMapping> hostMappings;
     std::uint64_t hostBytes = 0;
     std::uint64_t hostUses = 0;
+    mutable std::mutex extentMutex;
+    mutable std::map<std::uint64_t, GuestMemoryBacking::GuestMemoryBackingExtentInfo> extents;
+    mutable std::uint64_t extentGeneration = 0;
     std::map<std::uint64_t, ResidentWindow> residentWindows;
     std::uint64_t residentBytes = 0;
     std::uint64_t residentBudget;
