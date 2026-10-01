@@ -241,6 +241,9 @@ VideoOutDriver::VideoOutDriver() {
         if (SDL_InitSubSystem(SDL_INIT_VIDEO) < 0) {
             throw std::runtime_error(std::string("SDL_InitSubSystem(VIDEO) failed: ") + SDL_GetError());
         }
+        SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+        SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS5, "1");
+        if (SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) < 0) APS5_LOG_OUT("game controllers are unavailable: %s", SDL_GetError());
     });
     try {
         AgcDriverWaitIdle_nid_postfix();

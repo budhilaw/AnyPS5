@@ -11,6 +11,8 @@ struct PadInputState {
     std::array<std::uint8_t, 4> sticks{128, 128, 128, 128};
     bool touchLeft = false;
     bool touchRight = false;
+    std::uint8_t l2 = 0;
+    std::uint8_t r2 = 0;
 };
 
 namespace Pad {

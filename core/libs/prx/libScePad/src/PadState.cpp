@@ -1,5 +1,6 @@
 #include "prx/libScePad/include/PadState.hpp"
 #include "prx/libkernel/Time/include/Time.hpp"
+#include <algorithm>
 #include <mutex>
 #include <stdexcept>
 
@@ -28,8 +29,8 @@ PadData Pad::ReadState() {
     data.left_stick_y = state.sticks[1];
     data.right_stick_x = state.sticks[2];
     data.right_stick_y = state.sticks[3];
-    data.analog_buttons_l2 = (state.buttons & 0x100) != 0 ? 255 : 0;
-    data.analog_buttons_r2 = (state.buttons & 0x200) != 0 ? 255 : 0;
+    data.analog_buttons_l2 = std::max<std::uint8_t>((state.buttons & 0x100) != 0 ? 255 : 0, state.l2);
+    data.analog_buttons_r2 = std::max<std::uint8_t>((state.buttons & 0x200) != 0 ? 255 : 0, state.r2);
     data.acceleration_y = 1.0f;
     data.orientation_w = 1.0f;
     data.connected = true;

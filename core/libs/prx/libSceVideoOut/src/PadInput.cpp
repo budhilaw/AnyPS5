@@ -10,11 +10,13 @@
 #include "prx/libSceVideoOut/include/VideoOutDriver.hpp"
 #include "prx/libScePad/include/PadState.hpp"
 #include "prx/libScePad/include/PadInputTypes.hpp"
+#include "prx/libc/include/General.hpp"
 #include <cstdio>
 #include <cstdlib>
 #include <vector>
 #include <tuple>
 #include <array>
+#include <utility>
 
 namespace {
 
@@ -111,7 +113,86 @@ void PadInput::setMouseMode(bool enabled) {
     nextMousePoll = std::chrono::steady_clock::now() + std::chrono::milliseconds(Pad::MousePollIntervalMs);
 }
 
+void PadInput::openController(int deviceIndex) {
+    SDL_GameController* opened = nullptr;
+    MainThread::Run([&] { opened = SDL_GameControllerOpen(deviceIndex); });
+    if (opened == nullptr) {
+        APS5_LOG_OUT("Pad: cannot open game controller %d: %s", deviceIndex, SDL_GetError());
+        return;
+    }
+    controller = opened;
+    controllerId = SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(controller));
+    APS5_LOG_OUT("Pad: using game controller '%s'", SDL_GameControllerName(controller));
+    readController();
+    publish();
+}
+
+void PadInput::closeController() {
+    auto* closing = controller;
+    controller = nullptr;
+    controllerId = -1;
+    controllerButtons = 0;
+    controllerSticks = {128, 128, 128, 128};
+    controllerL2 = 0;
+    controllerR2 = 0;
+    MainThread::Run([&] {
+        SDL_GameControllerClose(closing);
+        for (int index = 0; index < SDL_NumJoysticks() && controller == nullptr; ++index) {
+            if (SDL_IsGameController(index) == SDL_TRUE) {
+                controller = SDL_GameControllerOpen(index);
+                if (controller != nullptr) controllerId = SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(controller));
+            }
+        }
+    });
+    if (controller != nullptr) {
+        APS5_LOG_OUT("Pad: using game controller '%s'", SDL_GameControllerName(controller));
+        readController();
+    }
+    publish();
+}
+
+void PadInput::readController() {
+    static constexpr std::array<std::pair<SDL_GameControllerButton, Pad::PadButton>, 15> buttons{{
+        {SDL_CONTROLLER_BUTTON_A, Pad::PadButton::Cross}, {SDL_CONTROLLER_BUTTON_B, Pad::PadButton::Circle},
+        {SDL_CONTROLLER_BUTTON_X, Pad::PadButton::Square}, {SDL_CONTROLLER_BUTTON_Y, Pad::PadButton::Triangle},
+        {SDL_CONTROLLER_BUTTON_LEFTSHOULDER, Pad::PadButton::L1}, {SDL_CONTROLLER_BUTTON_RIGHTSHOULDER, Pad::PadButton::R1},
+        {SDL_CONTROLLER_BUTTON_LEFTSTICK, Pad::PadButton::L3}, {SDL_CONTROLLER_BUTTON_RIGHTSTICK, Pad::PadButton::R3},
+        {SDL_CONTROLLER_BUTTON_START, Pad::PadButton::Options}, {SDL_CONTROLLER_BUTTON_BACK, Pad::PadButton::TouchPad},
+        {SDL_CONTROLLER_BUTTON_TOUCHPAD, Pad::PadButton::TouchPad}, {SDL_CONTROLLER_BUTTON_DPAD_UP, Pad::PadButton::Up},
+        {SDL_CONTROLLER_BUTTON_DPAD_DOWN, Pad::PadButton::Down}, {SDL_CONTROLLER_BUTTON_DPAD_LEFT, Pad::PadButton::Left},
+        {SDL_CONTROLLER_BUTTON_DPAD_RIGHT, Pad::PadButton::Right}}};
+    std::uint32_t result = 0;
+    for (const auto& [button, pad] : buttons) {
+        if (SDL_GameControllerGetButton(controller, button) != 0) result |= static_cast<std::uint32_t>(pad);
+    }
+    const auto axis = [&](SDL_GameControllerAxis which) { return static_cast<int>(SDL_GameControllerGetAxis(controller, which)); };
+    const auto stick = [](int value) { return static_cast<std::uint8_t>(std::clamp((value + 32768) >> 8, 0, 255)); };
+    const auto trigger = [](int value) { return static_cast<std::uint8_t>(std::clamp(value >> 7, 0, 255)); };
+    controllerSticks = {stick(axis(SDL_CONTROLLER_AXIS_LEFTX)), stick(axis(SDL_CONTROLLER_AXIS_LEFTY)), stick(axis(SDL_CONTROLLER_AXIS_RIGHTX)), stick(axis(SDL_CONTROLLER_AXIS_RIGHTY))};
+    controllerL2 = trigger(axis(SDL_CONTROLLER_AXIS_TRIGGERLEFT));
+    controllerR2 = trigger(axis(SDL_CONTROLLER_AXIS_TRIGGERRIGHT));
+    if (controllerL2 > 30) result |= static_cast<std::uint32_t>(Pad::PadButton::L2);
+    if (controllerR2 > 30) result |= static_cast<std::uint32_t>(Pad::PadButton::R2);
+    controllerButtons = result;
+}
+
 void PadInput::HandleEvent(const SDL_Event& event, DisplayWindow& window) {
+    if (event.type == SDL_CONTROLLERDEVICEADDED) {
+        if (controller == nullptr) openController(event.cdevice.which);
+        return;
+    }
+    if (event.type == SDL_CONTROLLERDEVICEREMOVED) {
+        if (controller != nullptr && event.cdevice.which == controllerId) closeController();
+        return;
+    }
+    if (event.type == SDL_CONTROLLERBUTTONDOWN || event.type == SDL_CONTROLLERBUTTONUP || event.type == SDL_CONTROLLERAXISMOTION) {
+        const auto which = event.type == SDL_CONTROLLERAXISMOTION ? event.caxis.which : event.cbutton.which;
+        if (controller != nullptr && which == controllerId) {
+            readController();
+            publish();
+        }
+        return;
+    }
     if (event.type == SDL_WINDOWEVENT && (event.window.event == SDL_WINDOWEVENT_FOCUS_LOST || event.window.event == SDL_WINDOWEVENT_CLOSE)) {
         pressed.fill(false);
         wheelReleaseTimes.fill({});
@@ -223,6 +304,10 @@ void PadInput::publish() {
         state.sticks[2] = mouseStick[0];
         state.sticks[3] = mouseStick[1];
     }
+    state.buttons |= controllerButtons;
+    for (std::size_t axis = 0; axis < state.sticks.size(); ++axis) if (state.sticks[axis] == 128) state.sticks[axis] = controllerSticks[axis];
+    state.l2 = controllerL2;
+    state.r2 = controllerR2;
     state.buttons |= scripted;
     for (std::size_t axis = 0; axis < state.sticks.size(); ++axis) if (scriptedSticks[axis] != 128) state.sticks[axis] = scriptedSticks[axis];
     PadPublishInput_nid_postfix(state);
