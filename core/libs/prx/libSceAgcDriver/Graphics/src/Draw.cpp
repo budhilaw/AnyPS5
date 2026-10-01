@@ -542,7 +542,7 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
         for (const auto& extra : storage->extraColors) extra->Begin(commands);
         if (storage->depth) storage->depth->Prepare(commands, depthWrites);
         pipeline.BeginPass(commands, state.renderExtent);
-        context.drawQueue->OpenPass(context, passKey);
+        context.drawQueue->OpenPass(context, passKey, state.hasColorTarget ? state.color.address : 0, state.hasDepthTarget ? state.depth.address : 0);
     }
     if (context.drawQueue->BoundPipeline() != pipeline.Handle()) {
         pipeline.Bind(commands);

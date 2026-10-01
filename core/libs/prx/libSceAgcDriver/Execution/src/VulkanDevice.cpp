@@ -321,6 +321,14 @@ struct VulkanDevice::State {
     VkPhysicalDeviceMeshShaderPropertiesEXT meshLimits{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_PROPERTIES_EXT};
     std::unique_ptr<PresentationScaler> scaler;
     std::unique_ptr<PresentationScaler> rgbaScaler;
+    std::unique_ptr<Graphics::GpuTimestamps> presentTimestamps;
+    bool presentTimed = false;
+
+    void ReportPresentTime() {
+        if (!presentTimed) return;
+        presentTimed = false;
+        if (const auto time = presentTimestamps->Read(); time.count() > 0) Graphics::ReportGpuBatch("present", time);
+    }
 
     template<typename TFunction>
     TFunction InstanceFunction(const char* name) const {
@@ -413,6 +421,7 @@ struct VulkanDevice::State {
             colorTransfer.reset();
             scaler.reset();
             rgbaScaler.reset();
+            presentTimestamps.reset();
             pipelineCache.reset();
             bufferPool.reset();
             descriptorCache.reset();
@@ -729,6 +738,7 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
     state->graphicsPipelines = std::make_unique<Graphics::GraphicsPipelineCache>(buildContext());
     state->textureCache = std::make_unique<Graphics::TextureCache>(buildContext());
     state->context = buildContext();
+    state->presentTimestamps = std::make_unique<Graphics::GpuTimestamps>(state->context, std::min<std::uint32_t>(state->context.batchTimestamps, 2));
     if (window != nullptr) {
         require(window->getDrawableSize != nullptr, "missing window drawable size query");
         std::uint32_t drawableWidth = 0;
@@ -1043,6 +1053,7 @@ void VulkanDevice::present(std::uint32_t width, std::uint32_t height, bool opaqu
     if (state->renderPending) {
         check(state->waitForFences(state->device, 1, &state->renderFence, VK_TRUE, std::numeric_limits<std::uint64_t>::max()), "vkWaitForFences previous presentation");
         state->renderPending = false;
+        state->ReportPresentTime();
     }
     state->presentedTarget.reset();
     timing.Mark("previous_present_wait");
@@ -1149,7 +1160,7 @@ void VulkanDevice::present(std::uint32_t width, std::uint32_t height, bool opaqu
     }
     static const bool debugPresentClear = std::getenv("ANYPS5_DEBUG_PRESENT_CLEAR") != nullptr;
     if (debugPresentClear && resident) {
-        Graphics::CommandBatch batch(graphicsContext());
+        Graphics::CommandBatch batch(graphicsContext(), "present");
         resident->DebugClear(batch.Handle(), 1.0f, 0.0f, 1.0f);
         batch.SubmitAndWait();
     }
@@ -1180,6 +1191,7 @@ void VulkanDevice::present(std::uint32_t width, std::uint32_t height, bool opaqu
     VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     check(state->beginCommandBuffer(commands, &begin), "vkBeginCommandBuffer");
+    state->presentTimestamps->Begin(commands);
     VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
     barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
     barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -1224,6 +1236,7 @@ void VulkanDevice::present(std::uint32_t width, std::uint32_t height, bool opaqu
     barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     barrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
     pipelineBarrier(commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+    state->presentTimestamps->End(commands);
     check(state->endCommandBuffer(commands), "vkEndCommandBuffer");
     VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     submit.commandBufferCount = 1;
@@ -1233,6 +1246,7 @@ void VulkanDevice::present(std::uint32_t width, std::uint32_t height, bool opaqu
     timing.Mark("command_record_scale");
     check(state->queueSubmit(state->queue, 1, &submit, state->renderFence), "vkQueueSubmit clear");
     Graphics::QueueSubmissionCounter().fetch_add(1, std::memory_order_relaxed);
+    state->presentTimed = state->presentTimestamps->Enabled();
     state->releaseQueue->Collect();
     timing.Mark("queue_submit");
     if (AsyncFlips()) {
@@ -1241,6 +1255,7 @@ void VulkanDevice::present(std::uint32_t width, std::uint32_t height, bool opaqu
     } else {
         check(wait(state->device, 1, &state->renderFence, VK_TRUE, std::numeric_limits<std::uint64_t>::max()), "vkWaitForFences clear");
         timing.Mark("render_fence_wait");
+        state->ReportPresentTime();
     }
     VkPresentInfoKHR present{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
     present.waitSemaphoreCount = 1;
@@ -1321,6 +1336,7 @@ Graphics::Context VulkanDevice::buildContext() const {
     context.hostPointerAlignment = state->hostPointerAlignment;
     context.releaseQueue = state->releaseQueue;
     context.imageViewMinLod = state->imageViewMinLod;
+    context.batchTimestamps = Graphics::BatchTimestamps(state->properties.limits);
     return context;
 }
 
@@ -1497,7 +1513,9 @@ void VulkanDevice::Dispatch(const ShaderRecompiler::RecompileResult& shader, std
         if (pushStages != 0) {
             state->cmdPushConstants(commands, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, Graphics::PipelinePushConstantBytes, pushBytes.data());
         }
+        state->drawQueue->BeginGpuRegion(Graphics::GpuWork::Dispatch, GpuJournal::CurrentProgram, {x, y, z});
         state->cmdDispatch(commands, x, y, z);
+        state->drawQueue->EndGpuRegion();
         if (GpuJournal::CommandLabel != nullptr) {
             char text[80];
             std::snprintf(text, sizeof(text), "dispatch 0x%llx %ux%ux%u", static_cast<unsigned long long>(GpuJournal::CurrentProgram), x, y, z);

@@ -46,8 +46,10 @@ public:
     VkCommandBuffer Begin(const Context& context);
     VkCommandBuffer BeginBarrier(const Context& context) { const auto commands = Begin(context); recording.hasBarrier = true; return commands; }
     VkCommandBuffer ContinuePass(const RenderPassKey& key);
-    void OpenPass(const Context& context, const RenderPassKey& key);
+    void OpenPass(const Context& context, const RenderPassKey& key, std::uint64_t colorAddress, std::uint64_t depthAddress);
     void EndPass();
+    void BeginGpuRegion(GpuWork work, std::uint64_t address, std::array<std::uint32_t, 3> size) { if (recording.commands) recording.commands->BeginRegion(work, address, size); }
+    void EndGpuRegion() { if (recording.commands) recording.commands->EndRegion(); }
     VkPipeline BoundPipeline() const { return boundPipeline; }
     void SetBoundPipeline(VkPipeline pipeline) { boundPipeline = pipeline; }
     void Enqueue(std::shared_ptr<ShaderResources> resources, std::shared_ptr<void> storage);

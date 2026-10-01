@@ -56,7 +56,7 @@ Texture::Texture(const Context& context, const std::shared_ptr<ResidentColor>& s
         viewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
         Check(context.Function<PFN_vkCreateImageView>("vkCreateImageView")(context.device, &viewInfo, nullptr, &view), "vkCreateImageView resident texture");
         if (context.drawQueue) context.drawQueue->Flush();
-        upload = std::make_unique<CommandBatch>(context);
+        upload = std::make_unique<CommandBatch>(context, "color_copy");
         const auto commands = upload->Handle();
         source->Transition(commands, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
         VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
@@ -185,7 +185,7 @@ void Texture::FlushStores() {
         static int reported = 0;
         if (reported++ < 32) APS5_LOG_OUT("shader stores into texture 0x%llx (%ux%u, %u bpp) promoted to a resident render target", static_cast<unsigned long long>(guestAddress), extent.width, extent.height, guestTexelBytes);
         if (context.drawQueue) context.drawQueue->Flush();
-        CommandBatch batch(context);
+        CommandBatch batch(context, "flush_stores");
         const auto commands = batch.Handle();
         const auto pipelineBarrier = context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier");
         VkImageMemoryBarrier toSource{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
@@ -208,7 +208,7 @@ void Texture::FlushStores() {
         return;
     }
     if (context.drawQueue) context.drawQueue->Flush();
-    CommandBatch batch(context);
+    CommandBatch batch(context, "flush_stores");
     const auto commands = batch.Handle();
     const auto pipelineBarrier = context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier");
     VkImageMemoryBarrier toSource{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};

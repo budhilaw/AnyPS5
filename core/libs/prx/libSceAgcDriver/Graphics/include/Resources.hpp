@@ -2,6 +2,7 @@
 #define CORE_LIBS_PRX_LIBSCEAGCDRIVER_GRAPHICS_INCLUDE_RESOURCES_HPP
 
 #include "prx/libSceAgcDriver/Graphics/include/State.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/GpuTimestamps.hpp"
 #include <array>
 #include <chrono>
 #include <span>
@@ -105,7 +106,7 @@ private:
 
 class CommandBatch {
 public:
-    explicit CommandBatch(const Context& context);
+    explicit CommandBatch(const Context& context, const char* name = nullptr);
     ~CommandBatch();
     CommandBatch(const CommandBatch&) = delete;
     CommandBatch& operator=(const CommandBatch&) = delete;
@@ -115,15 +116,19 @@ public:
     void Wait();
     bool IsComplete();
     void Reset();
+    void BeginRegion(GpuWork work, std::uint64_t address, std::array<std::uint32_t, 3> size) { timestamps.BeginRegion(commands, work, address, size); }
+    void EndRegion() { timestamps.EndRegion(commands); }
+    std::span<const GpuRegion> Regions() const { return timestamps.Regions(); }
+    std::uint32_t DroppedRegions() const { return timestamps.Dropped(); }
 
 private:
     void release() noexcept;
-    void beginTimestamps();
     void readTimestamps();
     Context context;
+    const char* name;
+    GpuTimestamps timestamps;
     VkCommandBuffer commands = VK_NULL_HANDLE;
     VkFence fence = VK_NULL_HANDLE;
-    VkQueryPool timestamps = VK_NULL_HANDLE;
     bool pending = false;
     bool submitted = false;
 public:

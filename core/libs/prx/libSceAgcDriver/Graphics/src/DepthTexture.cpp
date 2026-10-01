@@ -91,7 +91,7 @@ Texture::Texture(const Context& context, std::span<const std::shared_ptr<DepthIm
         const std::size_t sliceBytes = static_cast<std::size_t>(descriptor.width) * descriptor.height * texelBytes;
         staging = std::make_unique<Buffer>(context, sliceBytes * layers, VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
         if (context.drawQueue) context.drawQueue->Flush();
-        upload = std::make_unique<CommandBatch>(context);
+        upload = std::make_unique<CommandBatch>(context, "depth_copy");
         const auto commands = upload->Handle();
         for (std::uint32_t layer = 0; layer < layers; ++layer) {
             const bool readOnly = sources[layer]->ReadOnly();

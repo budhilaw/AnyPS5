@@ -334,7 +334,7 @@ void RenderCache::DumpTargets(const std::string& prefix, std::uint64_t only) {
         const std::size_t bytes = static_cast<std::size_t>(color.extent.width) * color.extent.height * texel;
         Buffer readback(context, bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
         {
-            CommandBatch batch(context);
+            CommandBatch batch(context, "readback");
             const auto commands = batch.Handle();
             const auto previous = entry->Layout();
             entry->Transition(commands, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
@@ -441,7 +441,7 @@ std::string RenderCache::DescribeStencil(DepthImage& image) {
     const std::size_t bytes = static_cast<std::size_t>(target.extent.width) * target.extent.height;
     Buffer readback(context, bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
     {
-        CommandBatch batch(context);
+        CommandBatch batch(context, "readback");
         const auto commands = batch.Handle();
         const bool attached = image.Attached();
         image.Transition(commands, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
@@ -474,7 +474,7 @@ void RenderCache::DumpDepthTargets(const std::string& prefix) {
         const std::size_t bytes = static_cast<std::size_t>(target.extent.width) * target.extent.height * 4;
         Buffer readback(context, bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
         {
-            CommandBatch batch(context);
+            CommandBatch batch(context, "readback");
             const auto commands = batch.Handle();
             entry.image->Transition(commands, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
             VkBufferImageCopy copy{};
@@ -499,7 +499,7 @@ void RenderCache::DumpDepthTargets(const std::string& prefix) {
             const std::size_t stencilBytes = static_cast<std::size_t>(target.extent.width) * target.extent.height;
             Buffer stencilReadback(context, stencilBytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
             {
-                CommandBatch batch(context);
+                CommandBatch batch(context, "readback");
                 const auto commands = batch.Handle();
                 entry.image->Transition(commands, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
                 VkBufferImageCopy copy{};
@@ -600,7 +600,7 @@ void RenderCache::Resolve(std::uint64_t address, std::size_t bytes, bool writabl
     }
     PerformanceTimer timing("Graphics.RenderCache.Resolve");
     if (context.drawQueue) context.drawQueue->Wait();
-    CommandBatch batch(context);
+    CommandBatch batch(context, "resolve");
     for (const auto& entry : affected) entry->Download(batch.Handle());
     batch.SubmitAndWait();
     timing.Mark("download_wait");

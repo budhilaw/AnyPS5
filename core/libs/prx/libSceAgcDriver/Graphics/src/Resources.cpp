@@ -3,6 +3,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/ReleaseQueue.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
 #include "prx/libc/include/General.hpp"
+#include <algorithm>
 #include <array>
 #include <cstdlib>
 #include <exception>
@@ -323,7 +324,7 @@ void DepthImage::Transition(VkCommandBuffer commands, VkImageLayout newLayout) {
     layout = newLayout;
 }
 
-CommandBatch::CommandBatch(const Context& context) : context(context) {
+CommandBatch::CommandBatch(const Context& context, const char* name) : context(context), name(name), timestamps(context, name == nullptr ? context.batchTimestamps : std::min<std::uint32_t>(context.batchTimestamps, 2)) {
     try {
         VkCommandBufferAllocateInfo allocation{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
         allocation.commandPool = context.pool;
@@ -332,35 +333,19 @@ CommandBatch::CommandBatch(const Context& context) : context(context) {
         Check(context.Function<PFN_vkAllocateCommandBuffers>("vkAllocateCommandBuffers")(context.device, &allocation, &commands), "vkAllocateCommandBuffers");
         VkFenceCreateInfo info{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
         Check(context.Function<PFN_vkCreateFence>("vkCreateFence")(context.device, &info, nullptr, &fence), "vkCreateFence");
-        static const bool timeGpu = std::getenv("ANYPS5_TRACE_TIMING") != nullptr;
-        if (timeGpu && context.limits.timestampComputeAndGraphics) {
-            VkQueryPoolCreateInfo queries{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
-            queries.queryType = VK_QUERY_TYPE_TIMESTAMP;
-            queries.queryCount = 2;
-            Check(context.Function<PFN_vkCreateQueryPool>("vkCreateQueryPool")(context.device, &queries, nullptr, &timestamps), "vkCreateQueryPool");
-        }
         VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
         begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
         Check(context.Function<PFN_vkBeginCommandBuffer>("vkBeginCommandBuffer")(commands, &begin), "vkBeginCommandBuffer");
-        beginTimestamps();
+        timestamps.Begin(commands);
     } catch (...) {
         release();
         throw;
     }
 }
 
-void CommandBatch::beginTimestamps() {
-    if (!timestamps) return;
-    context.Function<PFN_vkCmdResetQueryPool>("vkCmdResetQueryPool")(commands, timestamps, 0, 2);
-    context.Function<PFN_vkCmdWriteTimestamp>("vkCmdWriteTimestamp")(commands, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, timestamps, 0);
-}
-
 void CommandBatch::readTimestamps() {
-    gpuTime = {};
-    if (!timestamps) return;
-    std::array<std::uint64_t, 2> ticks{};
-    if (context.Function<PFN_vkGetQueryPoolResults>("vkGetQueryPoolResults")(context.device, timestamps, 0, 2, sizeof(ticks), ticks.data(), sizeof(std::uint64_t), VK_QUERY_RESULT_64_BIT) != VK_SUCCESS || ticks[1] < ticks[0]) return;
-    gpuTime = std::chrono::nanoseconds(static_cast<std::int64_t>(static_cast<double>(ticks[1] - ticks[0]) * context.limits.timestampPeriod));
+    gpuTime = timestamps.Read();
+    if (name != nullptr && gpuTime.count() > 0) ReportGpuBatch(name, gpuTime);
 }
 
 CommandBatch::~CommandBatch() {
@@ -372,10 +357,12 @@ void CommandBatch::release() noexcept {
         auto result = context.Function<PFN_vkGetFenceStatus>("vkGetFenceStatus")(context.device, fence);
         if (result == VK_NOT_READY) result = context.Function<PFN_vkQueueWaitIdle>("vkQueueWaitIdle")(context.queue);
         if (result != VK_SUCCESS && result != VK_ERROR_DEVICE_LOST) std::terminate();
+        if (result == VK_SUCCESS) {
+            try { readTimestamps(); } catch (...) {}
+        }
     }
     if (commands) context.Function<PFN_vkFreeCommandBuffers>("vkFreeCommandBuffers")(context.device, context.pool, 1, &commands);
     if (fence) context.Function<PFN_vkDestroyFence>("vkDestroyFence")(context.device, fence, nullptr);
-    if (timestamps) context.Function<PFN_vkDestroyQueryPool>("vkDestroyQueryPool")(context.device, timestamps, nullptr);
 }
 
 VkCommandBuffer CommandBatch::Handle() const {
@@ -394,14 +381,14 @@ void CommandBatch::Reset() {
     VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     Check(context.Function<PFN_vkBeginCommandBuffer>("vkBeginCommandBuffer")(commands, &begin), "vkBeginCommandBuffer graphics");
-    beginTimestamps();
+    timestamps.Begin(commands);
     submitted = false;
 }
 
 void CommandBatch::Submit() {
     PerformanceTimer timing("Graphics.Submit");
     Require(!submitted, "command batch has already been submitted");
-    if (timestamps) context.Function<PFN_vkCmdWriteTimestamp>("vkCmdWriteTimestamp")(commands, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, timestamps, 1);
+    timestamps.End(commands);
     Check(context.Function<PFN_vkEndCommandBuffer>("vkEndCommandBuffer")(commands), "vkEndCommandBuffer");
     VkSubmitInfo submission{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     submission.commandBufferCount = 1;

@@ -118,7 +118,7 @@ VkCommandBuffer DrawQueue::ContinuePass(const RenderPassKey& key) {
     return recording.commands->Handle();
 }
 
-void DrawQueue::OpenPass(const Context& context, const RenderPassKey& key) {
+void DrawQueue::OpenPass(const Context& context, const RenderPassKey& key, std::uint64_t colorAddress, std::uint64_t depthAddress) {
     Require(recording.commands != nullptr && !passOpen, "render pass opened outside a recording batch or inside another");
     if (endRenderPass == nullptr) {
         endRenderPass = context.Function<PFN_vkCmdEndRenderPass>("vkCmdEndRenderPass");
@@ -127,6 +127,8 @@ void DrawQueue::OpenPass(const Context& context, const RenderPassKey& key) {
     passOpen = true;
     pass = key;
     boundPipeline = VK_NULL_HANDLE;
+    const bool depthOnly = colorAddress == 0 && depthAddress != 0;
+    recording.commands->BeginRegion(depthOnly ? GpuWork::DepthPass : GpuWork::ColorPass, depthOnly ? depthAddress : colorAddress, {key.extent.width, key.extent.height, 1});
 }
 
 void DrawQueue::EndPass() {
@@ -134,6 +136,7 @@ void DrawQueue::EndPass() {
     passOpen = false;
     boundPipeline = VK_NULL_HANDLE;
     const auto commands = recording.commands->Handle();
+    recording.commands->EndRegion();
     endRenderPass(commands);
     VkMemoryBarrier download{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
     download.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT;

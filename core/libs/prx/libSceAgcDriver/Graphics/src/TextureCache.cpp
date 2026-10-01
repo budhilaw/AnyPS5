@@ -303,7 +303,7 @@ std::vector<unsigned char> ReadbackTexture(const Context& context, const Texture
     const std::size_t bytes = static_cast<std::size_t>(extent.width) * extent.height * texel;
     Buffer readback(context, bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
     {
-        CommandBatch batch(context);
+        CommandBatch batch(context, "readback");
         const auto commands = batch.Handle();
         VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
         barrier.srcAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;

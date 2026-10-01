@@ -17,6 +17,7 @@ void DrawQueue::retire(Batch batch) {
         if (batch.commands->gpuTime.count() > 0) frame->Add(frame->Get("Graphics.GpuTime", "execute"), std::chrono::duration_cast<FrameTiming::Clock::duration>(batch.commands->gpuTime));
         lastCompletion = std::max(lastCompletion, batch.commands->completedAt);
     }
+    if (batch.commands) ReportGpuRegions(batch.commands->Regions(), batch.commands->DroppedRegions(), batch.commands->gpuTime);
     PerformanceTimer timing("Graphics.DrawQueue.Retire");
     const GuestMemory::MemoryAccessScope suspended(nullptr, nullptr);
     Require(drawCount >= batch.entries.size(), "draw queue completion count underflow");

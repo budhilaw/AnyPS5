@@ -40,7 +40,7 @@ Texture::Texture(const Context& context, TextureDimension dimension, TextureNume
         viewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, layers};
         Check(context.Function<PFN_vkCreateImageView>("vkCreateImageView")(context.device, &viewInfo, nullptr, &view), "vkCreateImageView null texture");
         if (context.drawQueue) context.drawQueue->Flush();
-        CommandBatch batch(context);
+        CommandBatch batch(context, "null_texture");
         const auto commands = batch.Handle();
         VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
         barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;

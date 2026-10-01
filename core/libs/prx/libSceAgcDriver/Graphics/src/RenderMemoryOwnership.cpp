@@ -54,7 +54,7 @@ void ResidentColor::resolveCpuAccess(GuestMemoryTracking::Access access) {
         timing.Mark("draw_wait");
     }
     if (dirty) {
-        CommandBatch batch(context);
+        CommandBatch batch(context, "cpu_access");
         Download(batch.Handle());
         batch.SubmitAndWait();
         timing.Mark("download_wait");
