@@ -123,6 +123,7 @@ Still open after that run: the title above 120 fps. Before the default limit is 
 
 ## Debug switches for performance work
 
+- `ANYPS5_DUAL_LANE=1`: runs every wave64 compute program with two guest lanes per invocation, as before single-lane compute; `recompile_replay` prints which cached compute programs run single-lane.
 - `ANYPS5_SAMPLE_THREADS=1`: samples the title, worker and graphics threads every millisecond (Windows) and prints the hottest functions and call chains every 30 s.
 - `ANYPS5_TRACE_SLOW_OPS=1`: prints 5 s summaries of lock waits, the reasons the driver worker waits for the graphics thread, the stages of recording draws and dispatches, and slow memory, tracking and device operations. On Windows it also prints the first tracking fault of each guest instruction with the watch it hit.
 - `ANYPS5_TRACE_TIMING=1`: per-frame timing of the driver stages and GPU timestamps per command batch. `Graphics.Draw.feedback` counts the draws that sample their own color or depth target. Draw-queue batches add up in `Graphics.GpuTime.execute`, one-off batches in `Graphics.GpuBatch.<name>` (`depth_copy`, `color_copy`, `resolve`, `cpu_access`, `flush_stores`, `null_texture`, `readback`, `present`). A batch is timed from the moment the GPU work submitted before it has finished, so batch times do not overlap.
