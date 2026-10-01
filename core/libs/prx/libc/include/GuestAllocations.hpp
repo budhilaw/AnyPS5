@@ -39,6 +39,7 @@ void GuestAllocationsProtect_nid_postfix(void* mutation, const void* pointer, st
 std::uint64_t GuestAllocationsProtectionGeneration_nid_postfix();
 std::uint64_t GuestAllocationsMapEpoch_nid_postfix();
 bool GuestAllocationsCovers_nid_postfix(std::uint64_t address, std::size_t bytes, bool writable);
+bool GuestAllocationsExtent_nid_postfix(std::uint64_t address, std::uint64_t* begin, std::uint64_t* end);
 void GuestAllocationsUnmap_nid_postfix(void* mutation, const void* pointer, std::size_t bytes, const std::function<void(const void*, bool)>& apply);
 Lease GuestAllocationsAcquire_nid_postfix();
 void GuestAllocationsAddReleaseHook_nid_postfix(void* context, void (*release)(void* context));

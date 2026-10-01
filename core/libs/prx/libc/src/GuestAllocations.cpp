@@ -280,8 +280,13 @@ struct Coverage {
         bool readable;
         bool writable;
     };
+    struct Extent {
+        std::uint64_t begin;
+        std::uint64_t end;
+    };
     std::uint64_t epoch = 0;
     std::vector<Entry> ranges;
+    std::vector<Extent> extents;
 };
 
 std::mutex coverageMutex;
@@ -305,6 +310,10 @@ std::shared_ptr<const Coverage> currentCoverage() {
         built->epoch = guestMapEpoch().load(std::memory_order_acquire);
         built->ranges.reserve(registry().ranges.size());
         for (const auto& [base, range] : registry().ranges) built->ranges.push_back({range->address, range->address + range->bytes, range->readable, range->writable});
+    }
+    for (const auto& entry : built->ranges) {
+        if (!built->extents.empty() && built->extents.back().end == entry.begin) built->extents.back().end = entry.end;
+        else built->extents.push_back({entry.begin, entry.end});
     }
     {
         std::lock_guard lock(coverageMutex);
@@ -332,6 +341,19 @@ bool GuestAllocationsCovers_nid_postfix(std::uint64_t address, std::size_t bytes
         if (cursor >= end) return true;
     }
     return false;
+}
+
+bool GuestAllocationsExtent_nid_postfix(std::uint64_t address, std::uint64_t* begin, std::uint64_t* end) {
+    if (begin == nullptr || end == nullptr) throw std::invalid_argument("guest allocation extent without a result");
+    const auto coverage = currentCoverage();
+    const auto& extents = coverage->extents;
+    auto found = std::upper_bound(extents.begin(), extents.end(), address, [](std::uint64_t value, const Coverage::Extent& extent) { return value < extent.begin; });
+    if (found == extents.begin()) return false;
+    --found;
+    if (address >= found->end) return false;
+    *begin = found->begin;
+    *end = found->end;
+    return true;
 }
 
 std::uint64_t GuestAllocationsProtectionGeneration_nid_postfix() {
