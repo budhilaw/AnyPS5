@@ -48,6 +48,7 @@ void reportIfDue(Recorder& state) {
     if (now - state.started < ReportInterval) return;
     const auto text = state.report.Format(std::chrono::duration_cast<std::chrono::nanoseconds>(now - state.started), ReportedEntries);
     std::fwrite(text.data(), 1, text.size(), stderr);
+    std::fflush(stderr);
     state.report.Clear();
     state.started = now;
 }
