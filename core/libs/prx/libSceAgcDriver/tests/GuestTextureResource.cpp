@@ -1,5 +1,7 @@
 #include "GraphicsTests.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/GuestTextureResource.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/Texture.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/TextureTiling.hpp"
 #include <array>
 #include <string>
 #include <string_view>
@@ -98,6 +100,134 @@ void requireIgnored(const Fields& base, TMutate mutate, const std::string& reaso
     Fields fields = base;
     mutate(fields);
     requireSameTexture(DecodeTextureResource(pack(fields)), DecodeTextureResource(pack(base)), reason);
+}
+
+void requireExtent(const Fields& fields, const Fields& surface, const std::string& reason) {
+    const auto decoded = DecodeTextureResource(pack(surface));
+    const auto expected = ComputeSurfaceSize(ComputeMipLayout(decoded.tileMode, decoded.format, decoded.width, decoded.height, decoded.mipCount), FullArrayLayers(decoded));
+    std::uint64_t base = 0;
+    std::uint64_t bytes = 0;
+    Require(DecodeTextureExtent(pack(fields), base, bytes), reason + " has no write extent");
+    Require(base == decoded.baseAddress && bytes == expected, reason + " decoded a write extent other than its surface");
+}
+
+template<typename TMutate>
+void requireSameExtent(const Fields& base, TMutate mutate, const std::string& reason) {
+    Fields fields = base;
+    mutate(fields);
+    requireExtent(fields, base, reason);
+}
+
+void requireNoExtent(std::span<const std::uint32_t> words, const std::string& reason) {
+    std::uint64_t base = 1;
+    std::uint64_t bytes = 2;
+    Require(!DecodeTextureExtent(words, base, bytes), reason + " decoded a write extent");
+    Require(base == 1 && bytes == 2, reason + " changed the extent outputs without decoding one");
+}
+
+void extentTests(const Fields& plain) {
+    requireExtent(plain, plain, "a linear 2D texture");
+    Fields oneD = plain;
+    oneD.typeRaw = 8;
+    oneD.width = 300;
+    oneD.height = 1;
+    requireExtent(oneD, oneD, "a 1D texture");
+    Fields array = plain;
+    array.typeRaw = 13;
+    array.tileModeRaw = 0x05;
+    array.depth = 3;
+    array.baseArray = 1;
+    requireExtent(array, array, "a tiled 2D array texture");
+    Fields cube = plain;
+    cube.typeRaw = 11;
+    cube.width = 64;
+    cube.height = 64;
+    cube.depth = 11;
+    cube.tileModeRaw = 0x09;
+    cube.maxMip = 6;
+    cube.lastLevel = 6;
+    requireExtent(cube, cube, "a mip-mapped cube array texture");
+    Fields volume = plain;
+    volume.typeRaw = 10;
+    volume.width = 32;
+    volume.height = 32;
+    volume.depth = 31;
+    requireExtent(volume, volume, "a linear 3D texture");
+    Fields target = plain;
+    target.width = 2560;
+    target.height = 1440;
+    target.tileModeRaw = 0x1b;
+    requireExtent(target, target, "a render target texture");
+    Fields compressed = plain;
+    compressed.format = 169;
+    compressed.width = 256;
+    compressed.height = 128;
+    compressed.tileModeRaw = 0x09;
+    compressed.maxMip = 8;
+    compressed.lastLevel = 8;
+    requireExtent(compressed, compressed, "a block-compressed texture");
+
+    Fields streamed = plain;
+    streamed.width = 8192;
+    streamed.height = 8192;
+    streamed.tileModeRaw = 0x09;
+    streamed.maxMip = 13;
+    streamed.lastLevel = 13;
+    requireSameExtent(streamed, [](Fields& f) {
+        f.minLod = 0xd4d;
+        f.minLodWarn = 0xcd1;
+        f.mipStatsCntEn = true;
+        f.mipStatsCntId = 0x2a;
+    }, "a streamed texture with mip statistics counters");
+    requireSameExtent(streamed, [](Fields& f) {
+        f.mipStatsCntEn = true;
+        f.mipStatsCntId = 7;
+        f.prtDefColor = true;
+        f.maxUncompBlkSize = 1;
+        f.maxCompBlkSize = 2;
+        f.metaPipeAligned = true;
+        f.writeCompress = true;
+        f.metaCompress = true;
+        f.dccAlphaPos = true;
+        f.dccColorTransf = true;
+        f.metaAddr = 0x123456789aull;
+        f.bcSwizzle = 3;
+        f.perfMod = 5;
+    }, "a texture with mip statistics and DCC metadata fields");
+
+    requireSameExtent(plain, [](Fields& f) { f.cornerSample = true; }, "a texture with corner sampling");
+    requireSameExtent(plain, [](Fields& f) { f.arrayPitch = 1; }, "a texture with a nonzero array pitch");
+    requireSameExtent(plain, [](Fields& f) { f.msaaDepth = true; }, "a texture with the MSAA depth bit");
+    requireSameExtent(plain, [](Fields& f) { f.dstSelX = 2; f.dstSelW = 3; }, "a texture with invalid destination selectors");
+    requireSameExtent(plain, [](Fields& f) { f.depth = 1; f.baseArray = 1; }, "a 2D texture with a depth and base array");
+    Fields twoMips = plain;
+    twoMips.maxMip = 1;
+    twoMips.lastLevel = 1;
+    requireSameExtent(twoMips, [](Fields& f) { f.baseLevel = 2; }, "a texture whose base mip level is past its last level");
+    requireSameExtent(twoMips, [](Fields& f) { f.lastLevel = 2; }, "a texture whose last mip level is past the surface");
+    Fields cubeNotSquare = cube;
+    cubeNotSquare.height = 32;
+    Fields cubeSurface = cubeNotSquare;
+    cubeSurface.typeRaw = 13;
+    requireExtent(cubeNotSquare, cubeSurface, "a cube texture that is not square");
+
+    Fields unsupportedTile = plain;
+    unsupportedTile.tileModeRaw = 0x02;
+    requireNoExtent(pack(unsupportedTile), "a texture with an unsupported tile mode");
+    Fields unsupportedType = plain;
+    unsupportedType.typeRaw = 0;
+    requireNoExtent(pack(unsupportedType), "a texture with an unsupported image type");
+    Fields nullBase = plain;
+    nullBase.base40 = 0;
+    requireNoExtent(pack(nullBase), "a texture with a null base address");
+    Fields unsupportedFormat = plain;
+    unsupportedFormat.format = 2;
+    requireNoExtent(pack(unsupportedFormat), "a texture with an unsupported format");
+    Fields compressedTarget = compressed;
+    compressedTarget.tileModeRaw = 0x1b;
+    requireNoExtent(pack(compressedTarget), "a block-compressed texture in render target tiling");
+    const std::array<std::uint32_t, 4> shortWords{0x123456u, 56u << 20u, 0u, 0x90000facu};
+    requireNoExtent(shortWords, "a texture descriptor shorter than 8 dwords");
 }
 
 }
@@ -285,6 +415,8 @@ void RunGuestTextureResourceTests() {
 
     std::array<std::uint32_t, 4> shortWords{};
     reject([&] { DecodeTextureResource(shortWords); }, "8 dwords");
+
+    extentTests(base);
 
     Require(MatchesGuestDimension(Shape::Image1D, TextureDimension::k1D), "1D shape must match 1D dimension");
     Require(!MatchesGuestDimension(Shape::Image1D, TextureDimension::k2D), "1D shape must not match 2D dimension");

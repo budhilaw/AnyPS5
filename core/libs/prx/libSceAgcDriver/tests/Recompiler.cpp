@@ -578,10 +578,45 @@ void rawWideLoadsReadThroughVectorViews() {
     require(!declaresVectorView(result, 3u) && !declaresVectorView(result, 4u), "a raw buffer_load_dwordx3 declared a vector view");
 }
 
+constexpr std::array<std::uint32_t, 12> ImageProgramUserData{0x00000020u, 56u << 20u, 0u, 0x90000facu, 0u, 0u, 0u, 0u, 0x30000u, 0u, 16u, 0x00000facu};
+
+ShaderRecompiler::RecompileResult compileImageProgram(std::span<const std::uint32_t> code) {
+    ShaderRecompiler::RecompileRequest request{};
+    request.shader = {ShaderRecompiler::ShaderStage::Compute, 0x20000u, code, 0u, {}};
+    request.context.waveSize = 32u;
+    request.context.userDataBaseRegister = 0u;
+    request.context.userData = ImageProgramUserData;
+    request.context.compute = ShaderRecompiler::ShaderComputeStageInfo{{32u, 1u, 1u}, 0u, {false, false, false}, false, 1u};
+    request.target.vulkanVersion = 0x00401000u;
+    request.target.spirvVersion = 0x00010300u;
+    request.target.subgroupSize = 32u;
+    request.target.maxWorkgroupSize = {1024u, 1024u, 64u};
+    request.target.maxWorkgroupInvocations = 1024u;
+    request.target.maxWorkgroupSharedMemoryBytes = 65536u;
+    request.layout.pushConstantSizeBytes = 128u;
+    request.useCache = false;
+    return ShaderRecompiler::Recompile(request);
+}
+
+void imageBindingAccessTests() {
+    constexpr std::array<std::uint32_t, 7> loadOnly{0x7e080280u, 0x7e0a0280u, 0xf0000f08u, 0x00000004u, 0xe0780000u, 0x80020000u, 0xbf810000u};
+    constexpr std::array<std::uint32_t, 9> store{0x7e000280u, 0x7e020280u, 0x7e040280u, 0x7e060280u, 0x7e080280u, 0x7e0a0280u, 0xf0200f08u, 0x00000004u, 0xbf810000u};
+    const auto loaded = compileImageProgram(loadOnly);
+    if (!imageBinding(loaded).readOnly) throw std::runtime_error("an image that the program only loads was not bound read-only");
+    for (const auto& binding : loaded.bindings) {
+        if (binding.role == ShaderRecompiler::DescriptorRole::GuestBuffers && binding.readOnly) throw std::runtime_error("the buffer that the image program stores to was bound read-only");
+    }
+    const auto stored = compileImageProgram(store);
+    const auto& written = imageBinding(stored);
+    if (written.kind != ShaderRecompiler::DescriptorKind::StorageImage) throw std::runtime_error("an image that the program stores to was not bound as a storage image");
+    if (written.readOnly) throw std::runtime_error("a storage image that the program stores to was bound read-only");
+}
+
 }
 
 int main() {
-    const std::array<std::pair<const char*, void (*)()>, 36> tests{{
+    const std::array<std::pair<const char*, void (*)()>, 37> tests{{
+        {"an image the program only loads is bound read-only and an image it stores to is a writable storage image", &imageBindingAccessTests},
         {"a wave64 compute program without wave operations or LDS runs one guest lane per invocation with the guest workgroup size", &perThreadWave64ProgramRunsOneLanePerInvocation},
         {"the dual-lane switch keeps two guest lanes per invocation", &dualLaneSwitchKeepsTwoLanesPerInvocation},
         {"a wave64 program with v_readfirstlane keeps two guest lanes per invocation", &readFirstLaneKeepsTwoLanesPerInvocation},

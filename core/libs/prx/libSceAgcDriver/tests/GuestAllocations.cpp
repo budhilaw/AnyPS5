@@ -4,7 +4,9 @@
 #include "prx/libc/include/GuestMemoryBacking.hpp"
 #include "prx/libc/include/GuestMemoryTracking.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
+#include "prx/libSceAgcDriver/Execution/include/WriteRanges.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/GuestBufferMemory.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/GuestTextureResource.hpp"
 #include <cstring>
 #include <array>
 #include <algorithm>
@@ -12,6 +14,7 @@
 #include <chrono>
 #include <future>
 #include <thread>
+#include <vector>
 
 namespace {
 
@@ -197,6 +200,121 @@ void coverageDuringMutationTests() {
     Require(!covers(false) && throws([&] { CheckGpuRange(memory, region, 256, false); }), "a registry snapshot built while memory was unmapped outlived the unmap");
 }
 
+void extentTests() {
+    constexpr std::size_t region = 1u << 18;
+    auto* memory = mapBacking(4 * region, 3);
+    const auto base = addressOf(memory);
+    std::uint64_t begin = 0;
+    std::uint64_t end = 0;
+    const auto extent = [&](std::uint64_t address) {
+        begin = 0;
+        end = 0;
+        return GuestAllocations::GuestAllocationsExtent_nid_postfix(address, &begin, &end);
+    };
+    Require(!extent(base) && !extent(base + 3 * region), "unregistered memory has a guest allocation extent");
+    {
+        GuestAllocations::Mutation mutation;
+        mutation.Add(memory, region, true, true);
+        mutation.Add(memory + region, region, true, true);
+        mutation.Add(memory + 3 * region, region, true, false);
+    }
+    Require(extent(base) && begin == base && end == base + 2 * region, "adjacent guest allocations do not form one extent");
+    Require(extent(base + 2 * region - 1) && begin == base && end == base + 2 * region, "the last byte of adjacent guest allocations is outside their extent");
+    Require(!extent(base + 2 * region) && !extent(base + 3 * region - 1), "unregistered memory between guest allocations has an extent");
+    Require(extent(base + 3 * region + 16) && begin == base + 3 * region && end == base + 4 * region, "a read-only guest allocation after a gap has a wrong extent");
+    Require(!extent(base + 4 * region), "memory after the last guest allocation has an extent");
+    {
+        GuestAllocations::Mutation mutation;
+        mutation.Protect(memory + region / 2, region, true, false, [&] { GuestMemoryBacking::GuestMemoryBackingActivate_nid_postfix(base + region / 2, region, 1); });
+    }
+    Require(extent(base + region) && begin == base && end == base + 2 * region, "a protection change split the extent of the allocations it covers");
+    unmapRegistered(memory + region, region);
+    Require(extent(base) && begin == base && end == base + region, "an unmapped guest allocation remained in the extent of its neighbour");
+    Require(!extent(base + region), "an unmapped guest allocation still has an extent");
+    unmapRegistered(memory, region);
+    unmapRegistered(memory + 3 * region, region);
+    Require(!extent(base) && !extent(base + 3 * region), "unmapped guest allocations still have an extent");
+    GuestMemoryBacking::GuestMemoryBackingUnmap_nid_postfix(memory + 2 * region, region);
+    bool rejected = false;
+    try {
+        GuestAllocations::GuestAllocationsExtent_nid_postfix(base, nullptr, &end);
+    } catch (const std::invalid_argument&) {
+        rejected = true;
+    }
+    Require(rejected, "a guest allocation extent query without a result was accepted");
+}
+
+void writeRangeTests() {
+    using AgcDriver::WriteOrigin;
+    using AgcDriver::WriteRange;
+    using ShaderRecompiler::DescriptorBinding;
+    constexpr std::size_t region = 1u << 18;
+    auto* memory = mapBacking(4 * region, 3);
+    const auto base = addressOf(memory);
+    const auto runEnd = base + 2 * region;
+    {
+        GuestAllocations::Mutation mutation;
+        mutation.Add(memory, region, true, true);
+        mutation.Add(memory + region, region, true, true);
+    }
+    const auto buffer = [](std::uint64_t address, std::uint32_t stride, std::uint32_t records, bool optional) {
+        DescriptorBinding binding{};
+        binding.kind = ShaderRecompiler::DescriptorKind::StorageBuffer;
+        binding.role = ShaderRecompiler::DescriptorRole::GuestBuffers;
+        binding.count = 1;
+        binding.guestDescriptor = {static_cast<std::uint32_t>(address), static_cast<std::uint32_t>(address >> 32u) | (stride << 16u), records, 0u};
+        binding.elementWritten = {true};
+        binding.elementOptional = {optional};
+        return binding;
+    };
+    const auto image = [](std::uint64_t address, std::uint32_t tileMode, bool readOnly) {
+        constexpr std::uint32_t side = 64;
+        const auto base40 = address >> 8u;
+        DescriptorBinding binding{};
+        binding.kind = ShaderRecompiler::DescriptorKind::StorageImage;
+        binding.role = ShaderRecompiler::DescriptorRole::GuestImages;
+        binding.count = 1;
+        binding.readOnly = readOnly;
+        binding.guestDescriptor = {
+            static_cast<std::uint32_t>(base40),
+            static_cast<std::uint32_t>((base40 >> 32u) & 0xffu) | (56u << 20u) | (((side - 1u) & 3u) << 30u),
+            ((side - 1u) >> 2u) | ((side - 1u) << 14u),
+            0xfacu | (tileMode << 20u) | (9u << 28u),
+            0u, 0u, 0u, 0u
+        };
+        return binding;
+    };
+    bool unknown = false;
+    const auto collect = [&](const std::vector<DescriptorBinding>& bindings) {
+        std::vector<WriteRange> writes;
+        unknown = false;
+        AgcDriver::CollectWrites(bindings, writes, unknown);
+        return writes;
+    };
+    const auto declares = [&](const std::vector<WriteRange>& writes, std::uint64_t first, std::uint64_t last, WriteOrigin origin) {
+        return !unknown && writes.size() == 1 && writes[0].first == first && writes[0].last == last && writes[0].origin == origin;
+    };
+    Require(declares(collect({buffer(base + 0x100, 0, 0xffffffffu, false)}), base + 0x100, runEnd, WriteOrigin::BufferElement), "a raw written buffer was not clamped to the end of the run of allocations that contains its base");
+    Require(declares(collect({buffer(base + region + 0x100, 16, 64, false)}), base + region + 0x100, base + region + 0x500, WriteOrigin::BufferElement), "a strided written buffer inside a run of allocations lost its size");
+    Require(declares(collect({buffer(runEnd + 0x100, 0, 1u << 30u, false)}), runEnd + 0x100, runEnd + 0x100 + (1ull << 30u), WriteOrigin::BufferElement), "a written buffer based outside the allocation registry was clamped");
+    Require(collect({buffer(base + 0x100, 0, 0xffffffffu, true)}).empty() && !unknown, "an optional written buffer larger than 64 MiB before its clamp declared a write");
+    std::uint64_t surfaceBase = 0;
+    std::uint64_t surfaceBytes = 0;
+    Require(AgcDriver::Graphics::DecodeTextureExtent(image(base + 0x1000, 0, false).guestDescriptor, surfaceBase, surfaceBytes) && surfaceBase == base + 0x1000 && surfaceBytes > 0x100, "the storage image test descriptor has no surface extent");
+    Require(declares(collect({image(base + 0x1000, 0, false)}), base + 0x1000, base + 0x1000 + surfaceBytes, WriteOrigin::StorageImage), "a storage image inside a run of allocations did not declare its surface");
+    Require(declares(collect({image(runEnd - 0x100, 0, false)}), runEnd - 0x100, runEnd, WriteOrigin::StorageImage), "a storage image surface was not clamped to the end of the run of allocations that contains its base");
+    Require(declares(collect({image(base + region + 0x1000, 0x02, false)}), base + region + 0x1000, runEnd, WriteOrigin::AllocationFallback), "a storage image whose surface cannot be sized did not declare the rest of the run of allocations that contains its base");
+    collect({image(runEnd + 0x1000, 0x02, false)});
+    Require(unknown, "a storage image whose surface cannot be sized and whose base is not registered did not make its writes unknown");
+    Require(collect({image(runEnd + 0x1000, 0x02, true), image(0, 0, false)}).empty() && !unknown, "a read-only or null storage image declared a write");
+    const auto writes = collect({buffer(base + 0x100, 4, 16, false), image(base + region + 0x1000, 0x02, false)});
+    Require(!unknown && writes.size() == 2 && writes[0].origin == WriteOrigin::BufferElement && writes[0].last == base + 0x140 && writes[1].origin == WriteOrigin::AllocationFallback && writes[1].last == runEnd, "the writes of several bindings were not all declared");
+    unmapRegistered(memory, region);
+    unmapRegistered(memory + region, region);
+    Require(declares(collect({buffer(base + 0x100, 0, 0xffffffffu, false)}), base + 0x100, base + 0x100 + 0xffffffffull, WriteOrigin::BufferElement), "a written buffer stayed clamped to unmapped allocations");
+    GuestMemoryBacking::GuestMemoryBackingUnmap_nid_postfix(memory + 2 * region, 2 * region);
+}
+
 }
 
 void RunGuestAllocationTests() {
@@ -297,4 +415,6 @@ void RunGuestAllocationTests() {
 #endif
     gpuRangeTests();
     coverageDuringMutationTests();
+    extentTests();
+    writeRangeTests();
 }

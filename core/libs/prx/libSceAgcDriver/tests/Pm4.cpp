@@ -6,12 +6,14 @@
 #include "prx/libSceAgcDriver/Execution/include/DriverThread.hpp"
 #include "prx/libSceAgcDriver/Execution/include/WorkerWatchdog.hpp"
 #include "prx/libSceAgcDriver/Submit/include/Dcb.hpp"
+#include "prx/libc/include/GuestMemoryTracking.hpp"
 #include "prx/libc/include/Shutdown.hpp"
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <exception>
 #include <limits>
+#include <mutex>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -235,6 +237,60 @@ void testIndexedDraw() {
     expectFailure([&] { AgcDriver::Pm4::ResolveDraw(packet, state); }, "address range overflow");
     state.indexBase = 0x1000;
     expectFailure([&] { AgcDriver::Pm4::ResolveDraw(packet, state); }, "guest");
+}
+
+void testIndirectDraw() {
+    AgcDriver::QueueState state;
+    alignas(16) std::array<std::uint32_t, 8> arguments{0, 2, 3, 5, 7, 0, 0, 0};
+    alignas(4) std::array<std::uint16_t, 16> indices{};
+    const auto base = reinterpret_cast<std::uintptr_t>(arguments.data());
+    const auto direct = makePacket(0x24, {4, 0, 0, 2});
+    const auto indexed = makePacket(0x25, {4, 0, 0, 0});
+    std::uint64_t address = 0;
+    std::size_t bytes = 0;
+    expectFailure([&] { AgcDriver::Pm4::DrawIndirectArguments(direct, state, address, bytes); }, "indirect draw base has not been set");
+    execute(state, makePacket(0x11, {1, low(arguments.data()), high(arguments.data())}));
+    check(AgcDriver::Pm4::DrawIndirectArguments(direct, state, address, bytes) && address == base + 4 && bytes == 16, "DRAW_INDIRECT arguments are not the four dwords at the indirect base plus the data offset");
+    check(AgcDriver::Pm4::DrawIndirectArguments(indexed, state, address, bytes) && address == base + 4 && bytes == 20, "DRAW_INDEX_INDIRECT arguments are not the five dwords at the indirect base plus the data offset");
+    for (const auto& packet : {makePacket(0x2d, {3, 2}), makePacket(0x35, {4, 2, 4, 0}), makePacket(0x27, {4, 0, 0, 4, 0})}) {
+        address = 0;
+        bytes = 0;
+        check(!AgcDriver::Pm4::DrawIndirectArguments(packet, state, address, bytes) && address == 0 && bytes == 0, "a draw without indirect arguments reported some");
+    }
+    for (const auto flags : {2u, 0x22u}) {
+        const auto packet = makePacket(0x24, {4, 0, 0, flags});
+        AgcDriver::Pm4::Validate(packet, 0);
+        const auto draw = AgcDriver::Pm4::ResolveDraw(packet, state);
+        check(!draw.indexed && draw.indexAddress == 0 && draw.indexCount == 2 && draw.instanceCount == 3 && draw.firstVertex == 5 && draw.firstInstance == 7 && draw.flags == (flags & 0x20u), "DRAW_INDIRECT parameters do not come from its arguments");
+    }
+    for (const auto flags : {0u, 1u, 3u, 0x20u, 0x42u}) {
+        expectFailure([&] { AgcDriver::Pm4::Validate(makePacket(0x24, {4, 0, 0, flags}), 0); }, "indirect draw flags");
+    }
+    for (const auto flags : {0u, 2u, 0x20u, 0x22u}) AgcDriver::Pm4::Validate(makePacket(0x25, {4, 0, 0, flags}), 0);
+    for (const auto flags : {1u, 0x40u}) {
+        expectFailure([&] { AgcDriver::Pm4::Validate(makePacket(0x25, {4, 0, 0, flags}), 0); }, "indirect draw flags");
+    }
+    expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x24, {2, 0, 0, 2}), 0); }, "misaligned indirect draw arguments");
+    expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x24, {4, 0, 0, 2}), 0x20); }, "compute queue");
+    state.indexBase = reinterpret_cast<std::uintptr_t>(indices.data());
+    state.indexType = 0;
+    const auto draw = AgcDriver::Pm4::ResolveDraw(indexed, state);
+    check(draw.indexed && draw.indexAddress == state.indexBase + 10 && draw.indexSize == 2 && draw.indexCount == 2 && draw.instanceCount == 3 && draw.firstVertex == 7 && draw.firstInstance == 0, "DRAW_INDEX_INDIRECT parameters do not come from its arguments");
+    state.shader.insert_or_assign(0x8e, 0x1000);
+    state.shader.insert_or_assign(0x8f, 0x2000);
+    const auto unnamed = state.shader;
+    for (const auto& packet : {direct, indexed, makePacket(0x2d, {3, 2})}) AgcDriver::Pm4::WriteIndirectDrawOffsets(packet, AgcDriver::Pm4::ResolveDraw(packet, state), state);
+    check(state.shader == unnamed, "a draw that names no user SGPRs for its offsets changed the shader registers");
+    const auto named = makePacket(0x24, {4, 0x8e, 0x8f, 2});
+    AgcDriver::Pm4::WriteIndirectDrawOffsets(named, AgcDriver::Pm4::ResolveDraw(named, state), state);
+    check(state.shader.at(0x8e) == 5 && state.shader.at(0x8f) == 7, "DRAW_INDIRECT did not write its start vertex and start instance into the user SGPRs it names");
+    const auto namedIndexed = makePacket(0x25, {4, 0x8f, 0x8e, 0});
+    AgcDriver::Pm4::WriteIndirectDrawOffsets(namedIndexed, AgcDriver::Pm4::ResolveDraw(namedIndexed, state), state);
+    check(state.shader.at(0x8f) == 7 && state.shader.at(0x8e) == 0, "DRAW_INDEX_INDIRECT did not write its base vertex and start instance into the user SGPRs it names");
+    const auto registers = state.shader.size();
+    const auto vertexOnly = makePacket(0x24, {4, 0x90, 0, 2});
+    AgcDriver::Pm4::WriteIndirectDrawOffsets(vertexOnly, AgcDriver::Pm4::ResolveDraw(vertexOnly, state), state);
+    check(state.shader.at(0x90) == 5 && state.shader.size() == registers + 1 && state.shader.at(0x8e) == 0, "DRAW_INDIRECT wrote a start instance without naming its user SGPR");
 }
 
 void testMemory() {
@@ -461,6 +517,69 @@ void testDeviceOcclusionDump() {
     check(replaced[0] == 0x7777777700000000ull && replaced[1] == (valid | visible), "a smaller deferred write hid a larger pending write that runs into the query slot");
 }
 
+void testDeviceIndirectDrawArguments() {
+    alignas(256) static const std::array<std::uint32_t, 1> code{0xbf810000};
+    Shader shader{};
+    shader.file_header = 0x34333231;
+    shader.version = 0x18;
+    shader.header_size = sizeof(Shader);
+    shader.shader_size = sizeof(code);
+    shader.code = code.data();
+    AgcDriverRegisterShader_nid_postfix(&shader);
+    const auto program = reinterpret_cast<std::uintptr_t>(code.data());
+    std::vector<std::uint32_t> setup;
+    for (const auto& packet : {
+        makePacket(0x76, {0x20c, static_cast<std::uint32_t>(program >> 8u), static_cast<std::uint32_t>(program >> 40u)}),
+        makePacket(0x76, {0x207, 1, 1, 1}),
+        makePacket(0x76, {0x213, 0}),
+        makePacket(0x15, {1, 1, 1, 0x8041})
+    }) setup.insert(setup.end(), packet.begin(), packet.end());
+    Packet setupPacket{setup.data(), static_cast<std::uint32_t>(setup.size()), 0, {}};
+    check(sceAgcDriverSubmitDcb(&setupPacket) == 0, "device setup submission failed");
+    AgcDriverWaitIdle_nid_postfix();
+    alignas(16) std::array<std::uint32_t, 4> arguments{3, 1, 0, 0};
+    std::vector<std::uint32_t> commands;
+    for (const auto& packet : {
+        makePacket(0x42, {0}),
+        makePacket(0x11, {1, low(arguments.data()), high(arguments.data())}),
+        makePacket(0x37, {0x100, low(arguments.data()), high(arguments.data()), 0, 0, 0, 0}),
+        makePacket(0x24, {0, 0, 0, 2})
+    }) commands.insert(commands.end(), packet.begin(), packet.end());
+    Packet packet{commands.data(), static_cast<std::uint32_t>(commands.size()), 0, {}};
+    {
+        std::unique_lock trackingLock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
+        check(sceAgcDriverSubmitDcb(&packet) == 0, "indirect draw submission failed");
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
+    try {
+        AgcDriverWaitIdle_nid_postfix();
+    } catch (const std::exception& error) {
+        throw std::runtime_error(std::string("an indirect draw read its arguments before the queued write that clears them: ") + error.what());
+    }
+    check(arguments == std::array<std::uint32_t, 4>{}, "the queued write of the indirect draw arguments was lost");
+    alignas(16) std::array<std::uint32_t, 4> counted{3, 1, 0, 0};
+    std::vector<std::uint32_t> deferredCommands;
+    for (const auto& next : {
+        makePacket(0x42, {0}),
+        makePacket(0x15, {1, 1, 1, 0x8041}),
+        makePacket(0x37, {0x100, low(counted.data()), high(counted.data()), 0}),
+        makePacket(0x11, {1, low(counted.data()), high(counted.data())}),
+        makePacket(0x24, {0, 0, 0, 2})
+    }) deferredCommands.insert(deferredCommands.end(), next.begin(), next.end());
+    Packet deferredPacket{deferredCommands.data(), static_cast<std::uint32_t>(deferredCommands.size()), 0, {}};
+    {
+        std::unique_lock trackingLock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
+        check(sceAgcDriverSubmitDcb(&deferredPacket) == 0, "indirect draw submission after a deferred write failed");
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
+    try {
+        AgcDriverWaitIdle_nid_postfix();
+    } catch (const std::exception& error) {
+        throw std::runtime_error(std::string("an indirect draw read its arguments before the deferred write that clears its vertex count: ") + error.what());
+    }
+    check(counted == std::array<std::uint32_t, 4>{0, 1, 0, 0}, "the deferred write of the indirect draw vertex count was lost");
+}
+
 void testAcquireMem() {
     const auto captured = makePacket(0x58, {0x02007fc0, 0, 0, 0, 0, 10, 0x200});
     AgcDriver::Pm4::Validate(captured, 0);
@@ -658,6 +777,7 @@ int main(int argc, char** argv) {
         testRegisterPairs();
         testContextAndBases();
         testIndexedDraw();
+        testIndirectDraw();
         testAutoDraw();
         RunDeviceTests();
         testMemory();
@@ -670,8 +790,9 @@ int main(int argc, char** argv) {
         testDriverThreads();
         testWorkerWatchdog();
         testDeviceOcclusionDump();
+        testDeviceIndirectDrawArguments();
         LibcRunShutdown_nid_postfix();
-        std::puts("PM4 catalog, registers, register pairs, state, memory, occlusion dump, submission, driver thread, worker watchdog and device occlusion dump tests passed");
+        std::puts("PM4 catalog, registers, register pairs, state, indirect draw, memory, occlusion dump, submission, driver thread, worker watchdog, device occlusion dump and device indirect draw argument tests passed");
         return 0;
     } catch (const std::exception& error) {
         std::fprintf(stderr, "%s\n", error.what());
