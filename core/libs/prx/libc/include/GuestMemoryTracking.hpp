@@ -21,6 +21,7 @@ void GuestMemoryTrackingDestroy_nid_postfix(void* handle) noexcept;
 void GuestMemoryTrackingProtect_nid_postfix(void* handle, Protection protection);
 void GuestMemoryTrackingResolve_nid_postfix(std::uint64_t address, std::size_t bytes, bool writable);
 void GuestMemoryTrackingInvalidate_nid_postfix(std::uint64_t address, std::size_t bytes);
+void GuestMemoryTrackingReapply_nid_postfix(std::uint64_t address, std::size_t bytes);
 void GuestMemoryTrackingDescribe_nid_postfix(std::uint64_t address, std::size_t bytes);
 void GuestMemoryTrackingSetFaultHandler_nid_postfix(bool (*handler)(int, struct __siginfo*, void*));
 void GuestMemoryTrackingValidate_nid_postfix(std::uint64_t address, std::size_t bytes, const std::function<void(std::uint64_t, std::size_t)>& validate);

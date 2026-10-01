@@ -366,6 +366,7 @@ void GuestAllocationsProtect_nid_postfix(void* mutation, const void* pointer, st
     GuestAllocationsRequireUnpinned_nid_postfix(mutation, pointer, bytes);
     auto replacement = replaceRange(pointer, bytes, false, readable, writable);
     apply();
+    GuestMemoryTracking::GuestMemoryTrackingReapply_nid_postfix(reinterpret_cast<std::uint64_t>(pointer), bytes);
     registry().ranges.swap(replacement);
     guestMapEpoch().fetch_add(1, std::memory_order_acq_rel);
 }

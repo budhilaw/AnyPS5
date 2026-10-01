@@ -13,6 +13,7 @@ struct GuestMemoryBackingExtentInfo {
     std::uint64_t bytes;
     void* alias;
     std::uint64_t serial;
+    bool physical;
 };
 
 extern "C" {

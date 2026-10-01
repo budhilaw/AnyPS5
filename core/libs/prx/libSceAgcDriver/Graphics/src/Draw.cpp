@@ -132,7 +132,7 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
             indexOffset = view.offset;
             if (view.resident) {
                 storage->indexCopy.resize(static_cast<std::size_t>(indexBytes));
-                GuestMemory::Read(draw.indexAddress, storage->indexCopy);
+                if (indexBytes != 0) GuestMemory::Read(draw.indexAddress, storage->indexCopy);
                 indexData = storage->indexCopy;
             } else {
                 indexData = view.buffer->Bytes().subspan(static_cast<std::size_t>(view.offset), static_cast<std::size_t>(indexBytes));

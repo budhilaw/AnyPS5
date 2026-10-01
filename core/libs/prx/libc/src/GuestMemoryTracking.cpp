@@ -236,6 +236,16 @@ void GuestMemoryTrackingInvalidate_nid_postfix(std::uint64_t address, std::size_
     }
 }
 
+void GuestMemoryTrackingReapply_nid_postfix(std::uint64_t address, std::size_t bytes) {
+    if (bytes == 0) return;
+    std::lock_guard lock(registry().mutex);
+    for (const auto& entry : overlapping(address, bytes)) {
+        if (!entry->active || entry->protection == Protection::ReadWrite) continue;
+        entry->original = Platform::Query(entry->address, entry->bytes);
+        Platform::Protect(entry->address, entry->bytes, entry->protection);
+    }
+}
+
 void GuestMemoryTrackingDescribe_nid_postfix(std::uint64_t address, std::size_t bytes) {
     if (bytes == 0) return;
     auto& entries = registry().entries;

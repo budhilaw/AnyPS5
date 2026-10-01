@@ -209,6 +209,7 @@ bool GuestMemoryBackingExtent_nid_postfix(std::uint64_t address, std::size_t byt
     info->bytes = allocation->mapping.bytes;
     info->alias = allocation->mapping.alias;
     info->serial = allocation->serial;
+    info->physical = allocation->mapping.physical;
     return true;
 }
 

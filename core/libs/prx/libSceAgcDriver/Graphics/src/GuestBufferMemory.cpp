@@ -140,12 +140,29 @@ void GuestBufferMemory::Upload(bool addressable) {
             static const bool inPlaceEnabled = std::getenv("ANYPS5_NO_BUFFERS_IN_PLACE") == nullptr;
             if (inPlaceEnabled && (!addressable || context.bufferDeviceAddress)) {
                 resolveAccesses(true);
-                if (auto view = context.guestBufferCache->HostRange(region.begin - region.padding, region.end - region.begin + region.padding, region.writable); view.buffer && (view.buffer->Usage() & usage) == usage) {
+                if (auto view = context.guestBufferCache->HostRange(region.begin - region.padding, region.end - region.begin + region.padding); view.buffer && (view.buffer->Usage() & usage) == usage) {
+                    if (view.resident && region.writable) {
+                        auto through = context.guestBufferCache->HostRange(region.begin - region.padding, region.end - region.begin + region.padding, false);
+                        if (!through.buffer || (through.buffer->Usage() & usage) != usage) view = std::move(through);
+                        else {
+                            region.writeThrough = std::move(through.buffer);
+                            region.writeThroughOffset = through.offset;
+                        }
+                    }
+                    if (!view.buffer) {
+                        releaseWrites();
+                        resolveAccesses(false);
+                        region.mirror = context.guestBufferCache->Acquire(region.begin - region.padding, region.end, usage);
+                        region.buffer = region.mirror->buffer;
+                        region.inPlace = region.mirror->imported;
+                        continue;
+                    }
                     region.buffer = std::move(view.buffer);
                     region.bufferOffset = view.offset;
                     region.inPlace = true;
                     region.resident = view.resident;
-                    if (!region.resident) regionWrites([&](std::uint64_t first, std::uint64_t last) { context.guestBufferCache->NoteGpuWrite(first, last); });
+                    if (region.resident) regionWrites([&](std::uint64_t first, std::uint64_t last) { context.guestBufferCache->NoteResidentWritePending(first, last); });
+                    else regionWrites([&](std::uint64_t first, std::uint64_t last) { context.guestBufferCache->NoteGpuWrite(first, last); });
                     continue;
                 }
             }
@@ -195,14 +212,36 @@ std::vector<ShaderRecompiler::BdaAbi::Range> GuestBufferMemory::AddressRanges() 
     return result;
 }
 
-void GuestBufferMemory::NoteResidentWrites() {
-    if (!uploaded || committed || context.guestBufferCache == nullptr) return;
+void GuestBufferMemory::RecordWriteThrough(VkCommandBuffer commands) const {
+    if (!uploaded || committed) return;
+    PFN_vkCmdPipelineBarrier pipelineBarrier = nullptr;
+    PFN_vkCmdCopyBuffer copyBuffer = nullptr;
+    std::vector<VkBufferCopy> copies;
     for (const auto& region : regions) {
-        if (!region.resident || !region.writable) continue;
-        for (const auto& [first, last] : writes) {
-            if (first >= region.begin && first < region.end) context.guestBufferCache->NoteResidentWrite(first, std::min(last, region.end));
+        if (!region.resident || !region.writable || region.writeThrough == nullptr) continue;
+        copies.clear();
+        const auto base = region.begin - region.padding;
+        for (const auto& [begin, end] : writes) {
+            if (begin < region.begin || begin >= region.end) continue;
+            const auto last = std::min(end, region.end);
+            copies.push_back({region.bufferOffset + (begin - base), region.writeThroughOffset + (begin - base), last - begin});
         }
+        if (copies.empty()) continue;
+        if (copyBuffer == nullptr) {
+            pipelineBarrier = context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier");
+            copyBuffer = context.Function<PFN_vkCmdCopyBuffer>("vkCmdCopyBuffer");
+            VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+            barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+            barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            pipelineBarrier(commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
+        }
+        copyBuffer(commands, region.buffer->Handle(), region.writeThrough->Handle(), static_cast<std::uint32_t>(copies.size()), copies.data());
     }
+    if (copyBuffer == nullptr) return;
+    VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_HOST_READ_BIT;
+    pipelineBarrier(commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT | VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
 }
 
 std::vector<DispatchBindings::BoundRegion> GuestBufferMemory::CaptureRegions() const {
@@ -255,7 +294,8 @@ void GuestBufferMemory::WriteBack(std::uint64_t sequence) {
             if (context.renderCache != nullptr) {
                 for (const auto& [first, last] : context.renderCache->WatchedRanges(begin, end, sequence)) GuestMemory::CheckRange(reinterpret_cast<const void*>(first), static_cast<std::size_t>(last - first), 1, true);
             }
-            if (!region.resident) context.guestBufferCache->NoteGpuWrite(begin, end);
+            if (region.resident) context.guestBufferCache->NoteResidentWriteThrough(begin, end);
+            else context.guestBufferCache->NoteGpuWrite(begin, end);
         } else if (inPlace.back() && context.renderCache != nullptr) {
             for (const auto& [first, last] : context.renderCache->UnadoptedRanges(begin, end, sequence)) GuestMemory::CheckRange(reinterpret_cast<const void*>(first), static_cast<std::size_t>(last - first), 1, true);
         } else {

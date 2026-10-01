@@ -32,7 +32,7 @@ public:
     std::vector<ShaderRecompiler::BdaAbi::Range> AddressRanges() const;
     std::vector<DispatchBindings::BoundRegion> CaptureRegions() const;
     void WriteBack(std::uint64_t sequence = std::numeric_limits<std::uint64_t>::max());
-    void NoteResidentWrites();
+    void RecordWriteThrough(VkCommandBuffer commands) const;
     bool WritesOverlapCopied(std::uint64_t address, std::size_t bytes) const;
     bool WriteCopied(std::uint64_t address) const;
     bool WritesOverlap(std::uint64_t address, std::size_t bytes) const;
@@ -52,6 +52,8 @@ private:
         std::uint64_t bufferOffset = 0;
         bool inPlace = false;
         bool resident = false;
+        std::shared_ptr<Buffer> writeThrough;
+        std::uint64_t writeThroughOffset = 0;
         std::shared_ptr<const GuestAllocations::Range> image;
     };
 

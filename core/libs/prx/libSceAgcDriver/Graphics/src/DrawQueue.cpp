@@ -189,7 +189,6 @@ void DrawQueue::Enqueue(std::shared_ptr<ShaderResources> resources, std::shared_
     if (resources->HasGuestWrites()) {
         writers.push_back({nextSequence, resources.get()});
         writerEpoch.fetch_add(1, std::memory_order_release);
-        resources->NoteResidentWrites();
     }
     if (resources->UsesGds()) lastGdsSequence = nextSequence;
     recording.entries.push_back({std::move(storage), std::move(resources), nextSequence++});
@@ -275,6 +274,9 @@ bool DrawQueue::CopiedWritesPending(std::uint64_t address, std::size_t bytes) co
 void DrawQueue::Flush() {
     if (!recording.commands) return;
     EndPass();
+    for (const auto& entry : recording.entries) {
+        if (entry.resources) entry.resources->RecordWriteThrough(recording.commands->Handle());
+    }
     if (recording.uploads) {
         VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
         barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
