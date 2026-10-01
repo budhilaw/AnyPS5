@@ -578,6 +578,57 @@ void rawWideLoadsReadThroughVectorViews() {
     require(!declaresVectorView(result, 3u) && !declaresVectorView(result, 4u), "a raw buffer_load_dwordx3 declared a vector view");
 }
 
+constexpr std::uint32_t OpName = 5u;
+constexpr std::uint32_t DecorationNonWritable = 24u;
+
+std::vector<std::string> nonWritableVariables(const RecompileResult& result) {
+    std::vector<std::pair<std::uint32_t, std::string>> names;
+    std::vector<std::uint32_t> decorated;
+    forEachInstruction(result, [&](std::uint32_t opcode, std::span<const std::uint32_t> instruction) {
+        if (opcode == OpName && instruction.size() >= 3u) {
+            const auto* text = reinterpret_cast<const char*>(instruction.data() + 2);
+            const auto* end = text + (instruction.size() - 2u) * sizeof(std::uint32_t);
+            names.emplace_back(instruction[1], std::string(text, std::find(text, end, '\0')));
+        } else if (opcode == OpDecorate && instruction.size() == 3u && instruction[2] == DecorationNonWritable) {
+            decorated.push_back(instruction[1]);
+        }
+    });
+    std::vector<std::string> variables;
+    for (const auto& [id, name] : names) {
+        if (std::ranges::find(decorated, id) != decorated.end()) variables.push_back(name);
+    }
+    return variables;
+}
+
+void readOnlyStorageBuffersAreNonWritable() {
+    bool checkedSrt = false;
+    bool checkedBuffers = false;
+    for (const auto request : SkippedLightingRequests) {
+        const auto result = RecompileSerialized(request);
+        const auto names = nonWritableVariables(result);
+        const auto marked = [&](std::string_view name) { return std::ranges::find(names, name) != names.end(); };
+        for (const auto& binding : result.bindings) {
+            if (binding.role == DescriptorRole::FlattenedSrt) {
+                require(marked("flattened_srt"), "the flattened SRT was not marked NonWritable");
+                checkedSrt = true;
+            } else if (binding.role == DescriptorRole::ShaderData) {
+                require(marked("shader_data"), "the shader data buffer was not marked NonWritable");
+            } else if (binding.role == DescriptorRole::BdaPagetable) {
+                require(marked("bda_pagetable"), "the BDA page table was not marked NonWritable");
+            } else if (binding.role == DescriptorRole::FaultBuffer) {
+                require(!marked("fault_buffer"), "the BDA fault record was marked NonWritable");
+            } else if (binding.role == DescriptorRole::GuestBuffers) {
+                const bool written = std::ranges::any_of(binding.elementWritten, [](bool value) { return value; });
+                require(marked("buffers") == !written, written ? "guest buffers the program writes were marked NonWritable" : "guest buffers the program only reads were not marked NonWritable");
+                checkedBuffers = true;
+            }
+        }
+    }
+    require(checkedSrt && checkedBuffers, "the lighting programs bind no flattened SRT or guest buffers to check");
+    const auto stored = nonWritableVariables(compileSynthetic(Synthetic::PerThreadProgram({64u, 1u, 1u}, 64u, 32u, SyntheticInput, SyntheticOutput, SyntheticRecords), 64u, false));
+    require(std::ranges::find(stored, "buffers") == stored.end(), "a guest buffer array the program stores to was marked NonWritable");
+}
+
 constexpr std::array<std::uint32_t, 12> ImageProgramUserData{0x00000020u, 56u << 20u, 0u, 0x90000facu, 0u, 0u, 0u, 0u, 0x30000u, 0u, 16u, 0x00000facu};
 
 ShaderRecompiler::RecompileResult compileImageProgram(std::span<const std::uint32_t> code) {
@@ -615,8 +666,9 @@ void imageBindingAccessTests() {
 }
 
 int main() {
-    const std::array<std::pair<const char*, void (*)()>, 37> tests{{
+    const std::array<std::pair<const char*, void (*)()>, 38> tests{{
         {"an image the program only loads is bound read-only and an image it stores to is a writable storage image", &imageBindingAccessTests},
+        {"the flattened SRT, shader data, BDA page table and guest buffers the program never writes are NonWritable", &readOnlyStorageBuffersAreNonWritable},
         {"a wave64 compute program without wave operations or LDS runs one guest lane per invocation with the guest workgroup size", &perThreadWave64ProgramRunsOneLanePerInvocation},
         {"the dual-lane switch keeps two guest lanes per invocation", &dualLaneSwitchKeepsTwoLanesPerInvocation},
         {"a wave64 program with v_readfirstlane keeps two guest lanes per invocation", &readFirstLaneKeepsTwoLanesPerInvocation},

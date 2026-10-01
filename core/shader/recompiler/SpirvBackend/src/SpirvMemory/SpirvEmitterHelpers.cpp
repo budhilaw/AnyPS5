@@ -7,6 +7,7 @@
 #include <spirv/unified1/spirv.hpp>
 #include <algorithm>
 #include <array>
+#include <cstdlib>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -85,6 +86,11 @@ std::uint32_t PushConstantArrayType(SpirvEmitterState& state) {
     return state.module.DecoratedType(spv::OpTypeArray,
         {{spv::OpDecorate, {spv::DecorationArrayStride, static_cast<std::uint32_t>(sizeof(std::uint32_t))}}},
         TypeU32(state), count);
+}
+
+bool ReadOnlyBuffersDisabled() {
+    static const bool disabled = std::getenv("ANYPS5_NO_READONLY_BUFFERS") != nullptr;
+    return disabled;
 }
 
 std::uint32_t PushConstantBlockType(SpirvEmitterState& state) {
@@ -355,6 +361,10 @@ void DefineDescriptors(SpirvEmitterState& state) {
         const auto ArrayType = [&](std::uint32_t type) {
             return state.module.Type(spv::OpTypeArray, type, ConstantU32(state, static_cast<std::uint32_t>(binding.resources.size())));
         };
+        const auto ReadOnly = [&](std::uint32_t variable) {
+            if (!ReadOnlyBuffersDisabled()) state.module.AddAnnotation(spv::OpDecorate, variable, spv::DecorationNonWritable);
+            return variable;
+        };
         switch (binding.kind) {
         case DescriptorBindingKind::Buffers: {
             state.storageBufferVariable = Define(ArrayType(StorageBufferBlockType(state)), "buffers");
@@ -376,19 +386,31 @@ void DefineDescriptors(SpirvEmitterState& state) {
                     }
                 }
             }
+            const auto& buffers = state.program.Info().buffers;
+            const bool written = std::any_of(binding.resources.begin(), binding.resources.end(), [&](std::uint32_t resource) {
+                return resource >= buffers.size() || buffers[resource].written || buffers[resource].atomic;
+            });
+            if (!written) {
+                ReadOnly(state.storageBufferVariable);
+                for (const auto view : views) {
+                    if (view != 0) {
+                        ReadOnly(view);
+                    }
+                }
+            }
             break;
         }
         case DescriptorBindingKind::BdaPagetable:
-            state.bdaPagetableVariable = Define(StorageBufferBlockType(state), "bda_pagetable");
+            state.bdaPagetableVariable = ReadOnly(Define(StorageBufferBlockType(state), "bda_pagetable"));
             break;
         case DescriptorBindingKind::FaultBuffer:
             state.faultBufferVariable = Define(StorageBufferBlockType(state), "fault_buffer");
             break;
         case DescriptorBindingKind::ShaderData:
-            state.shaderDataStorageVariable = Define(StorageBufferBlockType(state), "shader_data");
+            state.shaderDataStorageVariable = ReadOnly(Define(StorageBufferBlockType(state), "shader_data"));
             break;
         case DescriptorBindingKind::FlattenedSrt:
-            state.flattenedSrtVariable = Define(StorageBufferBlockType(state), "flattened_srt");
+            state.flattenedSrtVariable = ReadOnly(Define(StorageBufferBlockType(state), "flattened_srt"));
             break;
         case DescriptorBindingKind::Samplers:
             state.samplerVariable = Define(ArrayType(state.module.Type(spv::OpTypeSampler)), "samplers", spv::StorageClassUniformConstant);
