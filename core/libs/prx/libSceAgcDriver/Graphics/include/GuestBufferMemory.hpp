@@ -2,6 +2,7 @@
 #define CORE_LIBS_PRX_LIBSCEAGCDRIVER_GRAPHICS_INCLUDE_GUESTBUFFERMEMORY_HPP
 
 #include "prx/libSceAgcDriver/Graphics/include/Resources.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/DispatchBindings.hpp"
 #include "BdaAbi.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/GuestBufferCache.hpp"
@@ -29,6 +30,7 @@ public:
     void Upload(bool addressable);
     VkDescriptorBufferInfo Descriptor(std::uint64_t address, std::size_t bytes) const;
     std::vector<ShaderRecompiler::BdaAbi::Range> AddressRanges() const;
+    std::vector<DispatchBindings::BoundRegion> CaptureRegions() const;
     void WriteBack(std::uint64_t sequence = std::numeric_limits<std::uint64_t>::max());
     bool WritesOverlapCopied(std::uint64_t address, std::size_t bytes) const;
     bool WriteCopied(std::uint64_t address) const;

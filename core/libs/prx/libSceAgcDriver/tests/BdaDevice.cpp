@@ -2,6 +2,7 @@
 #include <algorithm>
 #include "BdaShader.hpp"
 #include "ColorTransferTests.hpp"
+#include "DispatchCaptureTests.hpp"
 #include <fstream>
 #include "prx/libSceAgcDriver/Execution/include/BdaFeatures.hpp"
 #include "prx/libSceAgcDriver/Execution/include/VulkanLibrary.hpp"
@@ -396,6 +397,7 @@ public:
     ~Device() { release(); }
     const Context& GetContext() const { return context; }
     bool GraphicsQueue() const { return graphicsQueue; }
+    PFN_vkGetInstanceProcAddr InstanceProc() const { return instanceProc; }
 
 private:
     template<typename TFunction>
@@ -425,6 +427,7 @@ private:
 int main(int argc, char** argv) {
     try {
         RunBdaContractTests();
+        RunDispatchCaptureFormatTests();
         if (argc == 2) {
             const auto shader = MakeBdaTestShader(0x7fff12340000ULL, 32);
             std::ofstream file(argv[1], std::ios::binary);
@@ -442,7 +445,8 @@ int main(int argc, char** argv) {
         RunColorTransferTests(device.GetContext());
         checkDepthViews(device.GetContext(), device.GraphicsQueue());
         checkGpuTimestamps(device.GetContext());
-        std::cout << "Vulkan BDA allocation and execution tests passed\n";
+        RunDispatchCaptureTests(device.GetContext(), device.InstanceProc());
+        std::cout << "Vulkan BDA allocation, execution and dispatch capture replay tests passed\n";
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

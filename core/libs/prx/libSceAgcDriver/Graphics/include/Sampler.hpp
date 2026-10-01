@@ -17,6 +17,7 @@ public:
     Sampler& operator=(const Sampler&) = delete;
 
     VkSampler Handle() const;
+    const VkSamplerCreateInfo& CreateInfo() const { return createInfo; }
 
 private:
     void release() noexcept;
@@ -24,6 +25,7 @@ private:
     VkDevice device;
     PFN_vkDestroySampler destroySampler;
     VkSampler sampler = VK_NULL_HANDLE;
+    VkSamplerCreateInfo createInfo{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
 };
 
 class SamplerCache {

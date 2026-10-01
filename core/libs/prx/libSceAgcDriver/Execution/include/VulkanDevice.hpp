@@ -12,6 +12,10 @@
 #include "prx/libSceAgcDriver/Graphics/include/Draw.hpp"
 #include <memory>
 
+namespace AgcDriver::Graphics {
+struct CaptureTarget;
+}
+
 namespace AgcDriver {
 
 class VulkanDevice {
@@ -45,7 +49,7 @@ public:
     void PresentClear(std::uint32_t width, std::uint32_t height, bool opaque);
     void PresentPixels(std::uint32_t width, std::uint32_t height, std::span<const std::byte> pixels);
     void PresentDisplayBuffer(const DisplayBuffer& buffer);
-    void Dispatch(const ShaderRecompiler::RecompileResult& shader, std::uint32_t x, std::uint32_t y, std::uint32_t z, std::span<const Graphics::GuestMemorySnapshot> snapshots = {});
+    void Dispatch(const ShaderRecompiler::RecompileResult& shader, std::uint32_t x, std::uint32_t y, std::uint32_t z, std::span<const Graphics::GuestMemorySnapshot> snapshots = {}, const Graphics::CaptureTarget* capture = nullptr);
     void Draw(const Graphics::State& graphics, const Pm4::DrawParameters& draw, std::span<const Graphics::CompiledShader> shaders, std::span<const Graphics::GuestMemorySnapshot> snapshots = {});
     void EnqueueDraw(const Graphics::State& graphics, const Pm4::DrawParameters& draw, std::span<const Graphics::CompiledShader> shaders, std::span<const Graphics::GuestMemorySnapshot> snapshots = {});
     void ValidateDraw(const Graphics::State& graphics, std::span<const Graphics::CompiledShader> shaders) const;

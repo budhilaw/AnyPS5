@@ -28,6 +28,9 @@
 #include "prx/libSceAgcDriver/Graphics/include/SlowPipeline.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Pipeline.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ShaderResources.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/CaptureObjects.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/DispatchRecorder.hpp"
+#include "prx/libSceAgcDriver/Execution/include/DispatchCapture.hpp"
 #include <chrono>
 #include "prx/libc/include/General.hpp"
 #include "prx/libc/include/PreciseSleep.hpp"
@@ -556,6 +559,7 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
         state->window = window->context;
     }
     state->deviceProc = state->InstanceFunction<PFN_vkGetDeviceProcAddr>("vkGetDeviceProcAddr");
+    if (DispatchCaptureEnabled()) state->deviceProc = Graphics::CaptureObjects::Wrap(state->deviceProc);
     const auto enumerate = state->InstanceFunction<PFN_vkEnumeratePhysicalDevices>("vkEnumeratePhysicalDevices");
     std::uint32_t count = 0;
     check(enumerate(state->instance, &count, nullptr), "vkEnumeratePhysicalDevices");
@@ -1429,7 +1433,7 @@ void VulkanDevice::EnqueueDraw(const Graphics::State& graphics, const Pm4::DrawP
     slowTimer.Split("device draw publish");
 }
 
-void VulkanDevice::Dispatch(const ShaderRecompiler::RecompileResult& shader, std::uint32_t x, std::uint32_t y, std::uint32_t z, std::span<const Graphics::GuestMemorySnapshot> snapshots) {
+void VulkanDevice::Dispatch(const ShaderRecompiler::RecompileResult& shader, std::uint32_t x, std::uint32_t y, std::uint32_t z, std::span<const Graphics::GuestMemorySnapshot> snapshots, const Graphics::CaptureTarget* capture) {
     if (shader.spirv.size() < 5 || shader.spirv[0] != 0x07230203u) {
         throw std::runtime_error("Vulkan dispatch: invalid SPIR-V");
     }
@@ -1455,7 +1459,7 @@ void VulkanDevice::Dispatch(const ShaderRecompiler::RecompileResult& shader, std
     });
     const auto pushBytes = Graphics::AssemblePushConstants(shaders);
     static const char* slowGpu = std::getenv("ANYPS5_DEBUG_SLOW_GPU");
-    if (slowGpu != nullptr) {
+    if (slowGpu != nullptr || capture != nullptr) {
         state->drawQueue->Flush();
         state->drawQueue->Wait();
     }
@@ -1537,6 +1541,21 @@ void VulkanDevice::Dispatch(const ShaderRecompiler::RecompileResult& shader, std
                 std::fflush(stderr);
             }
         }
+        std::unique_ptr<Graphics::DispatchRecorder> recorder;
+        std::shared_ptr<Graphics::ShaderResources> captured;
+        if (capture != nullptr) {
+            state->drawQueue->Flush();
+            state->drawQueue->Wait();
+            captured = resources;
+            try {
+                recorder = std::make_unique<Graphics::DispatchRecorder>(context, *capture, shader, std::array<std::uint32_t, 3>{x, y, z}, captured->CaptureBindings());
+                recorder->Before();
+            } catch (const std::exception& error) {
+                recorder.reset();
+                APS5_LOG_OUT("[capture] the inputs of the dispatch of program 0x%llx %ux%ux%u were not captured: %s", static_cast<unsigned long long>(capture->program), x, y, z, error.what());
+            }
+            slowTimer.Split("device dispatch capture inputs");
+        }
         const auto commands = state->drawQueue->Begin(context);
         VkMemoryBarrier upload{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
         upload.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
@@ -1565,6 +1584,18 @@ void VulkanDevice::Dispatch(const ShaderRecompiler::RecompileResult& shader, std
         for (const auto& texture : resources->Textures()) debugPost = debugPost || (texture->Extent().width >= 240 && texture->GuestFormat() == VK_FORMAT_B10G11R11_UFLOAT_PACK32);
         const auto debugResources = debugGdsInputs && (debugPost || (x == 8 && y == 8 && z == 8)) ? resources : nullptr;
         state->drawQueue->Enqueue(std::move(resources), std::move(selected));
+        if (recorder) {
+            state->drawQueue->Flush();
+            state->drawQueue->Wait();
+            try {
+                recorder->After();
+                const auto directory = recorder->Finish();
+                APS5_LOG_OUT("[capture] dispatch of program 0x%llx (code hash 0x%016llx) %ux%ux%u saved to %s: %s; replay: %s", static_cast<unsigned long long>(capture->program), static_cast<unsigned long long>(capture->codeHash), x, y, z, directory.generic_string().c_str(), recorder->Summary().c_str(), DispatchReplayCommand(directory).c_str());
+            } catch (const std::exception& error) {
+                APS5_LOG_OUT("[capture] the results of the dispatch of program 0x%llx %ux%ux%u were not captured: %s", static_cast<unsigned long long>(capture->program), x, y, z, error.what());
+            }
+            slowTimer.Split("device dispatch capture results");
+        }
         if (slowGpu != nullptr) {
             state->drawQueue->Flush();
             const auto start = std::chrono::steady_clock::now();

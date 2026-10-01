@@ -194,6 +194,18 @@ std::vector<ShaderRecompiler::BdaAbi::Range> GuestBufferMemory::AddressRanges() 
     return result;
 }
 
+std::vector<DispatchBindings::BoundRegion> GuestBufferMemory::CaptureRegions() const {
+    Require(uploaded && !committed, "guest GPU memory is not available for capture");
+    std::vector<DispatchBindings::BoundRegion> result;
+    result.reserve(regions.size());
+    for (const auto& region : regions) {
+        Require(region.buffer != nullptr, "incomplete guest GPU upload");
+        const auto bytes = region.buffer->Bytes().subspan(static_cast<std::size_t>(region.bufferOffset), static_cast<std::size_t>(region.padding + region.end - region.begin));
+        result.push_back({region.begin, region.end, region.padding, region.writable, region.buffer->Imported(), region.image != nullptr, region.buffer->Properties(), bytes, region.buffer});
+    }
+    return result;
+}
+
 static bool TraceWriteBack() {
     static const bool enabled = std::getenv("ANYPS5_TRACE_WRITEBACK") != nullptr;
     return enabled;

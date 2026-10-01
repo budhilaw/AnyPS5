@@ -21,6 +21,8 @@ public:
     VkDeviceAddress DeviceAddress() const;
     std::span<std::byte> Bytes();
     VkBufferUsageFlags Usage() const { return usage; }
+    VkMemoryPropertyFlags Properties() const { return properties; }
+    bool Imported() const { return imported; }
     void Invalidate();
 
 private:

@@ -279,6 +279,7 @@ void ShaderResources::build(std::span<const CompiledShader> shaders, const Color
         }
         if (!writes.empty()) context.Function<PFN_vkUpdateDescriptorSets>("vkUpdateDescriptorSets")(context.device, static_cast<std::uint32_t>(writes.size()), writes.data(), 0, nullptr);
         timing.Mark("descriptor_update");
+        boundBindings = std::move(bindings);
     } catch (...) {
         release();
         throw;
@@ -335,7 +336,7 @@ std::size_t ShaderResources::addZeroBuffer(std::uint64_t address, std::size_t si
     const auto padded = size + static_cast<std::size_t>(address % GuestBufferMemory::ViewAlignment);
     auto buffer = std::make_unique<Buffer>(context, padded, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
     std::memset(buffer->Bytes().data(), 0, padded);
-    allocations.push_back({0, padded, false, std::move(buffer)});
+    allocations.push_back({0, padded, false, std::move(buffer), ShaderRecompiler::DescriptorRole::ShaderData, true});
     return allocations.size() - 1;
 }
 
@@ -489,6 +490,60 @@ void ShaderResources::WriteBack(std::uint64_t sequence) {
     if (bda) bda->CheckFault(guestMemory);
     guestMemory.WriteBack(sequence);
     for (auto& texture : textures) texture->FlushStores();
+}
+
+DispatchBindings ShaderResources::CaptureBindings() const {
+    constexpr VkMemoryPropertyFlags hostMemory = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    DispatchBindings result;
+    result.regions = guestMemory.CaptureRegions();
+    result.writes = guestMemory.WriteRanges();
+    for (const auto& binding : boundBindings) {
+        result.layout.push_back(binding.layout);
+        const auto type = binding.layout.descriptorType;
+        if (type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER) {
+            for (std::uint32_t element = 0; element < binding.allocations.size(); ++element) {
+                const auto& allocation = allocations[binding.allocations[element]];
+                DispatchBindings::BoundBuffer bound{binding.layout.binding, element, CaptureBufferSource::Data, allocation.address, allocation.size, hostMemory, {}};
+                if (allocation.guest) {
+                    bound.source = CaptureBufferSource::Guest;
+                } else if (allocation.role == ShaderRecompiler::DescriptorRole::BdaPagetable) {
+                    Require(bda != nullptr, "BDA descriptors have no memory owner");
+                    bound.source = CaptureBufferSource::Table;
+                    bound.bytes = bda->TableBytes();
+                    bound.size = bound.bytes.size();
+                    bound.memory = bda->TableMemory();
+                } else if (allocation.role == ShaderRecompiler::DescriptorRole::FaultBuffer) {
+                    Require(bda != nullptr, "BDA descriptors have no memory owner");
+                    bound.source = CaptureBufferSource::Fault;
+                    bound.bytes = bda->FaultBytes();
+                    bound.size = bound.bytes.size();
+                    bound.memory = bda->FaultMemory();
+                } else if (allocation.role == ShaderRecompiler::DescriptorRole::Gds) {
+                    Require(context.gds != nullptr, "GDS descriptor has no buffer owner");
+                    bound.source = CaptureBufferSource::Gds;
+                    bound.bytes = context.gds->Bytes().first(allocation.size);
+                    bound.memory = context.gds->Properties();
+                } else {
+                    Require(allocation.buffer != nullptr, "shader data has no buffer owner");
+                    bound.source = allocation.zero ? CaptureBufferSource::Zero : CaptureBufferSource::Data;
+                    bound.bytes = allocation.buffer->Bytes().first(allocation.size);
+                    bound.memory = allocation.buffer->Properties();
+                }
+                result.buffers.push_back(bound);
+            }
+        } else if (type == VK_DESCRIPTOR_TYPE_SAMPLER) {
+            for (std::uint32_t element = 0; element < binding.imageAllocations.size(); ++element) {
+                result.samplers.push_back({binding.layout.binding, element, samplers[binding.imageAllocations[element]]->CreateInfo()});
+            }
+        } else {
+            const bool storage = type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+            for (std::uint32_t element = 0; element < binding.imageAllocations.size(); ++element) {
+                const auto& texture = textures[binding.imageAllocations[element]];
+                result.images.push_back({binding.layout.binding, element, type, storage ? texture->StorageView() : texture->View(), storage ? VK_IMAGE_LAYOUT_GENERAL : texture->Layout()});
+            }
+        }
+    }
+    return result;
 }
 
 }

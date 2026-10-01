@@ -6,6 +6,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/Texture.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Sampler.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/DescriptorCache.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/DispatchBindings.hpp"
 #include "Recompiler.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Shaders.hpp"
 #include <array>
@@ -38,6 +39,7 @@ public:
     bool Writes() const { return guestMemory.HasWrites() || storesImages || usesFaultBuffer; }
     bool UsesGds() const { return usesGds; }
     const std::vector<std::uint32_t>& LayoutKey() const { return layoutKey; }
+    DispatchBindings CaptureBindings() const;
     static std::optional<std::vector<VkDescriptorSetLayoutBinding>> LayoutBindings(std::span<const CompiledShader> shaders);
     static std::vector<std::uint32_t> KeyOf(std::span<const VkDescriptorSetLayoutBinding> bindings);
 
@@ -48,6 +50,7 @@ private:
         bool guest;
         std::unique_ptr<Buffer> buffer;
         ShaderRecompiler::DescriptorRole role = ShaderRecompiler::DescriptorRole::ShaderData;
+        bool zero = false;
     };
 
     struct Binding {
@@ -77,6 +80,7 @@ private:
     VkDescriptorSet _set = VK_NULL_HANDLE;
     DescriptorCache::Allocation descriptors;
     std::vector<Allocation> allocations;
+    std::vector<Binding> boundBindings;
     std::vector<std::shared_ptr<Texture>> textures;
     std::vector<std::pair<std::uint32_t, std::uint32_t>> textureBindings;
     std::vector<std::shared_ptr<Sampler>> samplers;

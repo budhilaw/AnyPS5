@@ -11,6 +11,10 @@ public:
     BdaResources(const Context& context, const GuestBufferMemory& memory);
     VkDescriptorBufferInfo Table() const;
     VkDescriptorBufferInfo Fault() const;
+    std::span<const std::byte> TableBytes() const { return table ? table->Bytes().first(tableBytes) : std::span<const std::byte>(); }
+    std::span<const std::byte> FaultBytes() const { return fault->Bytes().first(sizeof(ShaderRecompiler::BdaAbi::Fault)); }
+    VkMemoryPropertyFlags TableMemory() const { return table ? table->Properties() : 0u; }
+    VkMemoryPropertyFlags FaultMemory() const { return fault->Properties(); }
     void CheckFault(const GuestBufferMemory& memory) const;
 
 private:

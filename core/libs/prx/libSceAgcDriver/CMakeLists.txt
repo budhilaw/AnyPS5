@@ -190,6 +190,7 @@ add_executable(agc_driver_pm4_tests EXCLUDE_FROM_ALL
 target_include_directories(agc_driver_pm4_tests PRIVATE
         ${LIBS_INCLUDE_DIR}
         ${CMAKE_SOURCE_DIR}/core/shader/recompiler
+        ${CMAKE_SOURCE_DIR}/core/shader/recompiler/ControlFlow/include
         ${CMAKE_SOURCE_DIR}/3rdparty/Vulkan-Headers/include
 )
 

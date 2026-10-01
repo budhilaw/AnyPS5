@@ -24,6 +24,7 @@ namespace AgcDriver::Graphics {
         info.borderColor = descriptor.borderColor;
         info.unnormalizedCoordinates = VK_FALSE;
         Check(context.Function<PFN_vkCreateSampler>("vkCreateSampler")(context.device, &info, nullptr, &sampler), "vkCreateSampler");
+        createInfo = info;
     }
 
     Sampler::~Sampler() {

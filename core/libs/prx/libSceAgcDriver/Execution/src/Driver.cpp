@@ -1,4 +1,6 @@
 #include "prx/libSceAgcDriver/Execution/include/GpuJournal.hpp"
+#include "prx/libSceAgcDriver/Execution/include/DispatchCapture.hpp"
+#include "ControlFlow/RequestSerializer.hpp"
 #include "RdnaDecoder/RdnaInstructionDecoder.hpp"
 #include <cxxabi.h>
 #include <cstdio>
@@ -969,6 +971,8 @@ private:
             std::snprintf(text, sizeof(text), "dispatch program 0x%llx groups %ux%ux%u wave%u%s", static_cast<unsigned long long>(address), packet[1], packet[2], packet[3], (packet[4] & 0x8000u) != 0 ? 32u : 64u, journalIndirect ? " (indirect)" : "");
             GpuJournal::Record(text);
         }
+        std::shared_ptr<const Graphics::CaptureTarget> capture;
+        if (DispatchCaptureEnabled()) capture = SelectDispatchCapture(address, request.shader.codeHash, [&request] { return ShaderRecompiler::RequestSerializer{}.Serialize(request); });
         GraphicsJob job;
         job.kind = JobKind::Dispatch;
         CollectWrites(compiled.bindings, job.writes, job.writesUnknown);
@@ -981,13 +985,14 @@ private:
             std::vector<Graphics::GuestMemorySnapshot> snapshots;
             std::uint64_t program;
             std::uint64_t arguments;
+            std::shared_ptr<const Graphics::CaptureTarget> capture;
         };
-        auto work = std::make_shared<DispatchWork>(DispatchWork{current, frameTiming, std::move(shaderMemoryOwner), std::move(compiled), {packet[1], packet[2], packet[3]}, std::move(snapshots), address, indirectArguments});
+        auto work = std::make_shared<DispatchWork>(DispatchWork{current, frameTiming, std::move(shaderMemoryOwner), std::move(compiled), {packet[1], packet[2], packet[3]}, std::move(snapshots), address, indirectArguments, std::move(capture)});
         job.run = [work] {
             PerformanceContext timingContext(work->timing.get());
             GpuJournal::CurrentProgram = work->program;
             const auto groups = work->arguments != 0 ? work->device->IndirectDispatchGroups(work->arguments) : work->groups;
-            work->device->Dispatch(work->compiled, groups[0], groups[1], groups[2], work->snapshots);
+            work->device->Dispatch(work->compiled, groups[0], groups[1], groups[2], work->snapshots, work->capture.get());
         };
         postGraphics(std::move(job));
         timing.Mark("post");
