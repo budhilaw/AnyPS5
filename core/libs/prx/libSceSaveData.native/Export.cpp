@@ -8,6 +8,14 @@
 #include <mutex>
 #include <stdexcept>
 #include <string>
+#include <vector>
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <winioctl.h>
+#endif
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 #include "SaveData.hpp"
@@ -75,6 +83,42 @@ std::filesystem::path memoryFile(std::int32_t userId, std::uint32_t slotId) {
     return std::filesystem::path(save_root()) / ("memory_" + std::to_string(userId) + "_" + std::to_string(slotId) + ".bin");
 }
 
+#ifdef _WIN32
+bool createJunction(const std::filesystem::path& target, const std::filesystem::path& link) {
+    std::error_code error;
+    const auto absolute = std::filesystem::absolute(target, error);
+    if (error || !std::filesystem::create_directory(link, error) || error) return false;
+    const std::wstring substitute = L"\\??\\" + absolute.wstring();
+    const std::wstring print = absolute.wstring();
+    const auto substituteBytes = substitute.size() * sizeof(wchar_t);
+    const auto printBytes = print.size() * sizeof(wchar_t);
+    std::vector<std::uint8_t> buffer(16 + substituteBytes + sizeof(wchar_t) + printBytes + sizeof(wchar_t));
+    const auto put16 = [&](std::size_t at, std::size_t value) {
+        const auto word = static_cast<std::uint16_t>(value);
+        std::memcpy(buffer.data() + at, &word, sizeof(word));
+    };
+    const std::uint32_t tag = IO_REPARSE_TAG_MOUNT_POINT;
+    std::memcpy(buffer.data(), &tag, sizeof(tag));
+    put16(4, buffer.size() - 8);
+    put16(8, 0);
+    put16(10, substituteBytes);
+    put16(12, substituteBytes + sizeof(wchar_t));
+    put16(14, printBytes);
+    std::memcpy(buffer.data() + 16, substitute.data(), substituteBytes);
+    std::memcpy(buffer.data() + 16 + substituteBytes + sizeof(wchar_t), print.data(), printBytes);
+    HANDLE handle = CreateFileW(link.c_str(), GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    if (handle == INVALID_HANDLE_VALUE) {
+        std::filesystem::remove(link, error);
+        return false;
+    }
+    DWORD returned = 0;
+    const bool linked = DeviceIoControl(handle, FSCTL_SET_REPARSE_POINT, buffer.data(), static_cast<DWORD>(buffer.size()), nullptr, 0, &returned, nullptr) != 0;
+    CloseHandle(handle);
+    if (!linked) std::filesystem::remove(link, error);
+    return linked;
+}
+#endif
+
 bool validData(const MemoryData& data) {
     return data.buffer != nullptr && data.offset >= 0 && data.bytes <= MemoryLimit && static_cast<std::uint64_t>(data.offset) <= MemoryLimit - data.bytes;
 }
@@ -138,8 +182,9 @@ int APS5_VABI sceSaveDataDelete(const SaveDataDelete* del) {
         throw std::runtime_error("sceSaveDataDelete: null argument");
     }
     const std::string path = save_root() + "/" + std::string(del->dir_name->data);
-    if (std::filesystem::is_directory(path)) {
-        std::filesystem::remove_all(path);
+    std::error_code error;
+    if (std::filesystem::is_directory(path, error)) {
+        std::filesystem::remove_all(path, error);
     }
     return SAVE_DATA_OK;
 }
@@ -159,13 +204,16 @@ int APS5_VABI sceSaveDataDirNameSearch(const SaveDataDirNameSearchCond* cond, Sa
     result->set_num = 0;
     const char* pattern = (cond->dir_name != nullptr) ? cond->dir_name->data : nullptr;
     const std::string root = save_root();
-    if (!std::filesystem::is_directory(root)) {
+    std::error_code error;
+    if (!std::filesystem::is_directory(root, error)) {
         return SAVE_DATA_OK;
     }
     std::uint32_t hit = 0;
     std::uint32_t set = 0;
-    for (const auto& entry : std::filesystem::directory_iterator(root)) {
-        if (!entry.is_directory()) {
+    for (std::filesystem::directory_iterator it(root, error), end; !error && it != end; it.increment(error)) {
+        const auto& entry = *it;
+        std::error_code entryError;
+        if (!entry.is_directory(entryError)) {
             continue;
         }
         const std::string name = entry.path().filename().string();
@@ -295,7 +343,8 @@ int APS5_VABI sceSaveDataMount3(const SaveDataMount3* mount, SaveDataMountResult
     for (const auto& mounted : g_slots) {
         if (mounted.used && mounted.real_path == real_path) return SAVE_DATA_ERROR_BUSY;
     }
-    const bool exists = std::filesystem::is_directory(real_path);
+    std::error_code fileError;
+    const bool exists = std::filesystem::is_directory(real_path, fileError);
     if (create && exists) {
         return SAVE_DATA_ERROR_EXISTS;
     }
@@ -307,13 +356,22 @@ int APS5_VABI sceSaveDataMount3(const SaveDataMount3* mount, SaveDataMountResult
         return SAVE_DATA_ERROR_MOUNT_FULL;
     }
     if (create || create2) {
-        std::filesystem::create_directories(real_path);
+        std::filesystem::create_directories(real_path, fileError);
+        if (fileError) return SAVE_DATA_ERROR_OUT_OF_MEMORY;
     }
     const std::string mountPoint = "/savedata" + std::to_string(slot);
     const std::filesystem::path link = mountPoint.substr(1);
     std::error_code linkError;
     std::filesystem::remove(link, linkError);
-    std::filesystem::create_directory_symlink(real_path, link);
+    linkError.clear();
+    std::filesystem::create_directory_symlink(real_path, link, linkError);
+#ifdef _WIN32
+    if (linkError && createJunction(real_path, link)) linkError.clear();
+#endif
+    if (linkError) {
+        APS5_LOG_ERR("sceSaveDataMount3: cannot link %s to %s: %s", link.string().c_str(), real_path.c_str(), linkError.message().c_str());
+        return SAVE_DATA_ERROR_OUT_OF_MEMORY;
+    }
     g_slots[slot].used = true;
     g_slots[slot].mount_point = mountPoint;
     g_slots[slot].real_path = real_path;
