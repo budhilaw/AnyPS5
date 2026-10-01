@@ -9,6 +9,7 @@
 #include <SDL_loadso.h>
 #include <array>
 #include <bit>
+#include <chrono>
 #include <cstring>
 #include <initializer_list>
 #include <iostream>
@@ -292,6 +293,31 @@ void checkDepthViews(const Context& context, bool graphicsQueue) {
     Require(depth.Attached() && depth.Generation() == 1, "a depth pass that cannot write did not return the sampled depth image to the attachment layout or advanced its generation");
 }
 
+void checkGpuTimestamps(const Context& device) {
+    if (!device.limits.timestampComputeAndGraphics) return;
+    auto context = device;
+    context.batchTimestamps = 8;
+    constexpr VkDeviceSize slice = 4u << 20u;
+    Buffer target(context, 4 * slice, VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    const auto fill = context.Function<PFN_vkCmdFillBuffer>("vkCmdFillBuffer");
+    CommandBatch batch(context);
+    for (std::uint32_t region = 0; region < 4; ++region) {
+        batch.BeginRegion(GpuWork::Dispatch, 0x1400000000ull + region, {region + 1, 1, 1});
+        fill(batch.Handle(), target.Handle(), region * slice, slice, region);
+        batch.EndRegion();
+    }
+    batch.SubmitAndWait();
+    const auto regions = batch.Regions();
+    Require(regions.size() == 3 && batch.DroppedRegions() == 1 && batch.gpuTime.count() > 0, "the device did not time a batch whose timestamp pool filled up");
+    std::chrono::nanoseconds timed{};
+    for (const auto& region : regions) timed += region.time;
+    Require(timed.count() > 0 && timed <= batch.gpuTime, "the timed regions of a batch took no GPU time or more than the whole batch");
+    CommandBatch oneOff(context, "resolve");
+    fill(oneOff.Handle(), target.Handle(), 0, slice, 7);
+    oneOff.SubmitAndWait();
+    Require(oneOff.gpuTime.count() > 0 && oneOff.gpuTime <= std::chrono::seconds(1), "the device did not time a one-off batch");
+}
+
 class Device {
 public:
     Device() {
@@ -414,6 +440,7 @@ int main(int argc, char** argv) {
         RunBdaExecutionTests(device.GetContext());
         RunColorTransferTests(device.GetContext());
         checkDepthViews(device.GetContext(), device.GraphicsQueue());
+        checkGpuTimestamps(device.GetContext());
         std::cout << "Vulkan BDA allocation and execution tests passed\n";
         return 0;
     } catch (const std::exception& error) {

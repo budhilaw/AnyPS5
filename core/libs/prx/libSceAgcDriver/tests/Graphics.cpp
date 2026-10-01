@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <chrono>
 #include <cstring>
 #include <initializer_list>
 #include <iostream>
@@ -375,6 +376,19 @@ struct MockImageBarrier {
     VkImageMemoryBarrier barrier;
 };
 
+struct MockTimestamp {
+    VkQueryPool pool;
+    std::uint32_t query;
+    VkPipelineStageFlagBits stage;
+    bool insidePass;
+};
+
+enum class MockQuery {
+    Unreset,
+    Reset,
+    Written
+};
+
 struct MockVulkan {
     std::uint64_t next = 1;
     std::int64_t live = 0;
@@ -412,6 +426,11 @@ struct MockVulkan {
     VkFormatFeatureFlags depthFeatures = 0;
     std::uint32_t renderPasses = 0;
     std::uint32_t draws = 0;
+    bool insidePass = false;
+    std::map<VkQueryPool, std::vector<MockQuery>> queries;
+    std::vector<std::uint32_t> queryPoolSizes;
+    std::vector<MockTimestamp> timestamps;
+    std::uint32_t queryReads = 0;
 };
 
 MockVulkan mock;
@@ -802,9 +821,12 @@ VKAPI_ATTR VkResult VKAPI_CALL mockCreateGraphicsPipelines(VkDevice, VkPipelineC
 
 VKAPI_ATTR void VKAPI_CALL mockCmdBeginRenderPass(VkCommandBuffer, const VkRenderPassBeginInfo*, VkSubpassContents) {
     ++mock.renderPasses;
+    mock.insidePass = true;
 }
 
-VKAPI_ATTR void VKAPI_CALL mockCmdEndRenderPass(VkCommandBuffer) {}
+VKAPI_ATTR void VKAPI_CALL mockCmdEndRenderPass(VkCommandBuffer) {
+    mock.insidePass = false;
+}
 
 VKAPI_ATTR void VKAPI_CALL mockCmdSetViewport(VkCommandBuffer, std::uint32_t, std::uint32_t, const VkViewport*) {}
 
@@ -829,6 +851,62 @@ PFN_vkVoidFunction VKAPI_CALL drawProc(VkDevice device, const char* name) {
     };
     const auto it = table.find(name);
     return it == table.end() ? renderTargetProc(device, name) : it->second;
+}
+
+std::uint64_t mockTick(std::uint32_t query) {
+    return query == 1 ? 1'000'000u : 1'000u + 10u * query * query;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL mockCreateQueryPool(VkDevice, const VkQueryPoolCreateInfo* info, const VkAllocationCallbacks*, VkQueryPool* pool) {
+    Require(info->queryType == VK_QUERY_TYPE_TIMESTAMP && info->queryCount != 0, "only timestamp query pools are expected");
+    *pool = makeHandle<VkQueryPool>();
+    mock.queries[*pool].assign(info->queryCount, MockQuery::Unreset);
+    mock.queryPoolSizes.push_back(info->queryCount);
+    ++mock.live;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL mockDestroyQueryPool(VkDevice, VkQueryPool pool, const VkAllocationCallbacks*) {
+    mock.queries.erase(pool);
+    --mock.live;
+}
+
+VKAPI_ATTR void VKAPI_CALL mockCmdResetQueryPool(VkCommandBuffer, VkQueryPool pool, std::uint32_t first, std::uint32_t count) {
+    auto& states = mock.queries.at(pool);
+    Require(!mock.insidePass && first + count <= states.size(), "queries were reset inside a render pass or past the end of their pool");
+    std::fill(states.begin() + first, states.begin() + first + count, MockQuery::Reset);
+}
+
+VKAPI_ATTR void VKAPI_CALL mockCmdWriteTimestamp(VkCommandBuffer, VkPipelineStageFlagBits stage, VkQueryPool pool, std::uint32_t query) {
+    auto& states = mock.queries.at(pool);
+    Require(query < states.size(), "a timestamp was written past the end of its query pool");
+    Require(states[query] == MockQuery::Reset, "a timestamp was written to a query that was not reset since it was last written");
+    states[query] = MockQuery::Written;
+    mock.timestamps.push_back({pool, query, stage, mock.insidePass});
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL mockGetQueryPoolResults(VkDevice, VkQueryPool pool, std::uint32_t first, std::uint32_t count, std::size_t size, void* data, VkDeviceSize stride, VkQueryResultFlags flags) {
+    const auto& states = mock.queries.at(pool);
+    Require(flags == VK_QUERY_RESULT_64_BIT && stride == sizeof(std::uint64_t) && size >= count * sizeof(std::uint64_t) && first + count <= states.size(), "unexpected timestamp result request");
+    ++mock.queryReads;
+    auto* ticks = static_cast<std::uint64_t*>(data);
+    for (std::uint32_t index = 0; index < count; ++index) {
+        if (states[first + index] != MockQuery::Written) return VK_NOT_READY;
+        ticks[index] = mockTick(first + index);
+    }
+    return VK_SUCCESS;
+}
+
+PFN_vkVoidFunction VKAPI_CALL timestampProc(VkDevice device, const char* name) {
+    static const std::map<std::string_view, PFN_vkVoidFunction> table{
+        {"vkCreateQueryPool", reinterpret_cast<PFN_vkVoidFunction>(mockCreateQueryPool)},
+        {"vkDestroyQueryPool", reinterpret_cast<PFN_vkVoidFunction>(mockDestroyQueryPool)},
+        {"vkCmdResetQueryPool", reinterpret_cast<PFN_vkVoidFunction>(mockCmdResetQueryPool)},
+        {"vkCmdWriteTimestamp", reinterpret_cast<PFN_vkVoidFunction>(mockCmdWriteTimestamp)},
+        {"vkGetQueryPoolResults", reinterpret_cast<PFN_vkVoidFunction>(mockGetQueryPoolResults)}
+    };
+    const auto it = table.find(name);
+    return it == table.end() ? drawProc(device, name) : it->second;
 }
 
 AgcDriver::Graphics::Context mockContext() {
@@ -2374,6 +2452,177 @@ void depthWriteTests() {
     Require(writes([](auto& state) { state.front = {VK_STENCIL_OP_KEEP, VK_STENCIL_OP_KEEP, VK_STENCIL_OP_INVERT, VK_COMPARE_OP_ALWAYS, 0xffu, 0xffu, 0u}; }), "a depth-fail stencil operation cannot write stencil");
 }
 
+std::chrono::nanoseconds mockElapsed(std::uint32_t first, std::uint32_t period) {
+    return std::chrono::nanoseconds(static_cast<std::int64_t>(period * (mockTick(first + 1) - mockTick(first))));
+}
+
+void gpuTimestampTests() {
+    using namespace AgcDriver::Graphics;
+    mock = MockVulkan{};
+    auto context = depthContext();
+    context.deviceProc = timestampProc;
+    context.limits.timestampPeriod = 2.0f;
+    {
+        CommandBatch untimed(context);
+        untimed.BeginRegion(GpuWork::Dispatch, 0x1400000000ull, {1, 1, 1});
+        untimed.EndRegion();
+        untimed.SubmitAndWait();
+        Require(mock.queryPoolSizes.empty() && mock.timestamps.empty() && untimed.Regions().empty() && untimed.DroppedRegions() == 0 && untimed.gpuTime.count() == 0, "a command batch timed GPU work while GPU timing is off");
+    }
+    context.batchTimestamps = 2;
+    {
+        CommandBatch wholeBatch(context);
+        wholeBatch.BeginRegion(GpuWork::ColorPass, 0x1492970000ull, {2560, 1440, 1});
+        wholeBatch.BeginRegion(GpuWork::Dispatch, 0x1400000000ull, {1, 1, 1});
+        wholeBatch.EndRegion();
+        wholeBatch.SubmitAndWait();
+        Require(mock.queryPoolSizes == std::vector<std::uint32_t>{2} && wholeBatch.Regions().empty() && wholeBatch.DroppedRegions() == 0 && wholeBatch.gpuTime == mockElapsed(0, 2), "a batch timed only as a whole timed its regions, counted them as dropped or lost its own GPU time");
+        Require(mock.timestamps.size() == 2 && mock.timestamps[0].query == 0 && mock.timestamps[1].query == 1, "a batch timed only as a whole wrote timestamps for its regions");
+    }
+    mock.queryPoolSizes.clear();
+    mock.timestamps.clear();
+    context.batchTimestamps = 8;
+    {
+        CommandBatch batch(context);
+        Require(mock.queryPoolSizes == std::vector<std::uint32_t>{8}, "a draw-queue batch did not get a pool of the configured number of timestamps");
+        for (std::uint32_t region = 0; region < 5; ++region) {
+            batch.BeginRegion(GpuWork::Dispatch, 0x1400000000ull + region, {region + 1, 2, 3});
+            batch.EndRegion();
+        }
+        Require(batch.Regions().size() == 3 && batch.DroppedRegions() == 2, "a batch whose timestamp pool is full kept timing regions or did not count the ones it dropped");
+        batch.SubmitAndWait();
+        Require(mock.timestamps.size() == 8 && mock.timestamps.front().query == 0 && mock.timestamps.back().query == 1, "a full batch did not open with its first timestamp and close with its second");
+        Require(std::all_of(mock.timestamps.begin(), mock.timestamps.end(), [](const MockTimestamp& timestamp) { return timestamp.stage == VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT; }), "a GPU timestamp does not wait for the work recorded before it");
+        const auto regions = batch.Regions();
+        for (std::uint32_t index = 0; index < regions.size(); ++index) {
+            const auto& region = regions[index];
+            Require(region.work == GpuWork::Dispatch && region.address == 0x1400000000ull + index && region.size == std::array<std::uint32_t, 3>{index + 1, 2, 3} && region.query == 2 + 2 * index && region.time == mockElapsed(region.query, 2), "a timed region lost its key, its timestamps or its GPU time");
+        }
+        Require(batch.gpuTime == mockElapsed(0, 2), "the batch GPU time is not the time between its first and second timestamps");
+        mock.timestamps.clear();
+        batch.Reset();
+        Require(batch.Regions().empty() && batch.DroppedRegions() == 0, "a reset batch kept the regions of its previous submission");
+        batch.BeginRegion(GpuWork::ColorPass, 0x1492970000ull, {2560, 1440, 1});
+        batch.SubmitAndWait();
+        Require(batch.Regions().size() == 1 && batch.Regions()[0].time == mockElapsed(2, 2) && mock.timestamps.size() == 4 && mock.timestamps[2].query == 3 && mock.timestamps[3].query == 1, "a region left open at submission was not closed before the end of the batch");
+    }
+    {
+        CommandBatch oneOff(context, "resolve");
+        Require(mock.queryPoolSizes.back() == 2, "a named one-off batch did not get a single pair of timestamps");
+        oneOff.BeginRegion(GpuWork::Dispatch, 0x1400000000ull, {1, 1, 1});
+        oneOff.EndRegion();
+        oneOff.SubmitAndWait();
+        Require(oneOff.Regions().empty() && oneOff.DroppedRegions() == 0 && oneOff.gpuTime == mockElapsed(0, 2), "a named one-off batch timed a region, counted it as dropped or lost its own GPU time");
+    }
+    {
+        auto upload = std::make_unique<CommandBatch>(context, "depth_copy");
+        upload->Submit();
+        const auto reads = mock.queryReads;
+        upload.reset();
+        Require(mock.queryReads == reads + 1, "a one-off batch that was submitted and never waited for did not read its GPU time when it was released");
+    }
+    Require(mock.queries.empty() && mock.live == 0, "GPU timestamps leaked Vulkan objects");
+}
+
+void drawQueueTimestampTests() {
+    using namespace AgcDriver::Graphics;
+    constexpr std::uint64_t depthAddress = 0x1469400000ull;
+    constexpr std::uint64_t stencilAddress = 0x1469500000ull;
+    mock = MockVulkan{};
+    mock.depthFeatures = SampledDepthFeatures;
+    auto context = depthContext();
+    context.deviceProc = timestampProc;
+    context.limits.timestampPeriod = 1.0f;
+    context.batchTimestamps = 8;
+    ShaderRecompiler::RecompileResult vertex;
+    vertex.spirv = makeModule({});
+    ShaderRecompiler::RecompileResult fragment;
+    fragment.spirv = makeModule({.fragment = true});
+    const std::array<CompiledShader, 2> shaders{{{ShaderRecompiler::ShaderStage::Vertex, &vertex, 0}, {ShaderRecompiler::ShaderStage::Fragment, &fragment, 0}}};
+    auto state = DecodeState(makeState());
+    state.hasColorTarget = false;
+    state.extraColors.clear();
+    state.extraBlends.clear();
+    state.hasDepthTarget = true;
+    state.depth = {depthAddress, {64, 32}, VK_FORMAT_D32_SFLOAT_S8_UINT, true, stencilAddress};
+    state.renderExtent = {64, 32};
+    state.viewport = {0.0f, 0.0f, 64.0f, 32.0f, 0.0f, 1.0f};
+    state.scissor = {{0, 0}, {64, 32}};
+    state.negativeOneToOne = false;
+    state.rectList = false;
+    state.depthClamp = false;
+    state.depthState = {};
+    state.depthState.test = true;
+    state.depthState.write = true;
+    state.depthState.clearDepth = true;
+    state.depthState.compare = VK_COMPARE_OP_LESS_OR_EQUAL;
+    const AgcDriver::Pm4::DrawParameters draw{0, 3, 0, 1, 0, false};
+    const auto queueTimestamps = [] {
+        std::vector<std::pair<std::uint32_t, bool>> result;
+        for (const auto& timestamp : mock.timestamps) {
+            const auto pool = mock.queries.find(timestamp.pool);
+            if (pool != mock.queries.end() && pool->second.size() == 8) result.emplace_back(timestamp.query, timestamp.insidePass);
+        }
+        return result;
+    };
+    {
+        TextureDetiler detiler(context);
+        context.detiler = &detiler;
+        DrawQueue queue;
+        context.drawQueue = &queue;
+        RenderCache targets(context);
+        context.renderCache = &targets;
+        GraphicsPipelineCache pipelines(context);
+        context.graphicsPipelines = &pipelines;
+        TextureCache cache(context);
+        context.textureCache = &cache;
+        for (int pass = 0; pass < 4; ++pass) Draw(context, state, draw, shaders);
+        Require(mock.renderPasses == 4 && mock.draws == 4, "draws that clear depth did not each render into a new pass");
+        queue.Wait();
+        const std::vector<std::pair<std::uint32_t, bool>> passes{{0, false}, {2, true}, {3, true}, {4, true}, {5, true}, {6, true}, {7, true}, {1, false}};
+        Require(queueTimestamps() == passes, "render passes were not timed between the start and the end of each pass, or the fourth pass was timed past the end of a full timestamp pool");
+        const auto pools = mock.queryPoolSizes.size();
+        mock.timestamps.clear();
+        queue.BeginGpuRegion(GpuWork::Dispatch, 0x1400102500ull, {8, 8, 1});
+        queue.EndGpuRegion();
+        Require(mock.timestamps.empty(), "a region was timed while the draw queue had no recording batch");
+        queue.Begin(context);
+        queue.BeginGpuRegion(GpuWork::Dispatch, 0x1400102500ull, {8, 8, 1});
+        queue.EndGpuRegion();
+        queue.Wait();
+        const std::vector<std::pair<std::uint32_t, bool>> dispatch{{0, false}, {2, false}, {3, false}, {1, false}};
+        Require(queueTimestamps() == dispatch && mock.queryPoolSizes.size() == pools, "a dispatch in a reused batch was not timed outside render passes from the start of its pool");
+    }
+    Require(mock.live == 0, "timed draw queue batches leaked Vulkan objects");
+}
+
+void gpuTimeReportTests() {
+    using namespace AgcDriver::Graphics;
+    using std::chrono::microseconds;
+    GpuTimeReport report;
+    const std::array<GpuRegion, 4> first{{
+        {GpuWork::ColorPass, 0x1492970000ull, {2560, 1440, 1}, 2, microseconds(3000)},
+        {GpuWork::DepthPass, 0x1468570000ull, {2048, 2048, 1}, 4, microseconds(5000)},
+        {GpuWork::Dispatch, 0x14001a0400ull, {80, 45, 1}, 6, microseconds(2000)},
+        {GpuWork::Dispatch, 0x1400102500ull, {1, 1, 1}, 8, microseconds(4000)}
+    }};
+    const std::array<GpuRegion, 1> second{{{GpuWork::ColorPass, 0x1492970000ull, {2560, 1440, 1}, 2, microseconds(1000)}}};
+    report.AddRegions(first, 2, microseconds(16000));
+    report.AddRegions(second, 0, microseconds(1500));
+    report.AddBatch("resolve", microseconds(700));
+    const auto contains = [](const std::string& text, std::string_view part) { return text.find(part) != std::string::npos; };
+    const auto top = report.Format(std::chrono::seconds(5), 1);
+    Require(contains(top, "[gpu-time] 5.0 s: batches n=2 total=17.500 ms, passes n=3 total=9.000 ms, dispatches n=2 total=6.000 ms, untimed 2.500 ms, dropped 2\n"), "the GPU time report lost batch, pass, dispatch, untimed or dropped totals:\n" + top);
+    Require(contains(top, "[gpu-time] one-off resolve: n=1 total=0.700 ms max=0.700 ms\n"), "the GPU time report lost a one-off batch:\n" + top);
+    Require(contains(top, "[gpu-time] depth pass 0x1468570000 2048x2048: n=1 total=5.000 ms") && !contains(top, "2560x1440"), "the GPU time report did not rank passes by their total time or listed more than it was asked to:\n" + top);
+    Require(contains(top, "[gpu-time] program 0x1400102500 groups 1x1x1: n=1 total=4.000 ms") && !contains(top, "0x14001a0400"), "the GPU time report did not rank programs by their total time or listed more than it was asked to:\n" + top);
+    const auto all = report.Format(std::chrono::seconds(5), 20);
+    Require(contains(all, "[gpu-time] pass 0x1492970000 2560x1440: n=2 total=4.000 ms avg=2.000 ms max=3.000 ms\n") && contains(all, "[gpu-time] program 0x14001a0400 groups 80x45x1: n=1 total=2.000 ms"), "the GPU time report did not add up a pass across batches or dropped a program:\n" + all);
+    report.Clear();
+    const auto cleared = report.Format(std::chrono::seconds(5), 20);
+    Require(contains(cleared, "batches n=0 total=0.000 ms") && !contains(cleared, "pass 0x") && !contains(cleared, "program 0x") && !contains(cleared, "one-off"), "clearing the GPU time report kept entries:\n" + cleared);
+}
+
 }
 
 int main() {
@@ -2423,6 +2672,9 @@ int main() {
         depthWriteTests();
         depthViewTests();
         depthDrawTests();
+        gpuTimestampTests();
+        drawQueueTimestampTests();
+        gpuTimeReportTests();
         mock = MockVulkan{};
         auto bdaContext = mockContext();
         bdaContext.bufferDeviceAddress = true;
