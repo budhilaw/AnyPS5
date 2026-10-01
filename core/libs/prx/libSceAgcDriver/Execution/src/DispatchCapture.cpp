@@ -65,9 +65,17 @@ std::string replayTool() {
     return name;
 }
 
+std::string groupsText(const std::array<std::uint32_t, 3>& groups) {
+    return std::to_string(groups[0]) + "x" + std::to_string(groups[1]) + "x" + std::to_string(groups[2]);
+}
+
 void announce(const DispatchCaptureSettings& settings) {
     std::string selectors;
-    for (const auto& selector : settings.selectors) selectors += " " + hex(selector.value) + (selector.count == 1 ? std::string() : " x" + std::to_string(selector.count));
+    for (const auto& selector : settings.selectors) {
+        selectors += " " + hex(selector.value);
+        if (selector.groups[0] != 0) selectors += " " + groupsText(selector.groups);
+        if (selector.count != 1) selectors += " x" + std::to_string(selector.count);
+    }
     if (settings.costliest != 0) selectors += " and the " + std::to_string(settings.costliest) + " costliest programs of the first GPU time report that starts after then";
     APS5_LOG_OUT("[capture] capturing the dispatches of program address or code hash%s from %.1f s into %s; replay a capture with %s <capture directory>", selectors.c_str(), settings.after, settings.root.generic_string().c_str(), replayTool().c_str());
     for (const auto& error : settings.errors) APS5_LOG_OUT("[capture] ignored %s", error.c_str());
@@ -85,9 +93,10 @@ void takeCostliest(SelectionState& state) {
     state.ranked = true;
     std::string chosen;
     for (std::size_t index = 0; index < ranking.programs.size() && index < state.settings.costliest; ++index) {
-        state.settings.selectors.push_back({ranking.programs[index], 1});
+        const auto& cost = ranking.programs[index];
+        state.settings.selectors.push_back({cost.address, 1, cost.groups});
         state.taken.push_back(0);
-        chosen += " " + hex(ranking.programs[index]);
+        chosen += " " + hex(cost.address) + " " + groupsText(cost.groups);
     }
     APS5_LOG_OUT("[capture] capturing the costliest programs of GPU time report %llu:%s", static_cast<unsigned long long>(ranking.report), chosen.empty() ? " none were timed" : chosen.c_str());
 }
@@ -147,7 +156,7 @@ bool DispatchCaptureEnabled() {
     return settings.costliest != 0 || !settings.selectors.empty();
 }
 
-std::shared_ptr<const Graphics::CaptureTarget> SelectDispatchCapture(std::uint64_t program, std::uint64_t codeHash, const std::function<std::string()>& request) {
+std::shared_ptr<const Graphics::CaptureTarget> SelectDispatchCapture(std::uint64_t program, std::uint64_t codeHash, std::array<std::uint32_t, 3> groups, const std::function<std::string()>& request) {
     auto& state = selection();
     if (state.settings.costliest == 0 && state.settings.selectors.empty()) return nullptr;
     std::lock_guard lock(state.mutex);
@@ -159,7 +168,7 @@ std::shared_ptr<const Graphics::CaptureTarget> SelectDispatchCapture(std::uint64
     takeCostliest(state);
     for (std::size_t index = 0; index < state.settings.selectors.size(); ++index) {
         const auto& selector = state.settings.selectors[index];
-        if ((selector.value != program && selector.value != codeHash) || state.taken[index] >= selector.count) continue;
+        if ((selector.value != program && selector.value != codeHash) || state.taken[index] >= selector.count || (selector.groups[0] != 0 && selector.groups != groups)) continue;
         auto target = std::make_shared<Graphics::CaptureTarget>();
         target->root = state.settings.root;
         target->program = program;

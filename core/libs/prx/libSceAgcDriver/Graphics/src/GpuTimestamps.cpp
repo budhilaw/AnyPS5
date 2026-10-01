@@ -229,17 +229,16 @@ std::string GpuTimeReport::formatRanked(bool dispatchesOnly, std::size_t top) co
     return text;
 }
 
-std::vector<std::uint64_t> GpuTimeReport::RankPrograms(std::size_t top) const {
-    std::unordered_map<std::uint64_t, std::chrono::nanoseconds> sums;
+std::vector<GpuProgramCost> GpuTimeReport::RankPrograms(std::size_t top) const {
+    std::vector<std::pair<const Key*, const Total*>> ranked;
     for (const auto& [key, total] : regions) {
-        if (key.work == GpuWork::Dispatch) sums[key.address] += total.sum;
+        if (key.work == GpuWork::Dispatch) ranked.emplace_back(&key, &total);
     }
-    std::vector<std::pair<std::uint64_t, std::chrono::nanoseconds>> ranked(sums.begin(), sums.end());
     const auto shown = std::min(top, ranked.size());
-    std::partial_sort(ranked.begin(), ranked.begin() + static_cast<std::ptrdiff_t>(shown), ranked.end(), [](const auto& left, const auto& right) { return left.second > right.second; });
-    std::vector<std::uint64_t> programs;
+    std::partial_sort(ranked.begin(), ranked.begin() + static_cast<std::ptrdiff_t>(shown), ranked.end(), [](const auto& left, const auto& right) { return left.second->sum > right.second->sum; });
+    std::vector<GpuProgramCost> programs;
     programs.reserve(shown);
-    for (std::size_t index = 0; index < shown; ++index) programs.push_back(ranked[index].first);
+    for (std::size_t index = 0; index < shown; ++index) programs.push_back({ranked[index].first->address, ranked[index].first->size});
     return programs;
 }
 

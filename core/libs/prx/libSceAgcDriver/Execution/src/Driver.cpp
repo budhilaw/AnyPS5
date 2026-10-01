@@ -972,7 +972,7 @@ private:
             GpuJournal::Record(text);
         }
         std::shared_ptr<const Graphics::CaptureTarget> capture;
-        if (DispatchCaptureEnabled()) capture = SelectDispatchCapture(address, request.shader.codeHash, [&request] { return ShaderRecompiler::RequestSerializer{}.Serialize(request); });
+        if (DispatchCaptureEnabled()) capture = SelectDispatchCapture(address, request.shader.codeHash, indirectArguments != 0 ? std::array<std::uint32_t, 3>{} : std::array<std::uint32_t, 3>{packet[1], packet[2], packet[3]}, [&request] { return ShaderRecompiler::RequestSerializer{}.Serialize(request); });
         GraphicsJob job;
         job.kind = JobKind::Dispatch;
         CollectWrites(compiled.bindings, job.writes, job.writesUnknown);
