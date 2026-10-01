@@ -3,6 +3,9 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
+#include <limits>
+#include <span>
 #include <type_traits>
 
 namespace ShaderRecompiler::BdaAbi {
@@ -44,6 +47,27 @@ static_assert(std::is_standard_layout_v<Range> && std::is_trivially_copyable_v<R
 static_assert(offsetof(Range, deviceAddress) == 16 && offsetof(Range, permissions) == 24);
 static_assert(std::is_standard_layout_v<Fault> && std::is_trivially_copyable_v<Fault> && sizeof(Fault) == 32);
 static_assert(offsetof(Fault, address) == 8 && offsetof(Fault, instruction) == 24);
+
+[[nodiscard]] inline bool IsValidTable(std::span<const std::byte> table) {
+    if (table.size() < sizeof(Header) || (table.size() - sizeof(Header)) % sizeof(Range) != 0u) {
+        return false;
+    }
+    Header header {};
+    std::memcpy(&header, table.data(), sizeof(header));
+    if (header.version != Version || header.entryBytes != sizeof(Range) || header.reserved != 0u || header.count != (table.size() - sizeof(Header)) / sizeof(Range)) {
+        return false;
+    }
+    std::uint64_t previousEnd = 0;
+    for (std::size_t index = 0; index < header.count; ++index) {
+        Range range {};
+        std::memcpy(&range, table.data() + sizeof(Header) + index * sizeof(Range), sizeof(range));
+        if (range.reserved != 0u || range.begin >= range.end || range.begin < previousEnd || range.deviceAddress == 0u || (range.permissions & ~(Read | Write)) != 0u || range.end - range.begin > std::numeric_limits<std::uint64_t>::max() - range.deviceAddress) {
+            return false;
+        }
+        previousEnd = range.end;
+    }
+    return true;
+}
 
 }
 
