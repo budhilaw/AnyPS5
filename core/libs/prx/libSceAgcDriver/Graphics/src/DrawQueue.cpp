@@ -14,7 +14,18 @@ namespace AgcDriver::Graphics {
 namespace {
 
 constexpr std::size_t BatchDraws = 64;
-constexpr std::size_t MaxPendingBatches = 4;
+constexpr std::size_t IdleBatchDraws = 8;
+constexpr std::size_t ShallowPendingBatches = 4;
+constexpr std::size_t DeepPendingBatches = 12;
+
+bool shallowQueue() {
+    static const bool shallow = std::getenv("ANYPS5_SHALLOW_GPU_QUEUE") != nullptr;
+    return shallow;
+}
+
+std::size_t maxPendingBatches() {
+    return shallowQueue() ? ShallowPendingBatches : DeepPendingBatches;
+}
 
 }
 
@@ -103,7 +114,7 @@ VkCommandBuffer DrawQueue::begin(const Context& context) {
 }
 
 void DrawQueue::throttle() {
-    while (pending.size() >= MaxPendingBatches) {
+    while (pending.size() >= maxPendingBatches()) {
         PerformanceTimer timing("Graphics.DrawQueue.Throttle");
         pending.front().commands->Wait();
         timing.Mark("fence_wait");
@@ -155,7 +166,7 @@ void DrawQueue::Enqueue(std::shared_ptr<ShaderResources> resources, std::shared_
     recording.entries.push_back({std::move(storage), std::move(resources), nextSequence++});
     ++drawCount;
     workSinceBarrier = true;
-    if (recording.entries.size() >= BatchDraws) Flush();
+    if (recording.entries.size() >= BatchDraws || (!shallowQueue() && pending.empty() && recording.entries.size() >= IdleBatchDraws)) Flush();
 }
 
 void DrawQueue::MarkGds() {
