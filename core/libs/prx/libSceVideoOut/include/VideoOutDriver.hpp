@@ -18,6 +18,7 @@
 #include "prx/libSceAgcDriver/Execution/include/DisplayBuffer.hpp"
 #include "prx/libSceVideoOut/include/DisplayWindow.hpp"
 #include "prx/libSceVideoOut/include/BufferReuseTracker.hpp"
+#include "prx/libSceVideoOut/include/FramePacing.hpp"
 
 #include "SDL.h"
 #include "SceTypes.hpp"
@@ -245,6 +246,9 @@ private:
     std::shared_ptr<FlipQueue> flipQueue = std::make_shared<FlipQueue>();
     bool tscCalibrated = false;
     std::atomic<bool> uncapped{false};
+    bool immediateFlips = false;
+    std::array<VkPresentModeKHR, RequestedPresentModes.size()> hostPresentModes = RequestedPresentModes;
+    std::chrono::steady_clock::duration reportedRefreshHold{};
 
     DisplayWindow window;
 

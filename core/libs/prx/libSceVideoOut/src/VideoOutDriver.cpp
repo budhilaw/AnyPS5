@@ -8,6 +8,7 @@
 #include <windows.h>
 #endif
 #include <cxxabi.h>
+#include <algorithm>
 #include <cstdio>
 #include <bit>
 #include <chrono>
@@ -446,10 +447,21 @@ void VideoOutDriver::processFlip(FlipRequest& req) {
     AgcDriver::PerformanceTimer timing("VideoOut.Flip");
     const auto& pacing = GetFramePacing();
     const bool uncappedPacing = uncapped.load(std::memory_order_relaxed);
+    require(req.width != 0 && req.height != 0 && req.width <= static_cast<uint32_t>(std::numeric_limits<int>::max()) && req.height <= static_cast<uint32_t>(std::numeric_limits<int>::max()), "invalid window dimensions");
+    window.Ensure(req.width, req.height);
+    timing.Mark("window_ensure");
     const bool minimized = window.Minimized();
     const auto refreshRate = window.RefreshRate();
+    if (req.flipMode == VIDEO_OUT_FLIP_MODE_HSYNC && !immediateFlips) {
+        immediateFlips = true;
+        if (!pacing.presentMode) APS5_LOG_CHARS_OUT("host present mode: the title submits immediate (HSYNC) flips, so ANYPS5_PRESENT_MODE=auto requests MAILBOX from now on");
+    }
+    const auto presentMode = ResolvePresentMode(pacing, uncappedPacing, immediateFlips, refreshRate);
+    auto& hostPresentMode = hostPresentModes[static_cast<std::size_t>(presentMode)];
+    const auto refreshHold = RefreshHoldInterval(refreshRate, hostPresentMode);
     uint64_t outputMode = VIDEO_OUT_OUTPUT_MODE_DEFAULT;
     std::chrono::steady_clock::time_point limitSlot{};
+    std::chrono::steady_clock::duration uncappedLimit{};
     {
         std::unique_lock lock(req.cfg->mutex);
         timing.Mark("config_mutex_wait");
@@ -459,7 +471,8 @@ void VideoOutDriver::processFlip(FlipRequest& req) {
         require(req.cfg->lastFlipVblank <= std::numeric_limits<uint64_t>::max() - interval, "flip interval overflow");
         outputMode = req.cfg->outputMode;
         const auto vblankPeriod = VblankPeriod(outputMode);
-        const auto gate = ComputeFlipGate({.flipMode = req.flipMode, .flipRate = req.flipRate, .uncapped = uncappedPacing && !minimized, .vrr = pacing.display == DisplayProfile::Vrr, .pegged = req.pegged, .lastLatchVblank = req.cfg->lastFlipVblank, .lastLatchTime = req.cfg->lastFlipLatch, .lastLimitSlot = req.cfg->lastLimitSlot, .now = std::chrono::steady_clock::now(), .vblankPeriod = vblankPeriod, .limitInterval = UncappedLimitInterval(pacing.fpsLimit, refreshRate, vblankPeriod)});
+        uncappedLimit = UncappedLimitInterval(pacing.fpsLimit, refreshRate, vblankPeriod);
+        const auto gate = ComputeFlipGate({.flipMode = req.flipMode, .flipRate = req.flipRate, .uncapped = uncappedPacing && !minimized, .vrr = pacing.display == DisplayProfile::Vrr, .pegged = req.pegged, .lastLatchVblank = req.cfg->lastFlipVblank, .lastLatchTime = req.cfg->lastFlipLatch, .lastLimitSlot = req.cfg->lastLimitSlot, .now = std::chrono::steady_clock::now(), .vblankPeriod = vblankPeriod, .limitInterval = std::max(uncappedLimit, refreshHold)});
         timing.Mark("validate");
         const auto cancelled = [&] { return req.cfg->failure || req.cfg->closing; };
         if (gate.byVblank) req.cfg->vblankCond.wait(lock, [&] { return req.cfg->vblankStatus.count >= gate.targetVblank || cancelled(); });
@@ -470,8 +483,11 @@ void VideoOutDriver::processFlip(FlipRequest& req) {
         req.latchTime = std::chrono::steady_clock::now();
         limitSlot = LimitSlot(gate, req.latchTime);
     }
-    require(req.width != 0 && req.height != 0 && req.width <= static_cast<uint32_t>(std::numeric_limits<int>::max()) && req.height <= static_cast<uint32_t>(std::numeric_limits<int>::max()), "invalid window dimensions");
-    window.Ensure(req.width, req.height);
+    const auto heldLimit = uncappedPacing && refreshHold > uncappedLimit ? refreshHold : std::chrono::steady_clock::duration{};
+    if (heldLimit != reportedRefreshHold) {
+        reportedRefreshHold = heldLimit;
+        if (heldLimit != std::chrono::steady_clock::duration{}) APS5_LOG_ERR("frame rate: uncapped is degraded, because the host presents with %s (requested %s), which waits for the monitor refresh: the uncapped limit is held at %.1f fps, at most %.2f x the %u Hz refresh%s, so the present thread does not wait for a refresh while it holds the guest memory lock", hostPresentMode == VK_PRESENT_MODE_FIFO_RELAXED_KHR ? "FIFO_RELAXED" : "FIFO", AgcDriver::PresentModeRequestName(presentMode), 1.0 / std::chrono::duration<double>(heldLimit).count(), FifoRefreshFraction, refreshRate != 0 ? refreshRate : AssumedRefreshRate, refreshRate != 0 ? "" : " (the monitor refresh rate is unknown)");
+    }
     unsigned extensionCount = 0;
     if (!SDL_Vulkan_GetInstanceExtensions(window.Handle(), &extensionCount, nullptr)) throw std::runtime_error(std::string("SDL_Vulkan_GetInstanceExtensions failed: ") + SDL_GetError());
     std::vector<const char*> extensions(extensionCount);
@@ -494,7 +510,7 @@ void VideoOutDriver::processFlip(FlipRequest& req) {
         SDL_Vulkan_GetDrawableSize(static_cast<SDL_Window*>(context), &drawableWidth, &drawableHeight);
         *width = drawableWidth > 0 ? static_cast<std::uint32_t>(drawableWidth) : 0;
         *height = drawableHeight > 0 ? static_cast<std::uint32_t>(drawableHeight) : 0;
-    }, req.width, req.height, req.timing};
+    }, req.width, req.height, req.timing, presentMode, &hostPresentMode};
     timing.Mark("window_prepare");
     const auto gpuReady = [](void* context) {
         auto& request = *static_cast<FlipRequest*>(context);

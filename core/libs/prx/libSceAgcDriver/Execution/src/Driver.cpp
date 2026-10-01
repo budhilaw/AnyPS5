@@ -507,9 +507,10 @@ public:
                 std::uint32_t drawableWidth = 0;
                 std::uint32_t drawableHeight = 0;
                 window.getDrawableSize(window.context, &drawableWidth, &drawableHeight);
-                presenting->Resize(drawableWidth, drawableHeight);
+                presenting->Resize(drawableWidth, drawableHeight, window.presentMode);
                 timing.Mark("resize");
                 if (presenting->Presentable()) {
+                    if (window.chosenPresentMode != nullptr) *window.chosenPresentMode = presenting->PresentMode();
                     if (buffer != nullptr) {
                         require(buffer->width == window.width && buffer->height == window.height, "display buffer extent differs from output");
                         if (AsyncFlips()) {

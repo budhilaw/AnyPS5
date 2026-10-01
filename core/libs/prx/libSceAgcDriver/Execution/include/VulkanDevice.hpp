@@ -37,8 +37,9 @@ public:
     void ResolveMemory(std::uint64_t address, std::size_t bytes, bool writable);
     bool NeedsResolve(std::uint64_t address, std::size_t bytes) const;
     void* Window() const;
-    void Resize(std::uint32_t width, std::uint32_t height);
+    void Resize(std::uint32_t width, std::uint32_t height, PresentModeRequest request);
     bool Presentable() const;
+    VkPresentModeKHR PresentMode() const;
     void PresentClear(std::uint32_t width, std::uint32_t height, bool opaque);
     void PresentPixels(std::uint32_t width, std::uint32_t height, std::span<const std::byte> pixels);
     void PresentDisplayBuffer(const DisplayBuffer& buffer);

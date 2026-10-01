@@ -52,12 +52,14 @@ struct PacingEnvironment {
     const char* display = nullptr;
     const char* uncapped = nullptr;
     const char* fpsLimit = nullptr;
+    const char* presentMode = nullptr;
 };
 
 void usePacingEnvironment(const PacingEnvironment& environment) {
     setEnvironment("ANYPS5_DISPLAY", environment.display);
     setEnvironment("ANYPS5_UNCAPPED", environment.uncapped);
     setEnvironment("ANYPS5_FPS_LIMIT", environment.fpsLimit);
+    setEnvironment("ANYPS5_PRESENT_MODE", environment.presentMode);
 }
 
 class Gate final : public AgcDriver::IVideoOutput, public AgcDriver::IFlipRequest, public std::enable_shared_from_this<Gate> {
@@ -212,23 +214,26 @@ std::uint64_t pacedFlipVblanks(int flips, std::chrono::steady_clock::duration pr
     return lastFlipVblank - firstLatch;
 }
 
-void checkRejected(const char* display, const char* uncapped, const char* fpsLimit, const char* variable, const char* accepted) {
-    const auto message = expectFailure([&] { ParseFramePacing(display, uncapped, fpsLimit); });
+void checkRejected(const char* display, const char* uncapped, const char* fpsLimit, const char* presentMode, const char* variable, const char* accepted) {
+    const auto message = expectFailure([&] { ParseFramePacing(display, uncapped, fpsLimit, presentMode); });
     check(message.find(variable) != std::string::npos && message.find(accepted) != std::string::npos, "a rejected frame pacing value did not name its variable and the accepted values");
 }
 
 void checkFramePacingSettings() {
+    using Request = AgcDriver::PresentModeRequest;
     const std::array<const char*, 2> unset{nullptr, ""};
     for (const char* value : unset) {
-        const auto defaults = ParseFramePacing(value, value, value);
-        check(defaults.display == DisplayProfile::Hz60 && !defaults.uncapped && defaults.fpsLimit < 0.0, "unset frame pacing variables did not select the PS5 60 Hz defaults");
+        const auto defaults = ParseFramePacing(value, value, value, value);
+        check(defaults.display == DisplayProfile::Hz60 && !defaults.uncapped && defaults.fpsLimit < 0.0 && !defaults.presentMode, "unset frame pacing variables did not select the PS5 60 Hz defaults and the automatic present mode");
     }
-    check(ParseFramePacing("60hz", nullptr, nullptr).display == DisplayProfile::Hz60 && ParseFramePacing("120hz", nullptr, nullptr).display == DisplayProfile::Hz120 && ParseFramePacing("vrr", nullptr, nullptr).display == DisplayProfile::Vrr, "ANYPS5_DISPLAY was not parsed");
-    check(!ParseFramePacing(nullptr, "0", nullptr).uncapped && ParseFramePacing(nullptr, "1", nullptr).uncapped, "ANYPS5_UNCAPPED was not parsed");
-    check(ParseFramePacing(nullptr, nullptr, "0").fpsLimit == 0.0 && ParseFramePacing(nullptr, nullptr, "1").fpsLimit == 1.0 && ParseFramePacing(nullptr, nullptr, "144").fpsLimit == 144.0 && ParseFramePacing(nullptr, nullptr, "59.94").fpsLimit == 59.94, "ANYPS5_FPS_LIMIT was not parsed");
-    for (const char* value : {"120", "120Hz", "VRR", "144hz", "vrr "}) checkRejected(value, nullptr, nullptr, "ANYPS5_DISPLAY", "60hz, 120hz or vrr");
-    for (const char* value : {"2", "true", "yes", "01", "-1"}) checkRejected(nullptr, value, nullptr, "ANYPS5_UNCAPPED", "0 or 1");
-    for (const char* value : {"-1", "-0.5", "0.5", "0.999", "fast", "60fps", "nan", "inf", "1e999"}) checkRejected(nullptr, nullptr, value, "ANYPS5_FPS_LIMIT", "0 for no limit or a frame rate of at least 1");
+    check(ParseFramePacing("60hz", nullptr, nullptr, nullptr).display == DisplayProfile::Hz60 && ParseFramePacing("120hz", nullptr, nullptr, nullptr).display == DisplayProfile::Hz120 && ParseFramePacing("vrr", nullptr, nullptr, nullptr).display == DisplayProfile::Vrr, "ANYPS5_DISPLAY was not parsed");
+    check(!ParseFramePacing(nullptr, "0", nullptr, nullptr).uncapped && ParseFramePacing(nullptr, "1", nullptr, nullptr).uncapped, "ANYPS5_UNCAPPED was not parsed");
+    check(ParseFramePacing(nullptr, nullptr, "0", nullptr).fpsLimit == 0.0 && ParseFramePacing(nullptr, nullptr, "1", nullptr).fpsLimit == 1.0 && ParseFramePacing(nullptr, nullptr, "144", nullptr).fpsLimit == 144.0 && ParseFramePacing(nullptr, nullptr, "59.94", nullptr).fpsLimit == 59.94, "ANYPS5_FPS_LIMIT was not parsed");
+    check(!ParseFramePacing(nullptr, nullptr, nullptr, "auto").presentMode && ParseFramePacing(nullptr, nullptr, nullptr, "fifo").presentMode == Request::Fifo && ParseFramePacing(nullptr, nullptr, nullptr, "mailbox").presentMode == Request::Mailbox && ParseFramePacing(nullptr, nullptr, nullptr, "immediate").presentMode == Request::Immediate && ParseFramePacing(nullptr, nullptr, nullptr, "relaxed").presentMode == Request::Relaxed, "ANYPS5_PRESENT_MODE was not parsed");
+    for (const char* value : {"120", "120Hz", "VRR", "144hz", "vrr "}) checkRejected(value, nullptr, nullptr, nullptr, "ANYPS5_DISPLAY", "60hz, 120hz or vrr");
+    for (const char* value : {"2", "true", "yes", "01", "-1"}) checkRejected(nullptr, value, nullptr, nullptr, "ANYPS5_UNCAPPED", "0 or 1");
+    for (const char* value : {"-1", "-0.5", "0.5", "0.999", "fast", "60fps", "nan", "inf", "1e999"}) checkRejected(nullptr, nullptr, value, nullptr, "ANYPS5_FPS_LIMIT", "0 for no limit or a frame rate of at least 1");
+    for (const char* value : {"FIFO", "Mailbox", "vsync", "fifo_relaxed", "fifo_latest_ready", "auto ", "1"}) checkRejected(nullptr, nullptr, nullptr, value, "ANYPS5_PRESENT_MODE", "auto, fifo, mailbox, immediate or relaxed");
 }
 
 void checkUncappedLimits() {
@@ -242,6 +247,58 @@ void checkUncappedLimits() {
     check(UncappedLimitInterval(-1.0, 59, slow) == slow && UncappedLimitInterval(-1.0, 60, fast) == fast && UncappedLimitInterval(-1.0, 100, fast) == fast, "the default uncapped limit fell below the emulated vblank rate");
     check(UncappedLimitInterval(144.0, 60, slow) == perFrame(144.0) && UncappedLimitInterval(30.0, 255, fast) == perFrame(30.0) && UncappedLimitInterval(1.0, 0, slow) == std::chrono::seconds(1), "an explicit ANYPS5_FPS_LIMIT was not used as the uncapped limit");
     check(UncappedLimitInterval(0.0, 144, slow) == Duration::zero(), "ANYPS5_FPS_LIMIT=0 did not remove the uncapped limit");
+    for (const auto mode : {VK_PRESENT_MODE_MAILBOX_KHR, VK_PRESENT_MODE_IMMEDIATE_KHR}) check(RefreshHoldInterval(144, mode) == Duration::zero() && RefreshHoldInterval(60, mode) == Duration::zero() && RefreshHoldInterval(0, mode) == Duration::zero(), "a host present mode that never waits for the monitor refresh held uncapped flips below the refresh");
+    for (const auto mode : {VK_PRESENT_MODE_FIFO_KHR, VK_PRESENT_MODE_FIFO_RELAXED_KHR}) {
+        check(RefreshHoldInterval(144, mode) == perFrame(FifoRefreshFraction * 144.0) && RefreshHoldInterval(255, mode) == perFrame(FifoRefreshFraction * 255.0) && RefreshHoldInterval(59, mode) == perFrame(FifoRefreshFraction * 59.0), "a host present mode that waits for the monitor refresh did not hold uncapped flips at 0.97 x the refresh");
+        check(RefreshHoldInterval(0, mode) == perFrame(FifoRefreshFraction * 60.0), "an unknown monitor refresh rate was not taken as 60 Hz when holding uncapped flips below the refresh");
+    }
+    const auto fifoHold = [&](std::uint32_t refresh) { return RefreshHoldInterval(refresh, VK_PRESENT_MODE_FIFO_KHR); };
+    check(fifoHold(144) < UncappedLimitInterval(-1.0, 144, slow) && fifoHold(144) < UncappedLimitInterval(137.0, 144, slow) && fifoHold(144) > UncappedLimitInterval(144.0, 144, slow), "on a 144 Hz monitor the FIFO hold did not stay below the default limit and a 137 fps limit, or did not hold a 144 fps limit");
+    check(fifoHold(60) > UncappedLimitInterval(-1.0, 60, slow) && fifoHold(0) > UncappedLimitInterval(0.0, 0, slow), "on a 60 Hz or unknown monitor the FIFO hold did not raise the default limit or the absent limit");
+}
+
+void checkPresentModes() {
+    using Request = AgcDriver::PresentModeRequest;
+    const auto settings = [](DisplayProfile display, std::optional<Request> presentMode) {
+        FramePacingSettings result;
+        result.display = display;
+        result.presentMode = presentMode;
+        return result;
+    };
+    const std::array<Request, 4> requests{Request::Fifo, Request::Mailbox, Request::Immediate, Request::Relaxed};
+    const std::array<std::uint32_t, 16> refreshRates{0, 50, 59, 60, 75, 100, 118, 119, 120, 144, 165, 238, 239, 240, 255, 360};
+    for (const auto display : {DisplayProfile::Hz60, DisplayProfile::Hz120, DisplayProfile::Vrr}) {
+        const std::uint32_t firstFifoRefresh = display == DisplayProfile::Hz60 ? 119 : 239;
+        for (const auto refresh : refreshRates) {
+            const auto automatic = settings(display, std::nullopt);
+            const auto expected = refresh >= firstFifoRefresh ? Request::Fifo : Request::Mailbox;
+            check(ResolvePresentMode(automatic, false, false, refresh) == expected, "the automatic present mode did not pick FIFO exactly when the capped monitor refresh is at least twice the display profile's top rate, within 1 Hz");
+            check(ResolvePresentMode(automatic, true, false, refresh) == Request::Mailbox, "the automatic present mode did not pick MAILBOX for uncapped flips");
+            check(ResolvePresentMode(automatic, false, true, refresh) == Request::Mailbox && ResolvePresentMode(automatic, true, true, refresh) == Request::Mailbox, "the automatic present mode did not pick MAILBOX once immediate flips were seen");
+            for (const auto request : requests) {
+                for (const bool uncapped : {false, true}) {
+                    for (const bool immediate : {false, true}) check(ResolvePresentMode(settings(display, request), uncapped, immediate, refresh) == request, "an explicit ANYPS5_PRESENT_MODE did not win over the automatic choice");
+                }
+            }
+        }
+    }
+    const std::array<VkPresentModeKHR, 5> everything{VK_PRESENT_MODE_FIFO_KHR, VK_PRESENT_MODE_FIFO_RELAXED_KHR, VK_PRESENT_MODE_MAILBOX_KHR, VK_PRESENT_MODE_IMMEDIATE_KHR, VK_PRESENT_MODE_FIFO_LATEST_READY_KHR};
+    const std::array<VkPresentModeKHR, 1> fifoOnly{VK_PRESENT_MODE_FIFO_KHR};
+    const std::array<VkPresentModeKHR, 3> tearingOnly{VK_PRESENT_MODE_IMMEDIATE_KHR, VK_PRESENT_MODE_FIFO_KHR, VK_PRESENT_MODE_FIFO_RELAXED_KHR};
+    const std::array<VkPresentModeKHR, 2> mailboxOnly{VK_PRESENT_MODE_MAILBOX_KHR, VK_PRESENT_MODE_FIFO_KHR};
+    check(AgcDriver::ChoosePresentMode(Request::Fifo, everything) == VK_PRESENT_MODE_FIFO_KHR && AgcDriver::ChoosePresentMode(Request::Mailbox, everything) == VK_PRESENT_MODE_MAILBOX_KHR && AgcDriver::ChoosePresentMode(Request::Immediate, everything) == VK_PRESENT_MODE_IMMEDIATE_KHR && AgcDriver::ChoosePresentMode(Request::Relaxed, everything) == VK_PRESENT_MODE_FIFO_RELAXED_KHR, "an offered present mode was not used when requested");
+    for (const auto request : requests) check(RequestedPresentModes[static_cast<std::size_t>(request)] == AgcDriver::ChoosePresentMode(request, everything), "the host present mode assumed for a request before the driver reports one is not the mode the request asks for");
+    for (const auto request : requests) check(AgcDriver::ChoosePresentMode(request, fifoOnly) == VK_PRESENT_MODE_FIFO_KHR, "a surface offering only FIFO did not present with FIFO");
+    check(AgcDriver::ChoosePresentMode(Request::Mailbox, tearingOnly) == VK_PRESENT_MODE_FIFO_KHR && AgcDriver::ChoosePresentMode(Request::Fifo, tearingOnly) == VK_PRESENT_MODE_FIFO_KHR, "a tear-free request without MAILBOX fell back to a tearing present mode instead of FIFO");
+    check(AgcDriver::ChoosePresentMode(Request::Immediate, mailboxOnly) == VK_PRESENT_MODE_MAILBOX_KHR && AgcDriver::ChoosePresentMode(Request::Relaxed, mailboxOnly) == VK_PRESENT_MODE_FIFO_KHR, "an unavailable IMMEDIATE did not fall back to MAILBOX, or an unavailable FIFO_RELAXED did not fall back to FIFO");
+    for (const auto queued : {VK_PRESENT_MODE_FIFO_KHR, VK_PRESENT_MODE_FIFO_RELAXED_KHR}) {
+        check(AgcDriver::SwapchainImageCount(1, 0, queued) == 3 && AgcDriver::SwapchainImageCount(2, 0, queued) == 3 && AgcDriver::SwapchainImageCount(2, 8, queued) == 3 && AgcDriver::SwapchainImageCount(3, 8, queued) == 4 && AgcDriver::SwapchainImageCount(4, 0, queued) == 5, "a FIFO swapchain did not get max(minImageCount + 1, 3) images");
+        check(AgcDriver::SwapchainImageCount(2, 2, queued) == 2 && AgcDriver::SwapchainImageCount(3, 3, queued) == 3, "a FIFO swapchain asked for more images than the surface allows");
+    }
+    for (const auto unqueued : {VK_PRESENT_MODE_MAILBOX_KHR, VK_PRESENT_MODE_IMMEDIATE_KHR}) {
+        check(AgcDriver::SwapchainImageCount(1, 0, unqueued) == 3 && AgcDriver::SwapchainImageCount(2, 0, unqueued) == 3 && AgcDriver::SwapchainImageCount(3, 8, unqueued) == 3 && AgcDriver::SwapchainImageCount(4, 0, unqueued) == 4, "a MAILBOX or IMMEDIATE swapchain did not get max(minImageCount, 3) images");
+        check(AgcDriver::SwapchainImageCount(2, 2, unqueued) == 2, "a MAILBOX or IMMEDIATE swapchain asked for more images than the surface allows");
+    }
 }
 
 template<typename TFrame>
@@ -373,6 +430,7 @@ void testPacing() {
     checkFlipGates();
     checkUncappedLimits();
     checkUncappedTimeline();
+    checkPresentModes();
 }
 
 void checkVblankRate(int handle, const std::shared_ptr<VideoOutConfig>& cfg, double rate, const char* reason) {
@@ -782,6 +840,7 @@ void testUncapped() {
     const auto start = vblankCount(cfg);
     for (int64_t argument = 1; argument <= 10; ++argument) flipBlank(handle, cfg, argument, "an uncapped flip did not complete");
     check(vblankCount(cfg) - start < 20, "ten uncapped flips at flip rate 2 took 20 vblanks or more, close to the 27 that PS5 pacing needs");
+    check(limitSlot(cfg) == latchedTime(cfg), "an uncapped flip without a frame rate limit was held on a limit timeline although ANYPS5_PRESENT_MODE=auto presents uncapped flips with MAILBOX");
     VideoOutDriver::Get().ToggleUncapped();
     const auto uncappedLatch = latchedVblank(cfg);
     flipBlank(handle, cfg, 11, "a flip after switching to PS5 pacing did not complete");
@@ -818,6 +877,23 @@ void testUncappedLimit() {
     LibcRunShutdown_nid_postfix();
 }
 
+void testUncappedFifo() {
+    check(IsTscCalibrated_nid_postfix(), "the uncapped FIFO test needs the calibrated TSC; run it without ANYPS5_LEGACY_TSC");
+    const int handle = openAtFlipRate2();
+    const auto cfg = VideoOutDriver::Get().GetConfig(handle);
+    for (int64_t argument = 0; argument < 4; ++argument) flipBlank(handle, cfg, argument, "a warm-up flip did not complete");
+    int scheduled = 0;
+    for (int64_t argument = 4; argument < 14; ++argument) {
+        const auto previousSlot = limitSlot(cfg);
+        flipBlank(handle, cfg, argument, "an uncapped flip presented with FIFO did not complete");
+        check(limitSlot(cfg) > previousSlot, "an uncapped flip presented with FIFO did not advance the limit timeline");
+        if (limitSlot(cfg) < latchedTime(cfg)) ++scheduled;
+    }
+    check(scheduled >= 8, "uncapped flips without a frame rate limit were not held on a limit timeline below the monitor refresh when ANYPS5_PRESENT_MODE=fifo waits for the refresh");
+    sceVideoOutClose(handle);
+    LibcRunShutdown_nid_postfix();
+}
+
 void testUncappedLegacy() {
     check(!IsTscCalibrated_nid_postfix(), "the legacy uncapped test needs ANYPS5_LEGACY_TSC=1 in its environment");
     const int handle = openAtFlipRate2();
@@ -841,6 +917,11 @@ PacingEnvironment pacingEnvironmentFor(int argc, char** argv) {
     if (command == "display120") return {"120hz"};
     if (command == "uncapped" || command == "uncappedlegacy") return {nullptr, "1", "0"};
     if (command == "uncappedlimit") return {nullptr, "1", "30"};
+    if (command == "uncappedfifo") return {nullptr, "1", "0", "fifo"};
+    if (command == "presentfifo") return {nullptr, nullptr, nullptr, "fifo"};
+    if (command == "presentmailbox") return {nullptr, nullptr, nullptr, "mailbox"};
+    if (command == "presentimmediate") return {nullptr, nullptr, nullptr, "immediate"};
+    if (command == "presentrelaxed") return {nullptr, nullptr, nullptr, "relaxed"};
     return {};
 }
 
@@ -856,7 +937,8 @@ int run(int argc, char** argv) {
         else if (argc == 2 && std::string(argv[1]) == "uncapped") testUncapped();
         else if (argc == 2 && std::string(argv[1]) == "uncappedlimit") testUncappedLimit();
         else if (argc == 2 && std::string(argv[1]) == "uncappedlegacy") testUncappedLegacy();
-        else if (argc == 2 && std::string(argv[1]) == "present") testPresentation(false);
+        else if (argc == 2 && std::string(argv[1]) == "uncappedfifo") testUncappedFifo();
+        else if (argc == 2 && std::string(argv[1]).starts_with("present")) testPresentation(false);
         else if (argc == 2 && std::string(argv[1]) == "unavailable") testPresentation(true);
         else testLifetime(argc == 2 && std::string(argv[1]) == "reopen");
         std::puts("VideoOut flip tests passed");
