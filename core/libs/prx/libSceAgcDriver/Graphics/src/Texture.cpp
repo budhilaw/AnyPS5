@@ -67,192 +67,256 @@ std::uint64_t SliceLinearBytes(const std::vector<TileMipLayout>& mips) {
     return bytes;
 }
 
+VkMemoryPropertyFlags LinearMemory(const Context& context) {
+    for (std::uint32_t index = 0; index < context.memory.memoryTypeCount; ++index) {
+        if ((context.memory.memoryTypes[index].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 0) return VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+    }
+    return VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+}
+
 }
 
 Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTextureResource& descriptor, VkComponentMapping components, std::span<const std::byte> snapshot) : context(context) {
     PerformanceTimer timing("Graphics.Texture.Detile");
     try {
-        const auto vkFormat = ResolveTextureFormat(descriptor.format);
-        if (IsBlockCompressed(descriptor.format)) {
-            Require(context.textureCompressionBC, "device does not support BC compressed textures");
-        }
-
-        const auto mips = ComputeMipLayout(descriptor);
-        const auto arrayLayers = FullArrayLayers(descriptor);
-        const auto elementBytes = BytesPerElement(descriptor.format);
-        const bool volume = descriptor.dimension == TextureDimension::k3D;
-        const auto tiledLayers = mips.front().blockDepth > 1u ? 1u : arrayLayers;
-        const auto imageLayers = volume ? 1u : arrayLayers;
-        this->imageLayers = imageLayers;
-        extent = {descriptor.width, descriptor.height};
-        guestAddress = descriptor.baseAddress;
-        guestTileMode = descriptor.tileMode;
-        guestFormat = vkFormat;
-        guestTexelBytes = IsBlockCompressed(descriptor.format) ? 0u : elementBytes;
-        guest2D = descriptor.dimension == TextureDimension::k2D;
-        guestMipCount = descriptor.mipCount;
-        guestDimension = static_cast<std::uint32_t>(descriptor.dimension);
-        guestLayers = arrayLayers;
-        promotable = (descriptor.dimension == TextureDimension::k2D || descriptor.dimension == TextureDimension::k2DArray) && descriptor.mipCount == 1 && arrayLayers == 1 && !IsBlockCompressed(descriptor.format) && (elementBytes == 1 || (elementBytes == 2 && std::getenv("ANYPS5_PROMOTE_16BIT") != nullptr) || elementBytes == 4 || elementBytes == 8 || elementBytes == 16) && (descriptor.tileMode == TextureTileMode::RenderTarget64KB || descriptor.tileMode == TextureTileMode::kLinear);
-
-        const auto guestBytes = ComputeSurfaceSize(mips, arrayLayers);
-        const auto guestSliceBytes = guestBytes / tiledLayers;
+        const bool storageCapable = createDetiledImage(descriptor, timing);
+        const auto guestBytes = ComputeSurfaceSize(ComputeMipLayout(descriptor), FullArrayLayers(descriptor));
         Require(snapshot.size() == guestBytes, "texture snapshot size mismatch");
-        if (descriptor.tileMode == TextureTileMode::Depth64KB) {
-            static std::atomic<std::uint32_t> reported{0};
-            const auto bit = 1u << std::countr_zero(elementBytes);
-            if ((reported.load(std::memory_order_relaxed) & bit) == 0 && (reported.fetch_or(bit, std::memory_order_relaxed) & bit) == 0) {
-                APS5_LOG_OUT("texture 0x%llx (%ux%u format 0x%x, %u mips, %u slices) is the first 64KB_Z_X texture of %u-byte elements detiled with the Z-order swizzle", static_cast<unsigned long long>(descriptor.baseAddress), descriptor.width, descriptor.height, descriptor.format, descriptor.mipCount, descriptor.depthOrLastArray + 1u, elementBytes);
-            }
-        }
-
-        const auto sliceLinearBytes = SliceLinearBytes(mips);
-        Require(tiledLayers == 0 || sliceLinearBytes <= UINT64_MAX / tiledLayers, "detiled texture buffer size overflows");
-        const auto linearBytes = sliceLinearBytes * tiledLayers;
-
-        bool storageCapable = false;
-        if (context.storageImages && !IsBlockCompressed(descriptor.format)) {
-            VkFormatProperties properties{};
-            context.formatProperties(context.physical, LinearFormat(vkFormat), &properties);
-            storageCapable = (properties.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) != 0;
-        }
-        VkImageCreateInfo imageInfo{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
-        imageInfo.flags = descriptor.dimension == TextureDimension::kCube ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0u;
-        if (storageCapable && LinearFormat(vkFormat) != vkFormat) imageInfo.flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
-        imageInfo.imageType = ImageTypeFor(descriptor.dimension);
-        imageInfo.format = vkFormat;
-        imageInfo.extent = {descriptor.width, descriptor.height, volume ? arrayLayers : 1u};
-        imageInfo.mipLevels = descriptor.mipCount;
-        imageInfo.arrayLayers = imageLayers;
-        imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
-        imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-        imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | (storageCapable ? VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT : 0u);
-        imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-        imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        Check(context.Function<PFN_vkCreateImage>("vkCreateImage")(context.device, &imageInfo, nullptr, &image), "vkCreateImage");
-        timing.Mark("image");
-        layout = storageCapable ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-
-        VkMemoryRequirements requirements{};
-        context.Function<PFN_vkGetImageMemoryRequirements>("vkGetImageMemoryRequirements")(context.device, image, &requirements);
-        VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-        allocation.allocationSize = requirements.size;
-        allocationBytes = requirements.size;
-        allocation.memoryTypeIndex = context.MemoryType(requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-        Check(context.Function<PFN_vkAllocateMemory>("vkAllocateMemory")(context.device, &allocation, nullptr, &memory), "vkAllocateMemory texture");
-        Check(context.Function<PFN_vkBindImageMemory>("vkBindImageMemory")(context.device, image, memory, 0), "vkBindImageMemory");
-        timing.Mark("memory", requirements.size);
-
-        {
-            staging = std::make_unique<Buffer>(context, static_cast<std::size_t>(guestBytes), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-            std::memcpy(staging->Bytes().data(), snapshot.data(), snapshot.size());
-            timing.Mark("staging", snapshot.size());
-            linear = std::make_unique<Buffer>(context, static_cast<std::size_t>(linearBytes), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
-            timing.Mark("linear", linearBytes);
-
-            std::unique_ptr<CommandBatch> batch;
-            VkCommandBuffer commands = VK_NULL_HANDLE;
-            if (context.drawQueue != nullptr) commands = context.drawQueue->Begin(context);
-            else {
-                detiler.BeginBatch();
-                batch = std::make_unique<CommandBatch>(context);
-                commands = batch->Handle();
-            }
-
-            VkBufferMemoryBarrier stagingReadBarrier{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
-            stagingReadBarrier.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
-            stagingReadBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-            stagingReadBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            stagingReadBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            stagingReadBarrier.buffer = staging->Handle();
-            stagingReadBarrier.offset = 0;
-            stagingReadBarrier.size = VK_WHOLE_SIZE;
-
-            VkBufferMemoryBarrier linearWriteBarrier{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
-            linearWriteBarrier.srcAccessMask = 0;
-            linearWriteBarrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-            linearWriteBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            linearWriteBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            linearWriteBarrier.buffer = linear->Handle();
-            linearWriteBarrier.offset = 0;
-            linearWriteBarrier.size = VK_WHOLE_SIZE;
-
-            const VkBufferMemoryBarrier preBarriers[] = {stagingReadBarrier, linearWriteBarrier};
-            context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(commands, VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 2, preBarriers, 0, nullptr);
-
-            for (std::uint32_t layer = 0; layer < tiledLayers; ++layer) {
-                const auto guestLayerOffset = static_cast<std::uint64_t>(layer) * guestSliceBytes;
-                const auto linearLayerOffset = static_cast<std::uint64_t>(layer) * sliceLinearBytes;
-                for (const auto& mip : mips) {
-                    detiler.Dispatch(commands, descriptor.tileMode, elementBytes, staging->Handle(), guestLayerOffset + mip.tiledOffset, linear->Handle(), linearLayerOffset + mip.linearOffset, mip, layer);
-                }
-            }
-
-            VkBufferMemoryBarrier linearReadBarrier{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
-            linearReadBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-            linearReadBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-            linearReadBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            linearReadBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            linearReadBarrier.buffer = linear->Handle();
-            linearReadBarrier.offset = 0;
-            linearReadBarrier.size = VK_WHOLE_SIZE;
-
-            VkImageMemoryBarrier toTransferDst{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
-            toTransferDst.srcAccessMask = 0;
-            toTransferDst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-            toTransferDst.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-            toTransferDst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-            toTransferDst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            toTransferDst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            toTransferDst.image = image;
-            toTransferDst.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, descriptor.mipCount, 0, imageLayers};
-            context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(commands, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 1, &linearReadBarrier, 1, &toTransferDst);
-
-            std::vector<VkBufferImageCopy> regions;
-            regions.reserve(static_cast<std::size_t>(tiledLayers) * mips.size());
-            for (std::uint32_t layer = 0; layer < tiledLayers; ++layer) {
-                const auto linearLayerOffset = static_cast<std::uint64_t>(layer) * sliceLinearBytes;
-                for (std::uint32_t level = 0; level < descriptor.mipCount; ++level) {
-                    if (volume && layer >= std::max(arrayLayers >> level, 1u)) break;
-                    const auto& mip = mips[level];
-                    VkBufferImageCopy region{};
-                    region.bufferOffset = linearLayerOffset + mip.linearOffset;
-                    region.bufferRowLength = mip.pitchBytes / elementBytes * BlockWidth(descriptor.format);
-                    region.bufferImageHeight = 0;
-                    region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, level, volume ? 0u : layer, 1};
-                    region.imageOffset = {0, 0, volume ? static_cast<std::int32_t>(layer) : 0};
-                    region.imageExtent = {std::max(descriptor.width >> level, 1u), std::max(descriptor.height >> level, 1u), mip.depth};
-                    regions.push_back(region);
-                }
-            }
-            context.Function<PFN_vkCmdCopyBufferToImage>("vkCmdCopyBufferToImage")(commands, linear->Handle(), image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, static_cast<std::uint32_t>(regions.size()), regions.data());
-
-            VkImageMemoryBarrier toShaderRead{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
-            toShaderRead.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-            toShaderRead.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-            toShaderRead.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-            toShaderRead.newLayout = layout;
-            toShaderRead.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            toShaderRead.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            toShaderRead.image = image;
-            toShaderRead.subresourceRange = toTransferDst.subresourceRange;
-            context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1, &toShaderRead);
-
-            if (batch != nullptr) {
-                batch->SubmitAndWait();
-                ReleaseUpload();
-            } else {
-                detiler.Retire(*context.drawQueue);
-            }
-            timing.Mark("record");
-        }
-
-        createGuestViews(descriptor, components, vkFormat, storageCapable);
+        staging = std::make_unique<Buffer>(context, static_cast<std::size_t>(guestBytes), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+        std::memcpy(staging->Bytes().data(), snapshot.data(), snapshot.size());
+        timing.Mark("staging", snapshot.size());
+        const auto linearSize = linearBytes();
+        linear = std::make_unique<Buffer>(context, static_cast<std::size_t>(linearSize), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+        timing.Mark("linear", linearSize);
+        uploadDetiled(detiler, staging->Handle(), 0, true, timing);
+        createGuestViews(descriptor, components, ResolveTextureFormat(descriptor.format), storageCapable);
         timing.Mark("views");
+        refreshable = true;
     } catch (...) {
         release();
         throw;
     }
+}
+
+Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTextureResource& descriptor, VkComponentMapping components, HostSource source) : context(context) {
+    PerformanceTimer timing("Graphics.Texture.Detile");
+    try {
+        Require(source.buffer != VK_NULL_HANDLE, "texture host source has no buffer");
+        const bool storageCapable = createDetiledImage(descriptor, timing);
+        const auto linearSize = linearBytes();
+        linear = std::make_unique<Buffer>(context, static_cast<std::size_t>(linearSize), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, LinearMemory(context));
+        timing.Mark("linear", linearSize);
+        uploadDetiled(detiler, source.buffer, source.offset, false, timing);
+        createGuestViews(descriptor, components, ResolveTextureFormat(descriptor.format), storageCapable);
+        timing.Mark("views");
+        refreshable = true;
+    } catch (...) {
+        release();
+        throw;
+    }
+}
+
+bool Texture::createDetiledImage(const GuestTextureResource& descriptor, PerformanceTimer& timing) {
+    const auto vkFormat = ResolveTextureFormat(descriptor.format);
+    if (IsBlockCompressed(descriptor.format)) {
+        Require(context.textureCompressionBC, "device does not support BC compressed textures");
+    }
+    detiled = descriptor;
+    const auto mips = ComputeMipLayout(descriptor);
+    const auto arrayLayers = FullArrayLayers(descriptor);
+    const auto elementBytes = BytesPerElement(descriptor.format);
+    const bool volume = descriptor.dimension == TextureDimension::k3D;
+    const auto tiledLayers = mips.front().blockDepth > 1u ? 1u : arrayLayers;
+    imageLayers = volume ? 1u : arrayLayers;
+    extent = {descriptor.width, descriptor.height};
+    guestAddress = descriptor.baseAddress;
+    guestTileMode = descriptor.tileMode;
+    guestFormat = vkFormat;
+    guestTexelBytes = IsBlockCompressed(descriptor.format) ? 0u : elementBytes;
+    guest2D = descriptor.dimension == TextureDimension::k2D;
+    guestMipCount = descriptor.mipCount;
+    guestDimension = static_cast<std::uint32_t>(descriptor.dimension);
+    guestLayers = arrayLayers;
+    promotable = (descriptor.dimension == TextureDimension::k2D || descriptor.dimension == TextureDimension::k2DArray) && descriptor.mipCount == 1 && arrayLayers == 1 && !IsBlockCompressed(descriptor.format) && (elementBytes == 1 || (elementBytes == 2 && std::getenv("ANYPS5_PROMOTE_16BIT") != nullptr) || elementBytes == 4 || elementBytes == 8 || elementBytes == 16) && (descriptor.tileMode == TextureTileMode::RenderTarget64KB || descriptor.tileMode == TextureTileMode::kLinear);
+    if (descriptor.tileMode == TextureTileMode::Depth64KB) {
+        static std::atomic<std::uint32_t> reported{0};
+        const auto bit = 1u << std::countr_zero(elementBytes);
+        if ((reported.load(std::memory_order_relaxed) & bit) == 0 && (reported.fetch_or(bit, std::memory_order_relaxed) & bit) == 0) {
+            APS5_LOG_OUT("texture 0x%llx (%ux%u format 0x%x, %u mips, %u slices) is the first 64KB_Z_X texture of %u-byte elements detiled with the Z-order swizzle", static_cast<unsigned long long>(descriptor.baseAddress), descriptor.width, descriptor.height, descriptor.format, descriptor.mipCount, descriptor.depthOrLastArray + 1u, elementBytes);
+        }
+    }
+    Require(tiledLayers == 0 || SliceLinearBytes(mips) <= UINT64_MAX / tiledLayers, "detiled texture buffer size overflows");
+
+    bool storageCapable = false;
+    if (context.storageImages && !IsBlockCompressed(descriptor.format)) {
+        VkFormatProperties properties{};
+        context.formatProperties(context.physical, LinearFormat(vkFormat), &properties);
+        storageCapable = (properties.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) != 0;
+    }
+    VkImageCreateInfo imageInfo{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    imageInfo.flags = descriptor.dimension == TextureDimension::kCube ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0u;
+    if (storageCapable && LinearFormat(vkFormat) != vkFormat) imageInfo.flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+    imageInfo.imageType = ImageTypeFor(descriptor.dimension);
+    imageInfo.format = vkFormat;
+    imageInfo.extent = {descriptor.width, descriptor.height, volume ? arrayLayers : 1u};
+    imageInfo.mipLevels = descriptor.mipCount;
+    imageInfo.arrayLayers = imageLayers;
+    imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+    imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | (storageCapable ? VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT : 0u);
+    imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    Check(context.Function<PFN_vkCreateImage>("vkCreateImage")(context.device, &imageInfo, nullptr, &image), "vkCreateImage");
+    timing.Mark("image");
+    layout = storageCapable ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    VkMemoryRequirements requirements{};
+    context.Function<PFN_vkGetImageMemoryRequirements>("vkGetImageMemoryRequirements")(context.device, image, &requirements);
+    VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    allocation.allocationSize = requirements.size;
+    allocationBytes = requirements.size;
+    allocation.memoryTypeIndex = context.MemoryType(requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    Check(context.Function<PFN_vkAllocateMemory>("vkAllocateMemory")(context.device, &allocation, nullptr, &memory), "vkAllocateMemory texture");
+    Check(context.Function<PFN_vkBindImageMemory>("vkBindImageMemory")(context.device, image, memory, 0), "vkBindImageMemory");
+    timing.Mark("memory", requirements.size);
+    return storageCapable;
+}
+
+VkDeviceSize Texture::linearBytes() const {
+    const auto mips = ComputeMipLayout(detiled);
+    const auto tiledLayers = mips.front().blockDepth > 1u ? 1u : FullArrayLayers(detiled);
+    return SliceLinearBytes(mips) * tiledLayers;
+}
+
+void Texture::uploadDetiled(TextureDetiler& detiler, VkBuffer source, VkDeviceSize offset, bool hostWritten, PerformanceTimer& timing) {
+    std::unique_ptr<CommandBatch> batch;
+    VkCommandBuffer commands = VK_NULL_HANDLE;
+    if (context.drawQueue != nullptr) commands = context.drawQueue->Begin(context);
+    else {
+        detiler.BeginBatch();
+        batch = std::make_unique<CommandBatch>(context);
+        commands = batch->Handle();
+    }
+    recordDetile(commands, detiler, source, offset, hostWritten, linear->Handle(), VK_IMAGE_LAYOUT_UNDEFINED);
+    if (batch != nullptr) {
+        batch->SubmitAndWait();
+        ReleaseUpload();
+    } else {
+        detiler.Retire(*context.drawQueue);
+    }
+    timing.Mark("record");
+}
+
+std::shared_ptr<Buffer> Texture::Refresh(VkCommandBuffer commands, VkBuffer source, VkDeviceSize offset) {
+    PerformanceTimer timing("Graphics.Texture.Refresh");
+    Require(refreshable && ownsImage && image != VK_NULL_HANDLE && context.detiler != nullptr, "texture has no detiled guest surface to refresh");
+    Require(commands != VK_NULL_HANDLE && source != VK_NULL_HANDLE, "texture refresh requires a command buffer and a source buffer");
+    const auto linearSize = linearBytes();
+    auto target = std::make_shared<Buffer>(context, static_cast<std::size_t>(linearSize), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, LinearMemory(context));
+    timing.Mark("linear", linearSize);
+    recordDetile(commands, *context.detiler, source, offset, false, target->Handle(), layout);
+    if (context.drawQueue != nullptr) context.detiler->Retire(*context.drawQueue);
+    timing.Mark("record");
+    return target;
+}
+
+void Texture::recordDetile(VkCommandBuffer commands, TextureDetiler& detiler, VkBuffer source, VkDeviceSize offset, bool hostWritten, VkBuffer target, VkImageLayout from) {
+    const auto& descriptor = detiled;
+    const auto mips = ComputeMipLayout(descriptor);
+    const auto arrayLayers = FullArrayLayers(descriptor);
+    const auto elementBytes = BytesPerElement(descriptor.format);
+    const bool volume = descriptor.dimension == TextureDimension::k3D;
+    const auto tiledLayers = mips.front().blockDepth > 1u ? 1u : arrayLayers;
+    const auto guestSliceBytes = ComputeSurfaceSize(mips, arrayLayers) / tiledLayers;
+    const auto sliceLinearBytes = SliceLinearBytes(mips);
+    const auto pipelineBarrier = context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier");
+
+    if (hostWritten) {
+        VkBufferMemoryBarrier stagingReadBarrier{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+        stagingReadBarrier.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
+        stagingReadBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        stagingReadBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        stagingReadBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        stagingReadBarrier.buffer = source;
+        stagingReadBarrier.offset = 0;
+        stagingReadBarrier.size = VK_WHOLE_SIZE;
+
+        VkBufferMemoryBarrier linearWriteBarrier{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+        linearWriteBarrier.srcAccessMask = 0;
+        linearWriteBarrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        linearWriteBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        linearWriteBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        linearWriteBarrier.buffer = target;
+        linearWriteBarrier.offset = 0;
+        linearWriteBarrier.size = VK_WHOLE_SIZE;
+
+        const VkBufferMemoryBarrier preBarriers[] = {stagingReadBarrier, linearWriteBarrier};
+        pipelineBarrier(commands, VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 2, preBarriers, 0, nullptr);
+    } else {
+        VkMemoryBarrier guestWrites{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        guestWrites.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_HOST_WRITE_BIT;
+        guestWrites.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        pipelineBarrier(commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT | VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &guestWrites, 0, nullptr, 0, nullptr);
+    }
+
+    for (std::uint32_t layer = 0; layer < tiledLayers; ++layer) {
+        const auto guestLayerOffset = static_cast<std::uint64_t>(layer) * guestSliceBytes;
+        const auto linearLayerOffset = static_cast<std::uint64_t>(layer) * sliceLinearBytes;
+        for (const auto& mip : mips) {
+            detiler.Dispatch(commands, descriptor.tileMode, elementBytes, source, offset + guestLayerOffset + mip.tiledOffset, target, linearLayerOffset + mip.linearOffset, mip, layer);
+        }
+    }
+
+    VkBufferMemoryBarrier linearReadBarrier{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+    linearReadBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    linearReadBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    linearReadBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    linearReadBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    linearReadBarrier.buffer = target;
+    linearReadBarrier.offset = 0;
+    linearReadBarrier.size = VK_WHOLE_SIZE;
+
+    const bool initial = from == VK_IMAGE_LAYOUT_UNDEFINED;
+    VkImageMemoryBarrier toTransferDst{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    toTransferDst.srcAccessMask = initial ? 0u : VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+    toTransferDst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    toTransferDst.oldLayout = from;
+    toTransferDst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    toTransferDst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toTransferDst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toTransferDst.image = image;
+    toTransferDst.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, descriptor.mipCount, 0, imageLayers};
+    pipelineBarrier(commands, initial ? VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT : VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 1, &linearReadBarrier, 1, &toTransferDst);
+
+    std::vector<VkBufferImageCopy> regions;
+    regions.reserve(static_cast<std::size_t>(tiledLayers) * mips.size());
+    for (std::uint32_t layer = 0; layer < tiledLayers; ++layer) {
+        const auto linearLayerOffset = static_cast<std::uint64_t>(layer) * sliceLinearBytes;
+        for (std::uint32_t level = 0; level < descriptor.mipCount; ++level) {
+            if (volume && layer >= std::max(arrayLayers >> level, 1u)) break;
+            const auto& mip = mips[level];
+            VkBufferImageCopy region{};
+            region.bufferOffset = linearLayerOffset + mip.linearOffset;
+            region.bufferRowLength = mip.pitchBytes / elementBytes * BlockWidth(descriptor.format);
+            region.bufferImageHeight = 0;
+            region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, level, volume ? 0u : layer, 1};
+            region.imageOffset = {0, 0, volume ? static_cast<std::int32_t>(layer) : 0};
+            region.imageExtent = {std::max(descriptor.width >> level, 1u), std::max(descriptor.height >> level, 1u), mip.depth};
+            regions.push_back(region);
+        }
+    }
+    context.Function<PFN_vkCmdCopyBufferToImage>("vkCmdCopyBufferToImage")(commands, target, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, static_cast<std::uint32_t>(regions.size()), regions.data());
+
+    VkImageMemoryBarrier toShaderRead{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    toShaderRead.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    toShaderRead.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    toShaderRead.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    toShaderRead.newLayout = layout;
+    toShaderRead.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toShaderRead.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toShaderRead.image = image;
+    toShaderRead.subresourceRange = toTransferDst.subresourceRange;
+    pipelineBarrier(commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1, &toShaderRead);
 }
 
 Texture::Texture(const Context& context, const std::shared_ptr<Texture>& shared, const GuestTextureResource& descriptor, VkComponentMapping components) : context(context), sharedImage(shared), ownsImage(false) {

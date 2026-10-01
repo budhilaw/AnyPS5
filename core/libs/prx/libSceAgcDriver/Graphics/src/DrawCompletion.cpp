@@ -20,6 +20,8 @@ void DrawQueue::retire(Batch batch) {
     if (batch.commands) ReportGpuRegions(batch.commands->Regions(), batch.commands->DroppedRegions(), batch.commands->gpuTime);
     PerformanceTimer timing("Graphics.DrawQueue.Retire");
     const GuestMemory::MemoryAccessScope suspended(nullptr, nullptr);
+    if (!batch.reads.empty()) readRanges.fetch_sub(batch.reads.size(), std::memory_order_release);
+    batch.reads.clear();
     Require(drawCount >= batch.entries.size(), "draw queue completion count underflow");
     drawCount -= batch.entries.size();
     if (!batch.entries.empty()) {

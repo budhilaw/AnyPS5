@@ -64,6 +64,7 @@ public:
     }
     std::vector<std::pair<std::uint64_t, std::uint64_t>> UnadoptedRanges(std::uint64_t begin, std::uint64_t end, std::uint64_t sequence) const;
     std::vector<std::pair<std::uint64_t, std::uint64_t>> UnwatchedRanges(std::uint64_t begin, std::uint64_t end) const;
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> WatchedRanges(std::uint64_t begin, std::uint64_t end, std::uint64_t sequence) const;
     std::shared_ptr<DepthImage> GetDepth(const DepthTarget& depth);
     std::shared_ptr<ResidentColor> Find(std::uint64_t address) const;
     std::shared_ptr<DepthImage> FindDepth(std::uint64_t address, bool* stencil = nullptr) const;

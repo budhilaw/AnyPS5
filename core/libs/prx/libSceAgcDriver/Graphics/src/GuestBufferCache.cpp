@@ -10,6 +10,7 @@
 #include <set>
 #include <chrono>
 #include <cstdlib>
+#include <cstring>
 #include <limits>
 
 namespace AgcDriver::Graphics {
@@ -28,6 +29,14 @@ std::chrono::steady_clock::rep Ticks(std::chrono::steady_clock::duration duratio
     return duration.count();
 }
 
+}
+
+bool TextureMemcmp() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("ANYPS5_TEXTURE_MEMCMP");
+        return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0;
+    }();
+    return enabled;
 }
 
 GuestBufferCache::GuestBufferCache(const Context& context) : context(context), stateBlocks(new std::atomic<ChunkState*>[StateLimit >> StateBlockShift]()), budget(ConfiguredBudget()) {}

@@ -1461,6 +1461,7 @@ private:
                             job.run = [current, frame = frameTiming, copy = std::vector<std::uint32_t>(packet.begin(), packet.end()), queuePointer, destination, destinationBytes, source, sourceBytes] {
                                 PerformanceContext timingContext(frame.get());
                                 PerformanceTimer transferTiming("Driver.TransferJob");
+                                if (destinationBytes != 0) current->ResolveReads(destination, destinationBytes);
                                 if (destinationBytes != 0) current->ResolveMemory(destination, destinationBytes, true);
                                 if (sourceBytes != 0) current->ResolveMemory(source, sourceBytes, false);
                                 transferTiming.Mark("resolve");

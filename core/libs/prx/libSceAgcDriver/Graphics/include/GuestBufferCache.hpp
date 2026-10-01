@@ -19,6 +19,8 @@
 
 namespace AgcDriver::Graphics {
 
+bool TextureMemcmp();
+
 class GuestBufferCache {
 public:
     struct Mirror {

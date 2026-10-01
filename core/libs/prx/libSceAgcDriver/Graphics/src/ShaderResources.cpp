@@ -3,6 +3,7 @@
 #include "prx/libSceAgcDriver/Execution/include/MemoryAccessScope.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/RenderCache.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Resources.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/GuestBufferCache.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureCache.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
@@ -310,8 +311,13 @@ std::size_t ShaderResources::addGuestBuffer(std::span<const std::uint32_t> words
     if (written && !read && !keepDownloads && context.renderCache != nullptr) context.renderCache->DiscardCovered(address, size);
     try {
         const GuestMemory::MemoryAccessScope deferred(nullptr, nullptr);
-        if (context.renderCache == nullptr) GuestMemory::CheckRange(reinterpret_cast<const void*>(address), size, 1, written);
-        else for (const auto& [from, to] : context.renderCache->UnwatchedRanges(address, address + size)) GuestMemory::CheckRange(reinterpret_cast<const void*>(from), static_cast<std::size_t>(to - from), 1, written);
+        const bool access = written && !TextureMemcmp();
+        const auto check = [&](std::uint64_t from, std::size_t bytes) {
+            if (access) GuestMemory::CheckAccess(reinterpret_cast<const void*>(from), bytes, 1, true);
+            else GuestMemory::CheckRange(reinterpret_cast<const void*>(from), bytes, 1, written);
+        };
+        if (context.renderCache == nullptr) check(address, size);
+        else for (const auto& [from, to] : context.renderCache->UnwatchedRanges(address, address + size)) check(from, static_cast<std::size_t>(to - from));
     } catch (const std::exception& error) {
         static std::once_flag once;
         std::call_once(once, [&] { APS5_LOG_OUT("shader buffer at 0x%llx (%zu bytes) is not mapped (%s); binding zeros", static_cast<unsigned long long>(address), size, error.what()); });
@@ -383,7 +389,7 @@ void ShaderResources::addImageBinding(const ShaderRecompiler::DescriptorBinding&
             const auto& resource = *decoded;
             const VkComponentMapping components{ComponentSwizzleFor(resource.dstSelX), ComponentSwizzleFor(resource.dstSelY), ComponentSwizzleFor(resource.dstSelZ), ComponentSwizzleFor(resource.dstSelW)};
             static const std::uint64_t replaced = std::getenv("ANYPS5_DEBUG_NULL_TEXTURE") != nullptr ? std::strtoull(std::getenv("ANYPS5_DEBUG_NULL_TEXTURE"), nullptr, 16) : 0u;
-            auto texture = replaced != 0 && resource.baseAddress == replaced ? nullTexture(resource.viewDimension) : context.textureCache->Get(words, resource, components, storageImage, binding.imageDepthCompare, attachedDepth);
+            auto texture = replaced != 0 && resource.baseAddress == replaced ? nullTexture(resource.viewDimension) : context.textureCache->Get(words, resource, components, storageImage, binding.imageDepthCompare, attachedDepth, storageImage && !binding.readOnly);
             if (storageImage && texture->StorageView() == VK_NULL_HANDLE) {
                 char message[200];
                 std::snprintf(message, sizeof(message), "AGC graphics: storage image 0x%llx (%ux%u format 0x%x tile %u dimension %u mips %u) does not support shader stores", static_cast<unsigned long long>(resource.baseAddress), resource.width, resource.height, resource.format, static_cast<unsigned>(resource.tileMode), static_cast<unsigned>(resource.dimension), resource.mipCount);

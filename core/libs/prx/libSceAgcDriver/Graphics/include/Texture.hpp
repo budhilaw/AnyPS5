@@ -4,6 +4,11 @@
 #include "prx/libSceAgcDriver/Graphics/include/Context.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/GuestTextureResource.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureDetiler.hpp"
+#include <memory>
+
+namespace AgcDriver {
+class PerformanceTimer;
+}
 
 namespace AgcDriver::Graphics {
 
@@ -23,6 +28,11 @@ enum class TextureNumericClass {
 class Texture {
 public:
     Texture(const Context& context, TextureDetiler& detiler, const GuestTextureResource& descriptor, VkComponentMapping components, std::span<const std::byte> snapshot);
+    struct HostSource {
+        VkBuffer buffer;
+        VkDeviceSize offset;
+    };
+    Texture(const Context& context, TextureDetiler& detiler, const GuestTextureResource& descriptor, VkComponentMapping components, HostSource source);
     Texture(const Context& context, const std::shared_ptr<ResidentColor>& source, const GuestTextureResource& descriptor, VkComponentMapping components);
     struct DirectView {};
     Texture(const Context& context, const std::shared_ptr<ResidentColor>& source, const GuestTextureResource& descriptor, VkComponentMapping components, DirectView);
@@ -38,6 +48,8 @@ public:
 
     VkImageView View() const;
     void ReleaseUpload();
+    bool Refreshable() const { return refreshable; }
+    std::shared_ptr<Buffer> Refresh(VkCommandBuffer commands, VkBuffer source, VkDeviceSize offset);
     VkImageLayout Layout() const { return layout; }
     VkImageView StorageView();
     VkDeviceSize AllocationBytes() const { return allocationBytes; }
@@ -60,8 +72,14 @@ public:
 private:
     void release() noexcept;
     void createGuestViews(const GuestTextureResource& descriptor, VkComponentMapping components, VkFormat vkFormat, bool storageCapable);
+    bool createDetiledImage(const GuestTextureResource& descriptor, PerformanceTimer& timing);
+    void uploadDetiled(TextureDetiler& detiler, VkBuffer source, VkDeviceSize offset, bool hostWritten, PerformanceTimer& timing);
+    void recordDetile(VkCommandBuffer commands, TextureDetiler& detiler, VkBuffer source, VkDeviceSize offset, bool hostWritten, VkBuffer target, VkImageLayout from);
+    VkDeviceSize linearBytes() const;
 
     Context context;
+    GuestTextureResource detiled{};
+    bool refreshable = false;
     VkImage image = VK_NULL_HANDLE;
     VkDeviceMemory memory = VK_NULL_HANDLE;
     VkImageView view = VK_NULL_HANDLE;

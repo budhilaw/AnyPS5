@@ -55,10 +55,15 @@ public:
     void Enqueue(std::shared_ptr<ShaderResources> resources, std::shared_ptr<void> storage);
     void EnqueueCompletion(std::function<void()> action);
     void EnqueueUpload(std::function<void()> release, std::size_t bytes);
+    void AddRead(std::uint64_t begin, std::uint64_t end);
+    bool HasReads() const { return readRanges.load(std::memory_order_acquire) != 0; }
+    bool ReadsPending(std::uint64_t address, std::size_t bytes) const;
+    void ResolveReads(std::uint64_t address, std::size_t bytes);
     bool HasPending() const { return recording.commands != nullptr || !pending.empty(); }
     void Flush();
     void Resolve(std::uint64_t address, std::size_t bytes, bool ordered = false);
     bool WritesPending(std::uint64_t address, std::size_t bytes, std::uint64_t adoptedBefore = 0) const;
+    bool CopiedWritesPending(std::uint64_t address, std::size_t bytes) const;
     std::uint64_t WriterEpoch() const { return writerEpoch.load(std::memory_order_acquire); }
     std::uint64_t NextSequence() const { return nextSequence; }
     void AppendWriteRanges(std::vector<std::pair<std::uint64_t, std::uint64_t>>& ranges) const {
@@ -83,6 +88,7 @@ private:
         bool hasBarrier = false;
         std::size_t uploadBytes = 0;
         std::vector<std::function<void()>> completions;
+        std::vector<std::pair<std::uint64_t, std::uint64_t>> reads;
     };
     VkCommandBuffer begin(const Context& context);
     void retire(Batch batch);
@@ -90,9 +96,11 @@ private:
     void waitThrough(std::uint64_t sequence);
     const WriteIntervals& writeIntervals() const;
     void traceResolve(std::uint64_t address, std::size_t bytes, bool ordered, const char* traceValue) const;
+    static bool readsOverlap(const Batch& batch, std::uint64_t address, std::size_t bytes);
     Batch recording;
     std::vector<Batch> pending;
     std::vector<std::unique_ptr<CommandBatch>> available;
+    std::atomic<std::size_t> readRanges{0};
     std::size_t drawCount = 0;
     std::uint64_t nextSequence = 1;
     std::uint64_t retiredThrough = 0;

@@ -2,6 +2,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/ReleaseQueue.hpp"
 #include "prx/libSceAgcDriver/Execution/include/MemoryAccessScope.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
+#include "prx/libc/include/SlowOperation.hpp"
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
@@ -184,6 +185,51 @@ void DrawQueue::EnqueueUpload(std::function<void()> release, std::size_t bytes) 
     recording.uploadBytes += bytes;
     workSinceBarrier = true;
     if (recording.uploadBytes >= BatchUploadBytes) Flush();
+}
+
+void DrawQueue::AddRead(std::uint64_t begin, std::uint64_t end) {
+    Require(recording.commands != nullptr, "guest memory read recorded outside a batch");
+    if (begin >= end) return;
+    recording.reads.emplace_back(begin, end);
+    readRanges.fetch_add(1, std::memory_order_release);
+}
+
+bool DrawQueue::readsOverlap(const Batch& batch, std::uint64_t address, std::size_t bytes) {
+    return std::any_of(batch.reads.begin(), batch.reads.end(), [&](const auto& range) { return address < range.second && range.first < address + bytes; });
+}
+
+bool DrawQueue::ReadsPending(std::uint64_t address, std::size_t bytes) const {
+    if (bytes == 0 || !HasReads()) return false;
+    return readsOverlap(recording, address, bytes) || std::any_of(pending.begin(), pending.end(), [&](const Batch& batch) { return readsOverlap(batch, address, bytes); });
+}
+
+void DrawQueue::ResolveReads(std::uint64_t address, std::size_t bytes) {
+    if (bytes == 0 || !HasReads()) return;
+    std::size_t through = 0;
+    for (std::size_t index = 0; index < pending.size(); ++index) {
+        if (readsOverlap(pending[index], address, bytes)) through = index + 1;
+    }
+    const bool recorded = readsOverlap(recording, address, bytes);
+    if (!recorded && through == 0) return;
+    SlowOperationTimer slowTimer("guest write waits for texture reads");
+    PerformanceTimer timing("Graphics.DrawQueue.ReadWait");
+    if (recorded) {
+        Flush();
+        through = pending.size();
+    }
+    timing.Mark("submit");
+    for (; through != 0 && !pending.empty(); --through) {
+        pending.front().commands->Wait();
+        timing.Mark("fence_wait");
+        auto batch = std::move(pending.front());
+        pending.erase(pending.begin());
+        retire(std::move(batch));
+        timing.Mark("retire");
+    }
+}
+
+bool DrawQueue::CopiedWritesPending(std::uint64_t address, std::size_t bytes) const {
+    return writeIntervals().Latest(address, bytes, true) != 0;
 }
 
 void DrawQueue::Flush() {

@@ -161,6 +161,20 @@ std::vector<std::pair<std::uint64_t, std::uint64_t>> RenderCache::UnwatchedRange
     return excluding(begin, end, [](const ResidentColor& entry) { return entry.Watched(); });
 }
 
+std::vector<std::pair<std::uint64_t, std::uint64_t>> RenderCache::WatchedRanges(std::uint64_t begin, std::uint64_t end, std::uint64_t sequence) const {
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> result;
+    for (auto it = entries.lower_bound(reachStart(begin)); it != entries.end(); ++it) {
+        const auto& [address, entry] = *it;
+        if (address >= end + pageSize) break;
+        if (!entry->Watched() || entry->Adopted(sequence)) continue;
+        const auto& color = entry->Description();
+        const auto first = std::max(begin, color.address - color.address % pageSize);
+        const auto last = std::min(end, (color.address + color.bytes + pageSize - 1) / pageSize * pageSize);
+        if (first < last) result.emplace_back(first, last);
+    }
+    return result;
+}
+
 std::vector<std::pair<std::uint64_t, std::uint64_t>> RenderCache::excluding(std::uint64_t begin, std::uint64_t end, const std::function<bool(const ResidentColor&)>& excluded) const {
     std::vector<std::pair<std::uint64_t, std::uint64_t>> result{{begin, end}};
     for (auto it = entries.lower_bound(reachStart(begin)); it != entries.end(); ++it) {

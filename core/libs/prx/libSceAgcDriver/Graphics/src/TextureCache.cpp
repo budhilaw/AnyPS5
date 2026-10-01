@@ -114,11 +114,44 @@ std::shared_ptr<Texture> TextureCache::directDepth(const std::array<std::uint32_
     return texture;
 }
 
+bool TextureCache::hostReadable(std::uint64_t address, std::uint64_t bytes) {
+    if (TextureMemcmp() || context.guestBufferCache == nullptr || context.drawQueue == nullptr) return false;
+    if (!context.drawQueue->CopiedWritesPending(address, static_cast<std::size_t>(bytes))) return true;
+    context.drawQueue->Resolve(address, static_cast<std::size_t>(bytes), true);
+    return false;
+}
+
+bool TextureCache::refresh(Surface& surface, std::uint64_t address, bool track) {
+    const auto owner = surface.texture.lock();
+    if (owner == nullptr || !owner->Refreshable() || !hostReadable(address, surface.bytes)) return false;
+    auto view = context.guestBufferCache->HostRange(address, surface.bytes);
+    if (!view.buffer) return false;
+    if (context.renderCache != nullptr) context.renderCache->Resolve(address, static_cast<std::size_t>(surface.bytes), false);
+    if (track) surface.stamp = context.guestBufferCache->Track(address, address + surface.bytes);
+    auto linear = owner->Refresh(context.drawQueue->BeginBarrier(context), view.buffer->Handle(), view.offset);
+    context.drawQueue->AddRead(address, address + surface.bytes);
+    context.drawQueue->EnqueueUpload([source = std::move(view.buffer), linear = std::move(linear)] {}, static_cast<std::size_t>(surface.bytes));
+    if (!surface.snapshot.empty()) std::vector<std::byte>().swap(surface.snapshot);
+    return true;
+}
+
+std::shared_ptr<Texture> TextureCache::hostTexture(const GuestTextureResource& resource, VkComponentMapping components, std::uint64_t bytes, std::uint64_t stamp) {
+    const auto address = resource.baseAddress;
+    if (stamp == 0 || context.guestBufferCache == nullptr || context.guestBufferCache->Check(address, address + bytes, stamp) == GuestBufferCache::RangeState::Untracked || !hostReadable(address, bytes)) return nullptr;
+    auto view = context.guestBufferCache->HostRange(address, bytes);
+    if (!view.buffer) return nullptr;
+    if (context.renderCache != nullptr) context.renderCache->Resolve(address, static_cast<std::size_t>(bytes), false);
+    auto texture = std::make_shared<Texture>(context, *context.detiler, resource, components, Texture::HostSource{view.buffer->Handle(), view.offset});
+    context.drawQueue->AddRead(address, address + bytes);
+    context.drawQueue->EnqueueUpload([texture, source = std::move(view.buffer)] { texture->ReleaseUpload(); }, static_cast<std::size_t>(bytes));
+    return texture;
+}
+
 bool TextureCache::SameSurface(const GuestTextureResource& a, const GuestTextureResource& b) {
     return a.baseAddress == b.baseAddress && a.width == b.width && a.height == b.height && a.mipCount == b.mipCount && a.tileMode == b.tileMode && FullArrayLayers(a) == FullArrayLayers(b) && (a.dimension == b.dimension || (a.dimension != TextureDimension::k3D && b.dimension != TextureDimension::k3D && a.dimension != TextureDimension::kCube && b.dimension != TextureDimension::kCube && a.dimension != TextureDimension::k1D && b.dimension != TextureDimension::k1D)) && ResolveTextureFormat(a.format) == ResolveTextureFormat(b.format);
 }
 
-std::shared_ptr<Texture> TextureCache::Get(std::span<const std::uint32_t> words, const GuestTextureResource& resource, VkComponentMapping components, bool storage, bool compare, const DepthImage* attachedDepth) {
+std::shared_ptr<Texture> TextureCache::Get(std::span<const std::uint32_t> words, const GuestTextureResource& resource, VkComponentMapping components, bool storage, bool compare, const DepthImage* attachedDepth, bool stores) {
     Require(words.size() == 8, "texture cache descriptor must contain eight DWORDs");
     PerformanceTimer timing("Graphics.TextureCache");
     trim();
@@ -181,6 +214,7 @@ std::shared_ptr<Texture> TextureCache::Get(std::span<const std::uint32_t> words,
         }
     }
     static const bool traceTextures = std::getenv("ANYPS5_TRACE_TEXTURES") != nullptr;
+    bool snapshotMiss = stores;
     if (auto it = findEntry(key, resource.viewDimension); it != entries.end()) do {
         if (source || it->generation != 0 || !it->depthSources.empty()) {
             if (source && it->source.lock() == source && it->texture->IsDirectView() && it->texture->Image() == source->Target().Image()) {
@@ -200,16 +234,54 @@ std::shared_ptr<Texture> TextureCache::Get(std::span<const std::uint32_t> words,
         }
         Require(it->surface != nullptr, "texture cache entry has no surface");
         auto& surface = *it->surface;
-        const auto end = resource.baseAddress + surface.snapshot.size();
-        if (context.guestBufferCache != nullptr && surface.stamp != 0 && context.guestBufferCache->Current(resource.baseAddress, end, surface.stamp)) {
+        const auto end = resource.baseAddress + surface.bytes;
+        const bool hostBacked = surface.snapshot.empty();
+        if (stores && hostBacked) {
+            surface.stale = true;
+            eraseEntry(it);
+            timing.Mark("store_snapshot");
+            break;
+        }
+        surface.stored = surface.stored || stores;
+        if (hostBacked && surface.volatileUses != 0) {
+            if (refresh(surface, resource.baseAddress, false)) {
+                --surface.volatileUses;
+                auto result = it->texture;
+                entries.splice(entries.end(), entries, it);
+                timing.Mark("volatile_refresh");
+                return result;
+            }
+            surface.volatileUses = 0;
+        }
+        const auto state = context.guestBufferCache != nullptr && surface.stamp != 0 ? context.guestBufferCache->Check(resource.baseAddress, end, surface.stamp) : GuestBufferCache::RangeState::Untracked;
+        if (state == GuestBufferCache::RangeState::Current) {
+            surface.changedUses = 0;
             auto result = it->texture;
             entries.splice(entries.end(), entries, it);
             timing.Mark("stamp_hit");
             return result;
         }
+        if (!surface.stored && state != GuestBufferCache::RangeState::Untracked && refresh(surface, resource.baseAddress, true)) {
+            surface.changedUses = state == GuestBufferCache::RangeState::Written ? surface.changedUses + 1 : 0;
+            if (surface.changedUses >= VolatileUses) {
+                surface.changedUses = 0;
+                surface.volatileUses = VolatileProbe;
+            }
+            auto result = it->texture;
+            entries.splice(entries.end(), entries, it);
+            timing.Mark("refresh");
+            return result;
+        }
         if (traceTextures) {
             static int reported = 0;
-            if (reported++ < 4000) APS5_LOG_OUT("texture 0x%llx (%zu bytes, format 0x%x %ux%u) compared by bytes; stamp %llu:%s", static_cast<unsigned long long>(resource.baseAddress), surface.snapshot.size(), resource.format, resource.width, resource.height, static_cast<unsigned long long>(surface.stamp), context.guestBufferCache ? context.guestBufferCache->Describe(resource.baseAddress, end, surface.stamp).c_str() : " (no cache)");
+            if (reported++ < 4000) APS5_LOG_OUT("texture 0x%llx (%llu bytes, format 0x%x %ux%u) compared by bytes; stamp %llu:%s", static_cast<unsigned long long>(resource.baseAddress), static_cast<unsigned long long>(surface.bytes), resource.format, resource.width, resource.height, static_cast<unsigned long long>(surface.stamp), context.guestBufferCache ? context.guestBufferCache->Describe(resource.baseAddress, end, surface.stamp).c_str() : " (no cache)");
+        }
+        if (hostBacked) {
+            surface.stale = true;
+            eraseEntry(it);
+            snapshotMiss = true;
+            timing.Mark("host_fallback");
+            break;
         }
         GuestMemory::CheckRange(reinterpret_cast<const void*>(resource.baseAddress), surface.snapshot.size(), 1);
         if (std::memcmp(reinterpret_cast<const void*>(resource.baseAddress), surface.snapshot.data(), surface.snapshot.size()) == 0) {
@@ -248,12 +320,13 @@ std::shared_ptr<Texture> TextureCache::Get(std::span<const std::uint32_t> words,
             continue;
         }
         auto owner = it->surface->texture.lock();
-        if (!owner) {
+        if (!owner || (stores && it->surface->snapshot.empty())) {
             it->surface->stale = true;
             it = eraseEntry(it);
             continue;
         }
         auto surface = it->surface;
+        surface->stored = surface->stored || stores;
         auto texture = std::make_shared<Texture>(context, owner, resource, components);
         addEntry({key, resource.viewDimension, texture, surface, {}, {}, 0, 0});
         if (traceTextures) {
@@ -267,7 +340,6 @@ std::shared_ptr<Texture> TextureCache::Get(std::span<const std::uint32_t> words,
     const auto layers = FullArrayLayers(resource);
     const auto bytes = ComputeSurfaceSize(mips, layers);
     Require(bytes != 0 && bytes <= std::numeric_limits<std::size_t>::max(), "texture cache surface size overflow");
-    std::vector<std::byte> snapshot(static_cast<std::size_t>(bytes));
     if (traceTextures) {
         static int reported = 0;
         if (bytes >= (8u << 20) && context.renderCache != nullptr) {
@@ -278,16 +350,25 @@ std::shared_ptr<Texture> TextureCache::Get(std::span<const std::uint32_t> words,
     }
     const auto stamp = context.guestBufferCache != nullptr ? context.guestBufferCache->Track(resource.baseAddress, resource.baseAddress + bytes) : 0;
     timing.Mark("miss_track");
-    GuestMemory::Read(resource.baseAddress, snapshot, 1);
-    timing.Mark("miss_read", snapshot.size());
-    auto texture = std::make_shared<Texture>(context, *context.detiler, resource, components, snapshot);
-    timing.Mark("miss_detile");
-    if (context.drawQueue != nullptr) context.drawQueue->EnqueueUpload([texture] { texture->ReleaseUpload(); }, snapshot.size());
+    std::vector<std::byte> snapshot;
+    std::shared_ptr<Texture> texture = snapshotMiss ? nullptr : hostTexture(resource, components, bytes, stamp);
+    if (texture) {
+        timing.Mark("miss_host_detile", bytes);
+    } else {
+        snapshot.resize(static_cast<std::size_t>(bytes));
+        GuestMemory::Read(resource.baseAddress, snapshot, 1);
+        timing.Mark("miss_read", snapshot.size());
+        texture = std::make_shared<Texture>(context, *context.detiler, resource, components, snapshot);
+        timing.Mark("miss_detile");
+        if (context.drawQueue != nullptr) context.drawQueue->EnqueueUpload([texture] { texture->ReleaseUpload(); }, snapshot.size());
+    }
     const auto retained = snapshot.size() + texture->AllocationBytes();
     auto surface = std::make_shared<Surface>();
     surface->identity = resource;
     surface->snapshot = std::move(snapshot);
+    surface->bytes = bytes;
     surface->stamp = stamp;
+    surface->stored = stores;
     surface->texture = texture;
     addEntry({key, resource.viewDimension, texture, surface, {}, {}, 0, retained});
     retainedBytes += retained;

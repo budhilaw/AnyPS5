@@ -432,6 +432,8 @@ struct MockVulkan {
     std::vector<std::uint32_t> queryPoolSizes;
     std::vector<MockTimestamp> timestamps;
     std::uint32_t queryReads = 0;
+    std::map<VkDeviceMemory, const void*> importedMemory;
+    std::uint32_t bufferImageCopies = 0;
 };
 
 MockVulkan mock;
@@ -600,6 +602,7 @@ VKAPI_ATTR void VKAPI_CALL mockCmdClearColorImage(VkCommandBuffer, VkImage, VkIm
 
 VKAPI_ATTR void VKAPI_CALL mockCmdCopyBufferToImage(VkCommandBuffer, VkBuffer, VkImage, VkImageLayout layout, std::uint32_t count, const VkBufferImageCopy*) {
     Require(layout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL && count != 0, "texture upload copied into an image that is not a transfer destination");
+    ++mock.bufferImageCopies;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL mockCreateFence(VkDevice, const VkFenceCreateInfo*, const VkAllocationCallbacks*, VkFence* fence) {
@@ -908,6 +911,39 @@ PFN_vkVoidFunction VKAPI_CALL timestampProc(VkDevice device, const char* name) {
     };
     const auto it = table.find(name);
     return it == table.end() ? drawProc(device, name) : it->second;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL mockGetMemoryHostPointerProperties(VkDevice, VkExternalMemoryHandleTypeFlagBits, const void*, VkMemoryHostPointerPropertiesEXT* properties) {
+    properties->memoryTypeBits = 1;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL mockAllocateHostMemory(VkDevice device, const VkMemoryAllocateInfo* info, const VkAllocationCallbacks* callbacks, VkDeviceMemory* memory) {
+    const auto* next = static_cast<const VkBaseInStructure*>(info->pNext);
+    if (next == nullptr || next->sType != VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT) return mockAllocateMemory(device, info, callbacks, memory);
+    *memory = makeHandle<VkDeviceMemory>();
+    mock.importedMemory[*memory] = reinterpret_cast<const VkImportMemoryHostPointerInfoEXT*>(next)->pHostPointer;
+    ++mock.live;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL mockResetDescriptorPool(VkDevice, VkDescriptorPool, VkDescriptorPoolResetFlags) {
+    return VK_SUCCESS;
+}
+
+PFN_vkVoidFunction VKAPI_CALL hostImportProc(VkDevice device, const char* name) {
+    static const std::map<std::string_view, PFN_vkVoidFunction> table{
+        {"vkGetMemoryHostPointerPropertiesEXT", reinterpret_cast<PFN_vkVoidFunction>(mockGetMemoryHostPointerProperties)},
+        {"vkAllocateMemory", reinterpret_cast<PFN_vkVoidFunction>(mockAllocateHostMemory)},
+        {"vkResetDescriptorPool", reinterpret_cast<PFN_vkVoidFunction>(mockResetDescriptorPool)}
+    };
+    const auto it = table.find(name);
+    return it == table.end() ? renderTargetProc(device, name) : it->second;
+}
+
+bool importedBuffer(VkBuffer buffer) {
+    const auto memory = mock.bufferMemory.find(buffer);
+    return memory != mock.bufferMemory.end() && mock.importedMemory.contains(memory->second);
 }
 
 AgcDriver::Graphics::Context mockContext() {
@@ -2028,6 +2064,35 @@ void drawQueueBarrierTests() {
     Require(mock.live == 0, "draw queue barrier tests leaked Vulkan objects");
 }
 
+void drawQueueReadTests() {
+    mock = MockVulkan{};
+    const auto context = mockContext();
+    constexpr std::uint64_t address = 0x1464710000ull;
+    {
+        AgcDriver::Graphics::DrawQueue queue;
+        expectFailure([&] { queue.AddRead(address, address + 64); }, "outside a batch");
+        Require(!queue.HasReads() && !queue.ReadsPending(address, 64), "an empty draw queue reported pending reads");
+        queue.Begin(context);
+        queue.AddRead(address, address + 64);
+        Require(queue.HasReads() && queue.ReadsPending(address + 63, 1) && !queue.ReadsPending(address + 64, 16) && !queue.ReadsPending(address - 16, 16), "pending reads do not cover exactly the read range");
+        queue.ResolveReads(address + 64, 16);
+        Require(queue.HasPending() && queue.HasReads(), "a write next to a pending read waited for it");
+        const auto submits = mock.submitCount;
+        queue.ResolveReads(address + 32, 4);
+        Require(!queue.HasPending() && !queue.HasReads() && !queue.ReadsPending(address, 64) && mock.submitCount == submits + 1, "a write into a read recorded in the open batch did not submit and retire it");
+        queue.Begin(context);
+        queue.AddRead(address, address + 64);
+        queue.Flush();
+        queue.Begin(context);
+        queue.AddRead(address + 4096, address + 8192);
+        queue.ResolveReads(address, 8);
+        Require(queue.HasPending() && queue.HasReads() && !queue.ReadsPending(address, 64) && queue.ReadsPending(address + 4096, 4), "a write into a read of a submitted batch did not wait for exactly that batch");
+        queue.Wait();
+        Require(!queue.HasReads(), "retiring every batch left reads pending");
+    }
+    Require(mock.live == 0, "draw queue read tests leaked Vulkan objects");
+}
+
 AgcDriver::Graphics::GuestBufferCache::RangeState describedState(AgcDriver::Graphics::GuestBufferCache& cache, std::uint64_t begin, std::uint64_t end, std::uint64_t stamp) {
     using State = AgcDriver::Graphics::GuestBufferCache::RangeState;
     const auto text = cache.Describe(begin, end, stamp);
@@ -2111,6 +2176,103 @@ void guestBufferCacheTests() {
     }
     GuestMemoryBacking::GuestMemoryBackingUnmap_nid_postfix(memory, mapped);
     Require(mock.live == 0, "guest buffer cache tests leaked Vulkan objects");
+}
+
+std::vector<std::uint32_t> linearTextureDescriptor(std::uint64_t address, std::uint32_t width, std::uint32_t height) {
+    const auto base = address >> 8u;
+    return {static_cast<std::uint32_t>(base), static_cast<std::uint32_t>((base >> 32u) & 0xffu) | (0x38u << 20u) | (((width - 1u) & 3u) << 30u), ((width - 1u) >> 2u) | ((height - 1u) << 14u), 0xfacu | (9u << 28u), 0u, 0u, 0u, 0u};
+}
+
+void textureRefreshTests() {
+    using namespace AgcDriver::Graphics;
+    mock = MockVulkan{};
+    auto context = mockContext();
+    context.device = makeHandle<VkDevice>();
+    context.deviceProc = hostImportProc;
+    context.memory.memoryTypes[0].propertyFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    context.limits.maxStorageBufferRange = 1u << 24u;
+    context.limits.maxPerStageDescriptorSampledImages = 16;
+    context.limits.maxDescriptorSetSampledImages = 16;
+    context.hostPointerImport = true;
+    context.hostPointerAlignment = GuestMemoryTracking::GuestMemoryTrackingPageSize_nid_postfix();
+    constexpr std::uint64_t chunk = 1u << 16u;
+    const std::size_t mapped = 8 * chunk;
+    void* memory = GuestMemoryBacking::GuestMemoryBackingMap_nid_postfix(nullptr, mapped, chunk, 3);
+    const auto base = reinterpret_cast<std::uint64_t>(memory);
+    const auto address = base + 2 * chunk;
+    const auto words = linearTextureDescriptor(address, 64, 64);
+    const auto resource = DecodeTextureResource(words);
+    const auto bytes = ComputeSurfaceSize(ComputeMipLayout(resource), 1);
+    std::memset(reinterpret_cast<void*>(address), 0x5a, static_cast<std::size_t>(bytes));
+    const VkComponentMapping identity{VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_G, VK_COMPONENT_SWIZZLE_B, VK_COMPONENT_SWIZZLE_A};
+    const auto write = [](std::uint64_t target) { GuestMemoryTracking::GuestMemoryTrackingResolve_nid_postfix(target, 4, true); };
+    {
+        TextureDetiler detiler(context);
+        context.detiler = &detiler;
+        DrawQueue queue;
+        context.drawQueue = &queue;
+        GuestBufferCache buffers(context);
+        context.guestBufferCache = &buffers;
+        TextureCache cache(context);
+        context.textureCache = &cache;
+        const auto get = [&](bool stores) { return cache.Get(words, resource, identity, stores, false, nullptr, stores); };
+        const auto lastSource = [] {
+            Require(mock.writes.size() >= 2, "no texture detiling was recorded");
+            return mock.writes[mock.writes.size() - 2].buffers.at(0).buffer;
+        };
+        const auto protectedChunks = [&] { return buffers.Describe(address, address + bytes, ~std::uint64_t{0}).find("unprotected") == std::string::npos; };
+        const auto texture = get(false);
+        Require(importedBuffer(lastSource()) && mock.bufferImageCopies == 1, "a texture miss over importable memory was not detiled from the host view");
+        Require(queue.ReadsPending(address, 4) && queue.ReadsPending(address + bytes - 4, 4) && !queue.ReadsPending(address + bytes, 4) && protectedChunks(), "a texture detiled from the host view was not a pending GPU read of exactly its tracked surface");
+        auto copies = mock.bufferImageCopies;
+        Require(get(false) == texture && mock.bufferImageCopies == copies, "a current texture was refreshed");
+        const auto view = texture->View();
+        const auto image = texture->Image();
+        const auto layout = texture->Layout();
+        const auto barriers = mock.imageBarriers.size();
+        buffers.NoteGpuWrite(address + 256, address + 512);
+        Require(get(false) == texture && mock.bufferImageCopies == ++copies && importedBuffer(lastSource()), "a texture rewritten in place by the GPU was not refreshed from the host view");
+        Require(texture->View() == view && texture->Image() == image && texture->Layout() == layout && protectedChunks(), "a refresh replaced the image, its view or its layout, or changed the protection of its chunks");
+        Require(mock.imageBarriers.size() == barriers + 2, "a refresh did not record exactly one transition into and one out of the copy");
+        const auto into = mock.imageBarriers[barriers];
+        const auto back = mock.imageBarriers[barriers + 1];
+        Require(into.barrier.image == image && into.barrier.oldLayout == layout && into.barrier.newLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL && into.sourceStages == VK_PIPELINE_STAGE_ALL_COMMANDS_BIT && (into.barrier.srcAccessMask & VK_ACCESS_SHADER_READ_BIT) != 0 && into.destinationStages == VK_PIPELINE_STAGE_TRANSFER_BIT, "a refresh did not wait for every earlier reader of the image before copying into it");
+        Require(back.barrier.image == image && back.barrier.oldLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL && back.barrier.newLayout == layout && back.barrier.srcAccessMask == VK_ACCESS_TRANSFER_WRITE_BIT && back.sourceStages == VK_PIPELINE_STAGE_TRANSFER_BIT, "a refresh did not return the image to the layout its views declare");
+        queue.Wait();
+        Require(!queue.HasReads(), "texture reads stayed pending after their batches retired");
+        buffers.NoteGpuWrite(address + 256, address + 512);
+        Require(get(false) == texture && mock.bufferImageCopies == ++copies && queue.ReadsPending(address, 4) && queue.ReadsPending(address + bytes - 4, 4) && !queue.ReadsPending(address + bytes, 4), "a refresh was not a pending GPU read of exactly its surface");
+        Require(get(false) == texture && mock.bufferImageCopies == copies, "a refreshed texture was refreshed again without a newer write");
+        ShaderRecompiler::RecompileResult compute;
+        compute.bindings.push_back(makeBinding(Role::GuestBuffers, 3, 1, vsharp(reinterpret_cast<const void*>(address), 256)));
+        const CompiledShader shader{ShaderRecompiler::ShaderStage::Compute, &compute, 0};
+        queue.Begin(context);
+        queue.Enqueue(std::make_shared<ShaderResources>(context, shader), std::make_shared<int>(0));
+        Require(queue.WritesPending(address, 256) && !queue.CopiedWritesPending(address, 256) && protectedChunks(), "a shader writing guest memory in place unprotected its chunks or was taken for a copied writer");
+        Require(get(false) == texture && mock.bufferImageCopies == ++copies && queue.WritesPending(address, 256) && queue.HasPending(), "a texture under a pending in-place writer was not refreshed after it without waiting");
+        write(address + 64);
+        Require(!protectedChunks(), "a CPU write did not fault on a texture chunk");
+        Require(get(false) == texture && mock.bufferImageCopies == ++copies && protectedChunks(), "a refresh after a CPU write did not protect the chunk again");
+        for (std::uint32_t use = 1; use < 8; ++use) {
+            write(address + 64);
+            Require(get(false) == texture && mock.bufferImageCopies == ++copies && protectedChunks(), "a texture the CPU wrote fewer than eight times in a row stopped protecting its chunks");
+        }
+        write(address + 64);
+        Require(get(false) == texture && mock.bufferImageCopies == ++copies && !protectedChunks(), "a texture the CPU wrote on eight consecutive uses was not refreshed without protecting its chunks");
+        for (std::uint32_t use = 1; use < 64; ++use) Require(get(false) == texture && mock.bufferImageCopies == ++copies && !protectedChunks(), "a volatile texture was not refreshed on every use");
+        Require(get(false) == texture && mock.bufferImageCopies == ++copies && protectedChunks(), "a volatile texture did not protect its chunks again after its probe period");
+        Require(get(false) == texture && mock.bufferImageCopies == copies, "a texture that left the volatile state was refreshed without a newer write");
+        const auto stored = get(true);
+        Require(stored != texture && !importedBuffer(lastSource()) && mock.bufferImageCopies == ++copies, "a texture bound for shader stores kept a surface without a guest snapshot");
+        buffers.NoteGpuWrite(address + 256, address + 512);
+        Require(get(true) == stored && mock.bufferImageCopies == copies, "a stored texture whose guest bytes did not change was refreshed from guest memory");
+        Require(queue.ReadsPending(address, bytes), "texture refreshes and host misses were not pending reads");
+        queue.ResolveReads(address + 16, 16);
+        Require(!queue.ReadsPending(address, bytes) && !queue.HasReads(), "a guest write did not wait for the texture reads before it");
+        queue.Wait();
+    }
+    GuestMemoryBacking::GuestMemoryBackingUnmap_nid_postfix(memory, mapped);
+    Require(mock.live == 0, "texture refresh tests leaked Vulkan objects");
 }
 
 void renderCacheTests() {
@@ -2754,7 +2916,9 @@ int main() {
         writeIntervalTests();
         drawQueueWriterTests();
         drawQueueBarrierTests();
+        drawQueueReadTests();
         guestBufferCacheTests();
+        textureRefreshTests();
         renderCacheTests();
         depthWriteTests();
         depthViewTests();

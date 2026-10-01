@@ -882,7 +882,15 @@ void VulkanDevice::WriteOcclusionDump(std::uint64_t destination) {
     const GuestMemory::MemoryAccessScope memoryScope(this, [](void* context, std::uint64_t address, std::size_t bytes, bool writable) {
         static_cast<VulkanDevice*>(context)->ResolveMemory(address, bytes, writable);
     });
+    state->drawQueue->ResolveReads(destination, Pm4::OcclusionDumpBytes);
     Pm4::WriteOcclusionDump(destination);
+}
+
+void VulkanDevice::ResolveReads(std::uint64_t address, std::size_t bytes) {
+    if (bytes == 0 || !state->drawQueue->HasReads()) return;
+    std::lock_guard memoryLock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
+    state->drawQueue->ResolveReads(address, bytes);
+    state->PublishHostRanges();
 }
 
 void VulkanDevice::ResolveGpuWrites(std::uint64_t address, std::size_t bytes) {
@@ -935,6 +943,7 @@ void VulkanDevice::GdsTransfer(std::span<const std::uint32_t> packet) {
         const auto offset = static_cast<std::size_t>(packet[2]);
         require(offset + bytes <= gds.size(), "DMA_DATA GDS source exceeds the GDS size");
         const auto destination = static_cast<std::uint64_t>(packet[4]) | (static_cast<std::uint64_t>(packet[5]) << 32u);
+        state->drawQueue->ResolveReads(destination, bytes);
         GuestMemory::Write(destination, gds.subspan(offset, bytes), 1);
     }
     if (trace) {
