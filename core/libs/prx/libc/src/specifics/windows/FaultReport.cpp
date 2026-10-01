@@ -132,8 +132,6 @@ void describeCxxException(const EXCEPTION_RECORD* record) {
     const auto* type = *reinterpret_cast<const std::type_info* const*>(unwind - CxaHeaderBytes);
     if (type == nullptr || !readable(reinterpret_cast<std::uint64_t>(type), sizeof(void*) * 2)) return;
     write("  C++ exception of type %s\n", type->name());
-    void* object = reinterpret_cast<void*>(unwind + sizeof(_Unwind_Exception));
-    if (typeid(std::exception).__do_catch(type, &object, 1)) write("  what(): %s\n", static_cast<const std::exception*>(object)->what());
 }
 
 LONG WINAPI unhandledFilter(EXCEPTION_POINTERS* exception) {
