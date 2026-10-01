@@ -34,6 +34,7 @@ private:
     VkDeviceMemory memory = VK_NULL_HANDLE;
     void* mapping = nullptr;
     std::size_t size;
+    std::size_t capacity = 0;
     VkDeviceSize allocationBytes = 0;
     VkBufferUsageFlags usage;
     VkMemoryPropertyFlags properties;

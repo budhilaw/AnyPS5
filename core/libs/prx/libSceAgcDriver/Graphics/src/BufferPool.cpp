@@ -1,7 +1,21 @@
 #include "prx/libSceAgcDriver/Graphics/include/BufferPool.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ReleaseQueue.hpp"
+#include <bit>
+#include <cstdlib>
 
 namespace AgcDriver::Graphics {
+
+std::size_t BufferPool::SizeClass(std::size_t bytes) noexcept {
+    static const bool exact = std::getenv("ANYPS5_EXACT_BUFFER_POOL") != nullptr;
+    constexpr std::size_t smallest = 256;
+    constexpr std::size_t powerLimit = 64u << 10;
+    if (exact || bytes > (std::size_t{1} << 62)) return bytes;
+    if (bytes <= smallest) return smallest;
+    const auto ceiling = std::bit_ceil(bytes);
+    if (ceiling <= powerLimit) return ceiling;
+    const auto step = ceiling / 8;
+    return (bytes + step - 1) / step * step;
+}
 
 BufferPool::BufferPool(const Context& context) : device(context.device), unmap(context.Function<PFN_vkUnmapMemory>("vkUnmapMemory")), destroyBuffer(context.Function<PFN_vkDestroyBuffer>("vkDestroyBuffer")), freeMemory(context.Function<PFN_vkFreeMemory>("vkFreeMemory")), releases(context.releaseQueue) {
     buckets.fill(none);

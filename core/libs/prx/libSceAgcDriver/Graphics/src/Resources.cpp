@@ -15,7 +15,8 @@ Buffer::Buffer(const Context& context, std::size_t size, VkBufferUsageFlags usag
     const bool addressable = (usage & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT) != 0;
     Require(!addressable || context.bufferDeviceAddress, "buffer device address is not enabled");
     cache = GetBufferPool(context);
-    if (const auto allocation = cache->Take(size, usage, properties)) {
+    capacity = BufferPool::SizeClass(size);
+    if (const auto allocation = cache->Take(capacity, usage, properties)) {
         buffer = allocation->buffer;
         memory = allocation->memory;
         mapping = allocation->mapping;
@@ -26,7 +27,7 @@ Buffer::Buffer(const Context& context, std::size_t size, VkBufferUsageFlags usag
     }
     try {
         VkBufferCreateInfo info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-        info.size = size;
+        info.size = capacity;
         info.usage = usage;
         info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
         Check(context.Function<PFN_vkCreateBuffer>("vkCreateBuffer")(context.device, &info, nullptr, &buffer), "vkCreateBuffer");
@@ -92,7 +93,7 @@ Buffer::~Buffer() {
 
 void Buffer::release() noexcept {
     if (reusable && buffer && memory && cache) {
-        cache->Put({buffer, memory, mapping, deviceAddress, allocationBytes, size, usage, properties});
+        cache->Put({buffer, memory, mapping, deviceAddress, allocationBytes, capacity, usage, properties});
         return;
     }
     if (!buffer && !memory) return;

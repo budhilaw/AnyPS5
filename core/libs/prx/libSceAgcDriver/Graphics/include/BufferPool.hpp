@@ -28,6 +28,7 @@ public:
     BufferPool& operator=(const BufferPool&) = delete;
     std::optional<BufferAllocation> Take(std::size_t bytes, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
     void Put(const BufferAllocation& allocation) noexcept;
+    static std::size_t SizeClass(std::size_t bytes) noexcept;
 
 private:
     static constexpr std::size_t capacity = 1024;
