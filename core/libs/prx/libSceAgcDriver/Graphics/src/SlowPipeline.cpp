@@ -12,7 +12,7 @@ namespace AgcDriver::Graphics {
 
 void ReportSlowPipeline(const char* kind, std::chrono::steady_clock::time_point start, std::span<const CompiledShader> shaders) {
     const auto elapsed = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
-    if (SlowOperationEnabled_nid_no_patch()) {
+    if (elapsed >= 1.0 && SlowOperationEnabled_nid_no_patch()) {
         std::size_t words = 0;
         for (const auto& shader : shaders) words += shader.program != nullptr ? shader.program->spirv.size() : 0;
         char text[160];
