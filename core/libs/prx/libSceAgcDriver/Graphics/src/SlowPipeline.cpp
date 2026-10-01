@@ -17,7 +17,7 @@ void ReportSlowPipeline(const char* kind, std::chrono::steady_clock::time_point 
         for (const auto& shader : shaders) words += shader.program != nullptr ? shader.program->spirv.size() : 0;
         char text[160];
         const int length = std::snprintf(text, sizeof(text), "[slow-ops] %s pipeline for program 0x%llx created in %.1f ms (%zu SPIR-V words)\n", kind, static_cast<unsigned long long>(GpuJournal::CurrentProgram), elapsed, words);
-        if (length > 0) std::fwrite(text, 1, std::min(static_cast<std::size_t>(length), sizeof(text) - 1), stderr);
+        if (length > 0) { std::fwrite(text, 1, std::min(static_cast<std::size_t>(length), sizeof(text) - 1), stderr); std::fflush(stderr); }
     }
     if (elapsed < 100.0) return;
     static const char* dumpDirectory = std::getenv("ANYPS5_DUMP_SLOW_SHADERS");

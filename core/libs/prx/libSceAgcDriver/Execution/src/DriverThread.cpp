@@ -77,6 +77,7 @@ void CpuUsage::report() {
     if (std::chrono::steady_clock::now() - wall < std::chrono::seconds(5)) return;
     const auto window = Take();
     std::fprintf(stderr, "[slow-ops] %s: cpu=%.1f ms wall=%.1f ms (%.1f%%)\n", name, static_cast<double>(window.cpuNanoseconds) / 1e6, static_cast<double>(window.wallNanoseconds) / 1e6, 100.0 * static_cast<double>(window.cpuNanoseconds) / static_cast<double>(window.wallNanoseconds));
+    std::fflush(stderr);
 }
 
 }

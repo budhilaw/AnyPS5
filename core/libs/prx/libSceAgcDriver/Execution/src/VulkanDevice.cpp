@@ -946,7 +946,7 @@ void VulkanDevice::GdsTransfer(std::span<const std::uint32_t> packet) {
             if (value == 0) continue;
             if (count++ < 12) { char item[32]; std::snprintf(item, sizeof(item), " %zx:%x", offset, value); nonzero += item; }
         }
-        if (count != 0) std::fprintf(stderr, "[gds] %zu nonzero dwords:%s\n", count, nonzero.c_str());
+        if (count != 0) { std::fprintf(stderr, "[gds] %zu nonzero dwords:%s\n", count, nonzero.c_str()); std::fflush(stderr); }
         std::uint32_t first = 0;
         if (toGds) std::memcpy(&first, gds.data() + packet[4], std::min<std::size_t>(4, bytes));
         else std::memcpy(&first, gds.data() + packet[2], std::min<std::size_t>(4, bytes));
