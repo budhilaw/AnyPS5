@@ -215,7 +215,12 @@ void DescriptorBindingBuilder::Populate(BindingAllocationResult& allocation, con
             break;
         case DescriptorRole::GuestImages:
             physical.guestDescriptor = GuestImagesDescriptor(logical.resources, snapshot);
-            for (const std::uint32_t r : logical.resources) physical.imageDepthCompare = physical.imageDepthCompare || info.images.at(r).depthCompare;
+            physical.readOnly = true;
+            for (const std::uint32_t r : logical.resources) {
+                const auto& image = info.images.at(r);
+                physical.imageDepthCompare = physical.imageDepthCompare || image.depthCompare;
+                physical.readOnly = physical.readOnly && !image.written && !image.atomic;
+            }
             physical.imageShape = ImageShapeFor(info.images, logical.resources);
             break;
         case DescriptorRole::GuestSamplers:
