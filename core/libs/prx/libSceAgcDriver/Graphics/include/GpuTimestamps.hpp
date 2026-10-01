@@ -35,6 +35,13 @@ std::uint32_t BatchTimestamps(const VkPhysicalDeviceLimits& limits);
 void ReportGpuBatch(const char* name, std::chrono::nanoseconds time);
 void ReportGpuRegions(std::span<const GpuRegion> regions, std::uint32_t dropped, std::chrono::nanoseconds batch);
 
+struct GpuProgramRanking {
+    std::uint64_t report = 0;
+    std::vector<std::uint64_t> programs;
+};
+
+GpuProgramRanking CostliestGpuPrograms();
+
 class GpuTimestamps {
 public:
     GpuTimestamps(const Context& context, std::uint32_t queries);
@@ -79,6 +86,7 @@ public:
     void AddBatch(std::string_view name, std::chrono::nanoseconds time);
     void AddRegions(std::span<const GpuRegion> recorded, std::uint32_t lost, std::chrono::nanoseconds batch);
     std::string Format(std::chrono::nanoseconds window, std::size_t top) const;
+    std::vector<std::uint64_t> RankPrograms(std::size_t top) const;
     void Clear();
 
 private:

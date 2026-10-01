@@ -209,6 +209,10 @@ void selectionParses() {
     Require(invalid.selectors.size() == 1 && invalid.selectors[0].value == 0x30u && invalid.selectors[0].count == 5 && invalid.errors.size() == 5, "invalid capture selections were accepted or valid ones dropped");
     Require(invalid.root.filename() == "dispatch-captures" && invalid.root.is_absolute() && invalid.after == 0.0, "the default capture directory or delay is wrong");
     Require(AgcDriver::ParseDispatchCaptureSettings(nullptr, nullptr, nullptr).selectors.empty(), "an unset capture selection selected programs");
+    const auto costliest = AgcDriver::ParseDispatchCaptureSettings("top8,0x50", nullptr, nullptr);
+    Require(costliest.errors.empty() && costliest.costliest == 8 && costliest.selectors.size() == 1 && costliest.selectors[0].value == 0x50u, "a capture of the costliest programs was parsed wrongly");
+    const auto badCostliest = AgcDriver::ParseDispatchCaptureSettings("top0,top21,topx", nullptr, nullptr);
+    Require(badCostliest.costliest == 0 && badCostliest.errors.size() == 3, "an invalid count of costliest programs was accepted");
 }
 
 void manifestRoundTrips() {

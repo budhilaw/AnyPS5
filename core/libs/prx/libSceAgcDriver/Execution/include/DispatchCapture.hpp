@@ -21,6 +21,7 @@ struct DispatchCaptureSettings {
     std::vector<std::string> errors;
     std::filesystem::path root;
     double after = 0.0;
+    std::uint32_t costliest = 0;
 };
 
 DispatchCaptureSettings ParseDispatchCaptureSettings(const char* selection, const char* directory, const char* after);

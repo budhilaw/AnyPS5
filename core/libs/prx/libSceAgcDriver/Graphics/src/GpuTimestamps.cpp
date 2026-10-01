@@ -20,6 +20,7 @@ struct Recorder {
     std::chrono::steady_clock::time_point started = std::chrono::steady_clock::now();
     std::unordered_map<std::uint64_t, std::string> passNames;
     std::unordered_map<std::uint64_t, std::string> programNames;
+    GpuProgramRanking ranking;
 };
 
 Recorder& recorder() {
@@ -49,6 +50,8 @@ void reportIfDue(Recorder& state) {
     const auto text = state.report.Format(std::chrono::duration_cast<std::chrono::nanoseconds>(now - state.started), ReportedEntries);
     std::fwrite(text.data(), 1, text.size(), stderr);
     std::fflush(stderr);
+    state.ranking.programs = state.report.RankPrograms(ReportedEntries);
+    ++state.ranking.report;
     state.report.Clear();
     state.started = now;
 }
@@ -92,6 +95,12 @@ void ReportGpuRegions(std::span<const GpuRegion> regions, std::uint32_t dropped,
     }
     state.report.AddRegions(regions, dropped, batch);
     reportIfDue(state);
+}
+
+GpuProgramRanking CostliestGpuPrograms() {
+    auto& state = recorder();
+    std::lock_guard lock(state.mutex);
+    return state.ranking;
 }
 
 GpuTimestamps::GpuTimestamps(const Context& context, std::uint32_t queries) : device(context.device), period(context.limits.timestampPeriod), capacity(queries < 2 ? 0 : queries) {
@@ -218,6 +227,20 @@ std::string GpuTimeReport::formatRanked(bool dispatchesOnly, std::size_t top) co
         text += line;
     }
     return text;
+}
+
+std::vector<std::uint64_t> GpuTimeReport::RankPrograms(std::size_t top) const {
+    std::unordered_map<std::uint64_t, std::chrono::nanoseconds> sums;
+    for (const auto& [key, total] : regions) {
+        if (key.work == GpuWork::Dispatch) sums[key.address] += total.sum;
+    }
+    std::vector<std::pair<std::uint64_t, std::chrono::nanoseconds>> ranked(sums.begin(), sums.end());
+    const auto shown = std::min(top, ranked.size());
+    std::partial_sort(ranked.begin(), ranked.begin() + static_cast<std::ptrdiff_t>(shown), ranked.end(), [](const auto& left, const auto& right) { return left.second > right.second; });
+    std::vector<std::uint64_t> programs;
+    programs.reserve(shown);
+    for (std::size_t index = 0; index < shown; ++index) programs.push_back(ranked[index].first);
+    return programs;
 }
 
 std::string GpuTimeReport::Format(std::chrono::nanoseconds window, std::size_t top) const {
