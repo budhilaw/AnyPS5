@@ -186,7 +186,7 @@ bool DecodeTextureExtent(std::span<const std::uint32_t> words, std::uint64_t& ba
         resource.tileMode = resolveTileMode((words[3] >> 20u) & 0x1fu);
         resource.dimension = resolveDimension((words[3] >> 28u) & 0xfu);
         const auto layers = resource.dimension == TextureDimension::k1D || resource.dimension == TextureDimension::k2D ? 1u : resource.depthOrLastArray + 1u;
-        const auto size = ComputeSurfaceSize(ComputeMipLayout(resource.tileMode, resource.format, resource.width, resource.height, resource.mipCount), layers);
+        const auto size = ComputeSurfaceSize(ComputeMipLayout(resource), layers);
         if (size == 0 || size > std::numeric_limits<std::uint64_t>::max() - resource.baseAddress) return false;
         base = resource.baseAddress;
         bytes = size;
