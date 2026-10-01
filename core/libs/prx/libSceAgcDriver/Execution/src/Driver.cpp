@@ -185,7 +185,7 @@ bool StorageImageWrites(const ShaderRecompiler::DescriptorBinding& binding, std:
         try {
             const auto resource = Graphics::DecodeTextureResource(words);
             if (resource.baseAddress == 0) continue;
-            const auto mips = Graphics::ComputeMipLayout(resource.tileMode, resource.format, resource.width, resource.height, resource.mipCount);
+            const auto mips = Graphics::ComputeMipLayout(resource);
             const auto bytes = Graphics::ComputeSurfaceSize(mips, Graphics::FullArrayLayers(resource));
             if (bytes == 0 || bytes > std::numeric_limits<std::uint64_t>::max() - resource.baseAddress) return false;
             writes.emplace_back(resource.baseAddress, resource.baseAddress + bytes);
