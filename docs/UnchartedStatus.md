@@ -56,6 +56,71 @@ Build and relink as described in the README. The run folder holds the relinked `
 - Remapping a view unmaps it for a moment. A guest thread that faults on it waits for the remap and retries; the retry budget restarts after every remap.
 - Fatal exception reports print the state and protection of the faulting page.
 
+## Frame rate
+
+The switches (`ANYPS5_DISPLAY`, `ANYPS5_UNCAPPED`, `ANYPS5_FPS_LIMIT`, `ANYPS5_PRESENT_MODE`, `ANYPS5_LEGACY_TSC` and F9) are described in the README. Addresses below are `eboot.exe` virtual addresses.
+
+### Game speed
+
+- The title times each frame as an inline RDTSC delta divided by `sceKernelGetTscFrequency()`, which it reads once (`0x1405c6f73`, divide at `0x1405bb9d3`-`0x1405bb9e6`), and clamps the step to 0.1 s (1 / `MinimumFramerate` 10.0, `0x1413a5638`-`0x1413a5650`).
+- `sceKernelGetTscFrequency` used to return 1 GHz while RDTSC on the i5-12400F counts at 2496 MHz, so game time ran at min(2.5x real time, 0.1 s per frame): 1.8-2.3x too fast in the first scenes at 18-23 fps, and 0.6-0.9x in the Language menu at 6-9 fps.
+- libkernel now measures the TSC rate once when it loads, in about 100 ms (for example `TSC frequency 2495.996 MHz (calibrated over 100.6 ms)` on this PC), and `sceKernelReadTsc` and `sceKernelGetTscFrequency` both use the host TSC. Game time follows real time above 10 fps, so the first scenes should play at normal speed; below 10 fps the game runs in slow motion, as on a PS5.
+- Without an invariant TSC, with a measured rate outside 100 MHz to 10 GHz, on a non-x86-64 build or with `ANYPS5_LEGACY_TSC` set, libkernel keeps the old 1 GHz nanosecond clock and logs why, and uncapped stays off.
+
+### Display profiles and the title's modes
+
+`SetRenderMode` (`0x141568a00`) turns the display option into a mode, depending on what the output offered at boot: the title asks for 119.88 Hz support once (`0x1405c7b8e`), so a profile holds for the whole run. Each mode is a {flip rate, pacing factor, flags} entry of the table at `0x141fa34e0`; applying it (`0x1415c3c50`) selects 59.94 or 119.88 Hz with `sceVideoOutConfigureOutput`, pegs or unpegs VRR and sets the flip rate.
+
+| `ANYPS5_DISPLAY` | Option | Mode | Output | Flip rate | Frame rate on a PS5 | Pacing factor |
+|---|---|---|---|---|---|---|
+| `60hz` | Fidelity | 0 | 59.94 Hz | 1 | 30 | 1.0 |
+| `60hz` | Performance | 1 | 59.94 Hz | 0 | 60 | 0.0 |
+| `120hz`, `vrr` | Fidelity | 4 | 119.88 Hz | 2 | 40 | 0.5 |
+| `120hz`, `vrr` | Performance | 3 | 119.88 Hz | 1 | 60 | 0.0 |
+| `120hz`, `vrr` | Performance+ (1080p) | 2 | 119.88 Hz | 0 | 120 | -0.5 |
+| `vrr` with Variable Framerate | Fidelity | 5 | 119.88 Hz VRR | 1 | 40-60 | 0.5 |
+| `vrr` with Variable Framerate | Performance | 6 | 119.88 Hz VRR | 0 | 60-120 | 0.0 |
+
+- When `SetRenderMode`'s second argument is set (probably during cinematics; not confirmed yet), modes 4 and 5 switch to mode 7 (flip rate 1, pegged with `sceVideoOutVrrPegToFixedRate`, each frame flipped twice: 30 fps) and mode 6 to mode 3. Pegged flips keep the vblank grid even when uncapped.
+- With `vrr` the HLE shows unpegged flips as soon as they are ready, but no sooner than flip rate + 1 vblank periods (8.34 ms each at 119.88 Hz) after the previous flip, so mode 5 reaches at most 59.94 fps and mode 6 at most 119.88 fps.
+- The title saves the display option. If it restores a mode the current profile cannot show, for example Performance+ under `60hz`, it falls back (`0x141568cf7`-`0x141568d30`): it flips immediately (HSYNC), skips its render-thread pacing and still asks for 119.88 Hz. The HLE then shows every flip at once, refuses 119.88 Hz with `VIDEO_OUT_ERROR_UNAVAILABLE_OUTPUT_MODE`, switches `ANYPS5_PRESENT_MODE=auto` to MAILBOX and logs `119.88 Hz output refused` and `first immediate (HSYNC) flip` once each. After changing `ANYPS5_DISPLAY`, re-select the display mode in Options > Display.
+
+### Uncapped ceilings
+
+Uncapped removes the HLE's vblank and flip-rate gate, but the title keeps pacing itself. Its render thread (`0x1415b6ca0`-`0x1415b6df6`) starts frame N no earlier than P - 4 ms after the flip event of frame N-2, with P = (pacing factor + 1) x 16.683 ms. The flip handler stamps that event with RDTSC (`0x1415c324a`, stored at `0x1415c36b3`), and this HLE sends it only after the host present has returned. With L the time from the start of a frame to its flip event, two frames take at least L + P - 4 ms, so the frame rate cannot exceed 2 / (L + P - 4 ms):
+
+| Mode | P - 4 ms | L = 0 | L = 5 ms | L = 10 ms | L = 20 ms |
+|---|---|---|---|---|---|
+| Performance+ (2) | 4.34 ms | 461 fps | 214 fps | 139 fps | 82 fps |
+| Performance (1, 3, 6) | 12.68 ms | 158 fps | 113 fps | 88 fps | 61 fps |
+| Fidelity at 40 fps and VRR Fidelity (4, 5) | 21.03 ms | 95 fps | 77 fps | 64 fps | 49 fps |
+| Fidelity (0) | 29.37 ms | 68 fps | 58 fps | 51 fps | 41 fps |
+
+- L covers the title's render work, the driver's worker and graphics threads, the GPU, the uncapped limit and the host present. In the Language menu it is above 100 ms today (`flip_submit_to_complete_ms` 102-704 ms in run 26), which would keep even Performance+ below 19 fps, so shortening L is what raises the frame rate.
+- For more than a PS5 delivers, choose Performance+: its P - 4 ms is 4.34 ms, so 120 fps needs L of at most 12.3 ms, against 4.0 ms in Performance.
+- The default limit stops uncapped at the monitor's refresh rate or 120 fps, whichever is lower, but not below the emulated vblank rate. Above 120 fps, which needs an explicit `ANYPS5_FPS_LIMIT` (or `0`), the title runs untested: physics, animation, rope and cloth, and scripts may misbehave, and the log warns.
+
+### Recommended setups
+
+- PS5 pacing: no variables for a PS5 on a 60 Hz TV, or only `ANYPS5_DISPLAY=120hz` or `ANYPS5_DISPLAY=vrr` for a 120 Hz or VRR TV.
+- Better than a PS5: `ANYPS5_DISPLAY=120hz ANYPS5_UNCAPPED=1`, then Performance+ in Options > Display. Frames are shown as soon as they are ready instead of on the next 119.88 Hz vblank, up to the default limit; a higher `ANYPS5_FPS_LIMIT` goes past the frame rates this build was tested at. `auto` presents uncapped flips with MAILBOX (3 images on this PC), so nothing tears and the host present does not wait for the monitor.
+- G-Sync or FreeSync monitor: also set `ANYPS5_PRESENT_MODE=fifo` and `ANYPS5_FPS_LIMIT` to about 0.95 x the refresh rate (114 at 120 Hz, 137 at 144 Hz). FIFO lets the monitor show each frame as it arrives, without tearing, and the margin keeps the frame rate inside the VRR range, so a present does not wait for a refresh while it holds the driver's guest memory lock. The HLE never lets uncapped FIFO presents exceed 0.97 x the refresh rate and logs that uncapped is degraded when that hold applies; a limit above 120 also logs the untested frame rate warning.
+- After changing `ANYPS5_DISPLAY`, re-select the display mode in Options > Display.
+
+### To check in the next run
+
+Unit tests cover the switches (`guest_time_tests`, `video_out_flip_tests`). The next announced run, with `ANYPS5_DISPLAY=120hz ANYPS5_UNCAPPED=1 ANYPS5_TRACE_TIMING=1` and F9 to compare, should check:
+
+- the TSC line in the game's log, and movement, music and lip-sync at normal speed in the first scenes;
+- that a scripted camera move or cutscene line takes the same wall-clock time with PS5 pacing and uncapped: the frame rate may change, the pace of the world must not;
+- Performance+ in Options > Display (and Variable Framerate with `vrr`), and the frame rate each mode reaches with PS5 pacing and uncapped;
+- with uncapped on, the `[FrameTiming]` values `flip_submit_to_complete_ms`, a lower bound for L in the ceilings above, and `VideoOut.Flip.present`, the part of it spent in the driver's present call (the wait for the frame's GPU work, the blit and the host present);
+- the `swapchain:` line, and the `Vulkan.Present.acquire_fence_wait` and `Vulkan.Present.queue_present` timing marks staying near 0;
+- whether the title ever flips immediately (`first immediate (HSYNC) flip`): besides the fallback above, `0x14062ae0d` sets the title's immediate-flip byte (`0x142153744`) on a path not yet identified;
+- whether the internal resolution of a given scene changes, since every RDTSC interval the title measures is now 2.5x shorter than before.
+
+Still open after that run: the title above 120 fps. Before the default limit is raised, traversal, climbing, rope and cloth need a check at more than 120 fps with `ANYPS5_FPS_LIMIT=0`, far above the 6-23 fps the title reaches today.
+
 ## Debug switches for performance work
 
 - `ANYPS5_SAMPLE_THREADS=1`: samples the title, worker and graphics threads every millisecond (Windows) and prints the hottest functions and call chains every 30 s.
