@@ -3,6 +3,9 @@
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
+#include <exception>
+#include <typeinfo>
+#include <unwind.h>
 
 namespace {
 
@@ -108,4 +111,45 @@ void ReportFatalException(const EXCEPTION_POINTERS* exception) {
         std::fflush(stderr);
     }
     reporting = false;
+}
+
+namespace {
+
+constexpr DWORD GccThrow = 0x20474343u;
+constexpr std::size_t CxaHeaderBytes = 80;
+
+void describeCxxException(const EXCEPTION_RECORD* record) {
+    if (record->NumberParameters < 1) return;
+    const auto unwind = static_cast<std::uint64_t>(record->ExceptionInformation[0]);
+    if (unwind < CxaHeaderBytes || !readable(unwind - CxaHeaderBytes, CxaHeaderBytes + sizeof(_Unwind_Exception))) return;
+    const auto* type = *reinterpret_cast<const std::type_info* const*>(unwind - CxaHeaderBytes);
+    if (type == nullptr || !readable(reinterpret_cast<std::uint64_t>(type), sizeof(void*) * 2)) return;
+    write("  C++ exception of type %s\n", type->name());
+    void* object = reinterpret_cast<void*>(unwind + sizeof(_Unwind_Exception));
+    if (typeid(std::exception).__do_catch(type, &object, 1)) write("  what(): %s\n", static_cast<const std::exception*>(object)->what());
+}
+
+LONG WINAPI unhandledFilter(EXCEPTION_POINTERS* exception) {
+    const auto* record = exception->ExceptionRecord;
+    std::fflush(stdout);
+    std::fflush(stderr);
+    write("unhandled exception 0x%08lx on thread %lu\n", record->ExceptionCode, GetCurrentThreadId());
+    if (record->ExceptionCode == GccThrow) describeCxxException(record);
+    const auto* context = exception->ContextRecord;
+    describe("rip", context->Rip);
+    int found = 0;
+    for (std::uint64_t slot = context->Rsp; found < 48 && slot < context->Rsp + 16384; slot += 8) {
+        if (!readable(slot, 8)) break;
+        const auto value = *reinterpret_cast<const std::uint64_t*>(slot);
+        if (value < 0x10000 || !executable(value)) continue;
+        char label[32];
+        std::snprintf(label, sizeof(label), "[rsp+0x%04llx]", static_cast<unsigned long long>(slot - context->Rsp));
+        describe(label, value);
+        ++found;
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+const auto previousUnhandledFilter = SetUnhandledExceptionFilter(unhandledFilter);
+
 }
