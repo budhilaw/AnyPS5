@@ -6,7 +6,12 @@
 #include <fstream>
 #include "prx/libSceAgcDriver/Execution/include/BdaFeatures.hpp"
 #include "prx/libSceAgcDriver/Execution/include/VulkanLibrary.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/DrawQueue.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/GpuColorTransfer.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/RenderCache.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Resources.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/TextureCache.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/TextureDetiler.hpp"
 #include <SDL_loadso.h>
 #include <array>
 #include <bit>
@@ -14,6 +19,7 @@
 #include <cstring>
 #include <initializer_list>
 #include <iostream>
+#include <memory>
 #include <span>
 #include <string>
 #include <vector>
@@ -319,9 +325,90 @@ void checkGpuTimestamps(const Context& device) {
     Require(oneOff.gpuTime.count() > 0 && oneOff.gpuTime <= std::chrono::seconds(1), "the device did not time a one-off batch");
 }
 
+std::vector<std::uint16_t> readLevel(const Context& context, const Texture& texture, std::uint32_t level) {
+    const auto width = std::max(texture.Extent().width >> level, 1u);
+    const auto height = std::max(texture.Extent().height >> level, 1u);
+    const std::size_t bytes = static_cast<std::size_t>(width) * height * texture.GuestTexelBytes();
+    Buffer readback(context, bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+    CommandBatch batch(context);
+    const auto pipelineBarrier = context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier");
+    VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    barrier.oldLayout = texture.Layout();
+    barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = texture.Image();
+    barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, level, 1, 0, 1};
+    pipelineBarrier(batch.Handle(), VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+    VkBufferImageCopy copy{};
+    copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, level, 0, 1};
+    copy.imageExtent = {width, height, 1};
+    context.Function<PFN_vkCmdCopyImageToBuffer>("vkCmdCopyImageToBuffer")(batch.Handle(), texture.Image(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, readback.Handle(), 1, &copy);
+    barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    barrier.newLayout = texture.Layout();
+    const VkMemoryBarrier host{VK_STRUCTURE_TYPE_MEMORY_BARRIER, nullptr, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT};
+    pipelineBarrier(batch.Handle(), VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT | VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &host, 0, nullptr, 1, &barrier);
+    batch.SubmitAndWait();
+    std::vector<std::uint16_t> texels(bytes / sizeof(std::uint16_t));
+    std::memcpy(texels.data(), readback.Bytes().data(), bytes);
+    return texels;
+}
+
+bool holds(const std::vector<std::uint16_t>& texels, const std::array<std::uint16_t, 4>& expected) {
+    for (std::size_t at = 0; at + expected.size() <= texels.size(); at += expected.size()) {
+        if (!std::equal(expected.begin(), expected.end(), texels.begin() + static_cast<std::ptrdiff_t>(at))) return false;
+    }
+    return !texels.empty();
+}
+
+void checkTargetAssembly(const Context& device) {
+    auto context = device;
+    constexpr std::uint64_t chunk = 1u << 16u;
+    std::vector<std::byte> storage(3 * chunk);
+    void* aligned = storage.data();
+    auto available = storage.size();
+    Require(std::align(chunk, 2 * chunk, aligned, available) != nullptr, "test surface alignment failed");
+    const auto chain = reinterpret_cast<std::uint64_t>(aligned);
+    const auto target = [&](std::uint32_t level) { return ColorTarget{chain, {16u >> level, 16u >> level}, VK_FORMAT_R16G16B16A16_SFLOAT, chunk, 0xe4, ColorTileMode::RenderTarget, 8, true, chain, {16, 16}, level, 0}; };
+    const auto base = chain >> 8u;
+    const std::vector<std::uint32_t> words{static_cast<std::uint32_t>(base), static_cast<std::uint32_t>((base >> 32u) & 0xffu) | (71u << 20u) | (3u << 30u), 3u | (15u << 14u), 0xfacu | (1u << 16u) | (0x09u << 20u) | (9u << 28u), 0u, 1u << 4u, 0u, 0u};
+    const auto resource = DecodeTextureResource(words);
+    const VkComponentMapping identity{VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY};
+    TextureDetiler detiler(context);
+    context.detiler = &detiler;
+    DrawQueue queue;
+    context.drawQueue = &queue;
+    GpuColorTransfer transfer(context);
+    context.colorTransfer = &transfer;
+    RenderCache targets(context);
+    context.renderCache = &targets;
+    TextureCache cache(context);
+    context.textureCache = &cache;
+    const auto level0 = targets.Get(target(0), false);
+    const auto level1 = targets.Get(target(1), false);
+    level0->DebugClear(queue.Begin(context), 0.25f, 0.5f, 0.75f);
+    level1->DebugClear(queue.Begin(context), 0.125f, 0.25f, 0.5f);
+    const auto texture = cache.Get(words, resource, identity);
+    queue.Wait();
+    Require(holds(readLevel(context, *texture, 0), {0x3400, 0x3800, 0x3a00, 0x3c00}) && holds(readLevel(context, *texture, 1), {0x3000, 0x3400, 0x3800, 0x3c00}), "a texture over the GPU-only render targets of its two mips did not read back what they hold");
+    level1->DebugClear(queue.Begin(context), 1.0f, 0.75f, 0.25f);
+    Require(cache.Get(words, resource, identity) == texture, "a changed mip render target replaced the assembled texture instead of updating it");
+    queue.Wait();
+    Require(holds(readLevel(context, *texture, 0), {0x3400, 0x3800, 0x3a00, 0x3c00}) && holds(readLevel(context, *texture, 1), {0x3c00, 0x3a00, 0x3400, 0x3c00}), "updating the changed mip of an assembled texture lost the other mip or kept the old values");
+}
+
+VKAPI_ATTR VkBool32 VKAPI_CALL recordValidationError(VkDebugUtilsMessageSeverityFlagBitsEXT severity, VkDebugUtilsMessageTypeFlagsEXT, const VkDebugUtilsMessengerCallbackDataEXT* data, void* errors) {
+    if ((severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) != 0) static_cast<std::vector<std::string>*>(errors)->emplace_back(data != nullptr && data->pMessage != nullptr ? data->pMessage : "unnamed validation error");
+    return VK_FALSE;
+}
+
 class Device {
 public:
-    Device() {
+    explicit Device(bool validation = false) {
         library = SDL_LoadObject(AgcDriver::ResolveVulkanLibrary_nid_no_patch());
         Require(library != nullptr, "cannot load Vulkan");
         try {
@@ -331,13 +418,35 @@ public:
             application.apiVersion = VK_API_VERSION_1_1;
             VkInstanceCreateInfo info{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
             info.pApplicationInfo = &application;
+            std::vector<const char*> instanceExtensions;
 #if defined(__APPLE__)
-            const char* portability = "VK_KHR_portability_enumeration";
+            instanceExtensions.push_back("VK_KHR_portability_enumeration");
             info.flags = 0x00000001;
-            info.enabledExtensionCount = 1;
-            info.ppEnabledExtensionNames = &portability;
 #endif
+            const char* validationLayer = "VK_LAYER_KHRONOS_validation";
+            const VkValidationFeatureEnableEXT synchronization = VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT;
+            VkValidationFeaturesEXT features{VK_STRUCTURE_TYPE_VALIDATION_FEATURES_EXT};
+            features.enabledValidationFeatureCount = 1;
+            features.pEnabledValidationFeatures = &synchronization;
+            const bool validated = validation && layerProvides(validationLayer, {VK_EXT_DEBUG_UTILS_EXTENSION_NAME, VK_EXT_VALIDATION_FEATURES_EXTENSION_NAME});
+            if (validated) {
+                instanceExtensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+                instanceExtensions.push_back(VK_EXT_VALIDATION_FEATURES_EXTENSION_NAME);
+                info.pNext = &features;
+                info.enabledLayerCount = 1;
+                info.ppEnabledLayerNames = &validationLayer;
+            }
+            info.enabledExtensionCount = static_cast<std::uint32_t>(instanceExtensions.size());
+            info.ppEnabledExtensionNames = instanceExtensions.data();
             Check(function<PFN_vkCreateInstance>("vkCreateInstance")(&info, nullptr, &instance), "vkCreateInstance");
+            if (validated) {
+                VkDebugUtilsMessengerCreateInfoEXT messengerInfo{VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT};
+                messengerInfo.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
+                messengerInfo.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT;
+                messengerInfo.pfnUserCallback = recordValidationError;
+                messengerInfo.pUserData = &validationErrors;
+                Check(function<PFN_vkCreateDebugUtilsMessengerEXT>("vkCreateDebugUtilsMessengerEXT")(instance, &messengerInfo, nullptr, &messenger), "vkCreateDebugUtilsMessengerEXT");
+            }
             std::uint32_t count = 0;
             const auto enumerate = function<PFN_vkEnumeratePhysicalDevices>("vkEnumeratePhysicalDevices");
             Check(enumerate(instance, &count, nullptr), "vkEnumeratePhysicalDevices");
@@ -386,6 +495,7 @@ public:
             context.bufferDeviceAddress = true;
             context.Function<PFN_vkGetDeviceQueue>("vkGetDeviceQueue")(context.device, family, 0, &context.queue);
             VkCommandPoolCreateInfo pool{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+            pool.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
             pool.queueFamilyIndex = family;
             Check(context.Function<PFN_vkCreateCommandPool>("vkCreateCommandPool")(context.device, &pool, nullptr, &context.pool), "vkCreateCommandPool");
         } catch (...) {
@@ -398,6 +508,7 @@ public:
     const Context& GetContext() const { return context; }
     bool GraphicsQueue() const { return graphicsQueue; }
     PFN_vkGetInstanceProcAddr InstanceProc() const { return instanceProc; }
+    const std::vector<std::string>& ValidationErrors() const { return validationErrors; }
 
 private:
     template<typename TFunction>
@@ -407,10 +518,24 @@ private:
         return result;
     }
 
+    bool layerProvides(const char* layer, std::initializer_list<std::string_view> required) const {
+        std::uint32_t count = 0;
+        const auto layers = function<PFN_vkEnumerateInstanceLayerProperties>("vkEnumerateInstanceLayerProperties");
+        if (layers(&count, nullptr) != VK_SUCCESS || count == 0) return false;
+        std::vector<VkLayerProperties> available(count);
+        if (layers(&count, available.data()) != VK_SUCCESS || std::none_of(available.begin(), available.begin() + count, [&](const VkLayerProperties& properties) { return std::string_view(properties.layerName) == layer; })) return false;
+        const auto extensions = function<PFN_vkEnumerateInstanceExtensionProperties>("vkEnumerateInstanceExtensionProperties");
+        if (extensions(layer, &count, nullptr) != VK_SUCCESS) return false;
+        std::vector<VkExtensionProperties> provided(count);
+        if (extensions(layer, &count, provided.data()) != VK_SUCCESS) return false;
+        return std::all_of(required.begin(), required.end(), [&](std::string_view name) { return std::any_of(provided.begin(), provided.begin() + count, [&](const VkExtensionProperties& extension) { return name == extension.extensionName; }); });
+    }
+
     void release() noexcept {
         if (context.pool != VK_NULL_HANDLE) context.Function<PFN_vkDestroyCommandPool>("vkDestroyCommandPool")(context.device, context.pool, nullptr);
         context.bufferPool.reset();
         if (context.device != VK_NULL_HANDLE) function<PFN_vkDestroyDevice>("vkDestroyDevice")(context.device, nullptr);
+        if (messenger != VK_NULL_HANDLE) function<PFN_vkDestroyDebugUtilsMessengerEXT>("vkDestroyDebugUtilsMessengerEXT")(instance, messenger, nullptr);
         if (instance != VK_NULL_HANDLE) function<PFN_vkDestroyInstance>("vkDestroyInstance")(instance, nullptr);
         if (library != nullptr) SDL_UnloadObject(library);
     }
@@ -418,6 +543,8 @@ private:
     void* library = nullptr;
     PFN_vkGetInstanceProcAddr instanceProc = nullptr;
     VkInstance instance = VK_NULL_HANDLE;
+    VkDebugUtilsMessengerEXT messenger = VK_NULL_HANDLE;
+    std::vector<std::string> validationErrors;
     Context context{};
     bool graphicsQueue = false;
 };
@@ -446,6 +573,11 @@ int main(int argc, char** argv) {
         checkDepthViews(device.GetContext(), device.GraphicsQueue());
         checkGpuTimestamps(device.GetContext());
         RunDispatchCaptureTests(device.GetContext(), device.InstanceProc());
+        {
+            Device validated(true);
+            checkTargetAssembly(validated.GetContext());
+            if (!validated.ValidationErrors().empty()) Require(false, "assembling a texture from render targets broke Vulkan validation: " + validated.ValidationErrors().front());
+        }
         std::cout << "Vulkan BDA allocation, execution and dispatch capture replay tests passed\n";
         return 0;
     } catch (const std::exception& error) {

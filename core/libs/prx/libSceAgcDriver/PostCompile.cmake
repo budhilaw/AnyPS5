@@ -22,7 +22,7 @@ foreach(agcTarget IN ITEMS libSceAgcDriver agc_driver_visual_test agc_driver_gra
     endif()
 endforeach()
 
-foreach(agcTarget IN ITEMS libSceAgcDriver agc_driver_visual_test agc_driver_graphics_tests)
+foreach(agcTarget IN ITEMS libSceAgcDriver agc_driver_visual_test agc_driver_graphics_tests agc_driver_bda_device_tests)
     if(TARGET ${agcTarget})
         target_sources(${agcTarget} PRIVATE Graphics/src/TextureDetilerDescriptors.cpp Graphics/src/TextureCache.cpp Graphics/src/RegisteredGpuMemory.cpp)
     endif()
@@ -35,13 +35,14 @@ foreach(agcTarget IN ITEMS libSceAgcDriver agc_driver_visual_test agc_driver_gra
 endforeach()
 
 target_sources(agc_driver_bda_device_tests PRIVATE tests/ColorTransferTests.cpp Graphics/src/ColorTargetLayout.cpp Execution/src/GuestMemory.cpp Graphics/src/GuestBufferCache.cpp)
+target_sources(agc_driver_bda_device_tests PRIVATE Graphics/src/ShaderResources.cpp Graphics/src/ShaderAddressResources.cpp Graphics/src/GuestBufferMemory.cpp Graphics/src/BdaResources.cpp Graphics/src/GuestTextureResource.cpp Graphics/src/GuestSamplerResource.cpp Graphics/src/TextureFormat.cpp Graphics/src/TextureTiling.cpp Graphics/src/TextureDetiler.cpp Graphics/src/Texture.cpp Graphics/src/NullTexture.cpp Graphics/src/DepthTexture.cpp Graphics/src/Sampler.cpp ${agcTextureDetileShaderHeader})
 target_include_directories(agc_driver_bda_device_tests PRIVATE ${agcTextureDetileGeneratedRoot})
 
 if(TARGET agc_driver_visual_test)
     target_sources(agc_driver_visual_test PRIVATE Execution/src/DisplayBuffer.cpp)
 endif()
 
-foreach(agcTarget IN ITEMS libSceAgcDriver agc_driver_visual_test agc_driver_graphics_tests)
+foreach(agcTarget IN ITEMS libSceAgcDriver agc_driver_visual_test agc_driver_graphics_tests agc_driver_bda_device_tests)
     if(TARGET ${agcTarget})
         target_sources(${agcTarget} PRIVATE Graphics/src/RenderCache.cpp Graphics/src/RenderMemoryOwnership.cpp Graphics/src/DrawQueue.cpp Graphics/src/DrawCompletion.cpp Graphics/src/RenderTexture.cpp Graphics/src/DescriptorCache.cpp)
     endif()
