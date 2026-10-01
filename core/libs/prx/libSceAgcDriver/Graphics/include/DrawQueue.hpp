@@ -54,7 +54,7 @@ public:
     void SetBoundPipeline(VkPipeline pipeline) { boundPipeline = pipeline; }
     void Enqueue(std::shared_ptr<ShaderResources> resources, std::shared_ptr<void> storage);
     void EnqueueCompletion(std::function<void()> action);
-    void EnqueueUpload(std::function<void()> release, std::size_t bytes);
+    void EnqueueUpload(std::function<void()> release, std::size_t bytes, bool flush = true);
     void AddRead(std::uint64_t begin, std::uint64_t end);
     bool HasReads() const { return readRanges.load(std::memory_order_acquire) != 0; }
     bool ReadsPending(std::uint64_t address, std::size_t bytes) const;

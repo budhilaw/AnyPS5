@@ -218,13 +218,13 @@ void DrawQueue::EnqueueCompletion(std::function<void()> action) {
     action();
 }
 
-void DrawQueue::EnqueueUpload(std::function<void()> release, std::size_t bytes) {
+void DrawQueue::EnqueueUpload(std::function<void()> release, std::size_t bytes, bool flush) {
     constexpr std::size_t BatchUploadBytes = 64u << 20;
     Require(recording.commands != nullptr, "upload recorded outside a batch");
     recording.completions.push_back(std::move(release));
     recording.uploadBytes += bytes;
     workSinceBarrier = true;
-    if (recording.uploadBytes >= BatchUploadBytes) Flush();
+    if (flush && recording.uploadBytes >= BatchUploadBytes) Flush();
 }
 
 void DrawQueue::AddRead(std::uint64_t begin, std::uint64_t end) {

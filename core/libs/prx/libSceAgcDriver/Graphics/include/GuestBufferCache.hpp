@@ -149,6 +149,7 @@ private:
     void syncResident(std::uint64_t first, const ResidentWindow& window, std::uint64_t address, std::uint64_t bytes);
     void writeBackChunk(Chunk& chunk);
     void dropResidentWindow(std::map<std::uint64_t, ResidentWindow>::iterator window);
+    void evictResidentWindow(std::map<std::uint64_t, ResidentWindow>::iterator window);
     void trimResident();
     void addDirtyRange(std::uint64_t begin, std::uint64_t end);
     void removeDirtyRange(std::uint64_t begin, std::uint64_t end);

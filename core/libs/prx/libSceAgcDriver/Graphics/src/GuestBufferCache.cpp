@@ -463,14 +463,22 @@ GuestBufferCache::HostView GuestBufferCache::residentRange(std::uint64_t address
         }
     }
     const auto first = extent.address + (address - extent.address) / HostWindowBytes * HostWindowBytes;
-    const auto last = std::min(extent.address + importBytes, first + HostWindowBytes);
+    const auto last = std::min(extent.address + importBytes, extent.address + (address + bytes - extent.address + HostWindowBytes - 1) / HostWindowBytes * HostWindowBytes);
     if (address + bytes > last) return {};
-    if (writable && !residentWritable(address, bytes)) return {};
-    auto it = residentWindows.find(first);
-    if (it != residentWindows.end() && (it->second.serial != extent.serial || it->second.bytes != last - first)) {
-        dropResidentWindow(it);
-        it = residentWindows.end();
+    static const bool readOnly = std::getenv("ANYPS5_RESIDENT_READ_ONLY") != nullptr;
+    if (writable && (readOnly || !residentWritable(address, bytes))) return {};
+    auto it = residentWindows.lower_bound(first);
+    if (it != residentWindows.begin()) --it;
+    while (it != residentWindows.end() && it->first < last) {
+        const bool exact = it->first == first && it->second.bytes == last - first && it->second.serial == extent.serial;
+        const bool overlaps = it->first + it->second.bytes > first;
+        if (exact || !overlaps) {
+            ++it;
+            continue;
+        }
+        evictResidentWindow(it++);
     }
+    it = residentWindows.find(first);
     if (it == residentWindows.end()) {
         trimResident();
         std::shared_ptr<Buffer> buffer;
@@ -631,8 +639,14 @@ void GuestBufferCache::writeBackChunk(Chunk& chunk) {
     chunk.protectedRead = false;
     std::size_t offset = 0;
     for (const auto& [first, last] : ranges) {
-        std::memcpy(reinterpret_cast<void*>(first), staging.Bytes().data() + offset, static_cast<std::size_t>(last - first));
-        offset += static_cast<std::size_t>(last - first);
+        const auto count = static_cast<std::size_t>(last - first);
+        const auto* fresh = staging.Bytes().data() + offset;
+        auto* guest = reinterpret_cast<std::byte*>(first);
+        for (std::size_t at = 0; at < count; at += 64) {
+            const auto block = std::min<std::size_t>(64, count - at);
+            if (std::memcmp(guest + at, fresh + at, block) != 0) std::memcpy(guest + at, fresh + at, block);
+        }
+        offset += count;
     }
     protectChunk(chunk, std::chrono::steady_clock::now().time_since_epoch().count());
     chunk.residentSynced = generation;
@@ -669,13 +683,17 @@ void GuestBufferCache::trimResident() {
             if (it->second.buffer.use_count() == 1 && (oldest == residentWindows.end() || it->second.lastUse < oldest->second.lastUse)) oldest = it;
         }
         if (oldest == residentWindows.end()) return;
-        const auto first = oldest->first;
-        const auto end = first + oldest->second.bytes;
-        for (auto it = chunks.lower_bound(first - first % chunkBytes); it != chunks.end() && it->first < end; ++it) {
-            if (it->second->gpuDirty && it->second->residentWindow == first) writeBackChunk(*it->second);
-        }
-        dropResidentWindow(oldest);
+        evictResidentWindow(oldest);
     }
+}
+
+void GuestBufferCache::evictResidentWindow(std::map<std::uint64_t, ResidentWindow>::iterator window) {
+    const auto first = window->first;
+    const auto end = first + window->second.bytes;
+    for (auto it = chunks.lower_bound(first - first % chunkBytes); it != chunks.end() && it->first < end; ++it) {
+        if (it->second->gpuDirty && it->second->residentWindow == first) writeBackChunk(*it->second);
+    }
+    dropResidentWindow(window);
 }
 
 void GuestBufferCache::NoteResidentWrite(std::uint64_t begin, std::uint64_t end) {
@@ -683,17 +701,41 @@ void GuestBufferCache::NoteResidentWrite(std::uint64_t begin, std::uint64_t end)
     std::lock_guard registryLock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
     std::lock_guard lock(mutex);
     const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
+    const auto protection = GuestAllocations::GuestAllocationsProtectionGeneration_nid_postfix();
     addDirtyRange(begin, end);
+    std::vector<Chunk*> marking;
     for (auto base = begin - begin % chunkBytes; base < end; base += chunkBytes) {
         auto& chunk = this->chunk(base);
         if (chunk.gpuDirty) continue;
         protectChunk(chunk, now);
         if (!chunk.watch || chunk.untrackable) continue;
-        chunk.gpuDirty = true;
+        const auto window = residentWindows.find(chunk.residentWindow);
+        if (window == residentWindows.end()) continue;
+        const bool immutable = chunk.immutableSince != 0 && chunk.immutableSince == protection;
+        const bool fresh = chunk.residentSynced != 0 && (immutable || (!chunk.lost && chunk.protectedRead && chunk.generation <= chunk.residentSynced));
+        if (!fresh) {
+            const auto from = std::max(base, window->first);
+            const auto to = std::min(base + chunkBytes, window->first + window->second.bytes);
+            if (from < to) {
+                const auto count = static_cast<std::size_t>(to - from);
+                auto staging = std::make_shared<Buffer>(context, count, VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+                GuestMemory::Read(from, staging->Bytes());
+                const auto commands = context.drawQueue->UploadCommands(context);
+                const VkBufferCopy copy{0, from - window->first, count};
+                context.Function<PFN_vkCmdCopyBuffer>("vkCmdCopyBuffer")(commands, staging->Handle(), window->second.buffer->Handle(), 1, &copy);
+                context.drawQueue->EnqueueUpload([staging] {}, count, false);
+                copiedBytes += count;
+            }
+            chunk.residentSynced = generation;
+        }
+        marking.push_back(&chunk);
+    }
+    for (auto* chunk : marking) {
+        chunk->gpuDirty = true;
         dirtyChunks.fetch_add(1, std::memory_order_relaxed);
-        chunk.protectedRead = false;
-        chunk.watch->Protect(GuestMemoryTracking::Protection::None);
-        publish(chunk);
+        chunk->protectedRead = false;
+        chunk->watch->Protect(GuestMemoryTracking::Protection::None);
+        publish(*chunk);
     }
 }
 
