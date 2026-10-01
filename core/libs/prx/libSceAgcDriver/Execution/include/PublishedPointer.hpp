@@ -38,7 +38,7 @@ public:
         std::lock_guard lock(mutex);
         if (value == nullptr) {
             value = std::move(created);
-            generation.fetch_add(1, std::memory_order_release);
+            generation.store(nextGeneration(), std::memory_order_release);
         }
         cache.value = value;
         cache.generation = generation.load(std::memory_order_relaxed);
@@ -48,10 +48,15 @@ public:
     void Publish(std::shared_ptr<TValue> replacement) {
         std::lock_guard lock(mutex);
         value.swap(replacement);
-        generation.fetch_add(1, std::memory_order_release);
+        generation.store(nextGeneration(), std::memory_order_release);
     }
 
 private:
+    static std::uint64_t nextGeneration() {
+        static std::atomic<std::uint64_t> generations{0};
+        return generations.fetch_add(1, std::memory_order_relaxed) + 1;
+    }
+
     mutable std::mutex mutex;
     std::shared_ptr<TValue> value;
     std::atomic<std::uint64_t> generation{0};

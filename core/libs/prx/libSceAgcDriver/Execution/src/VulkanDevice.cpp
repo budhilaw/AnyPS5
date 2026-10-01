@@ -10,6 +10,7 @@
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
 #include "prx/libSceAgcDriver/Execution/include/BdaFeatures.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PresentationScaler.hpp"
+#include "prx/libSceAgcDriver/Execution/include/PublishedPointer.hpp"
 #include "prx/libSceAgcDriver/Execution/include/SwapchainState.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureDetiler.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/GpuColorTransfer.hpp"
@@ -122,8 +123,7 @@ struct VulkanDevice::State {
     VkFence renderFence = VK_NULL_HANDLE;
     bool renderPending = false;
     std::shared_ptr<Graphics::ResidentColor> presentedTarget;
-    mutable std::mutex hostRangesMutex;
-    std::shared_ptr<const std::vector<std::pair<std::uint64_t, std::uint64_t>>> hostRanges = std::make_shared<const std::vector<std::pair<std::uint64_t, std::uint64_t>>>();
+    PublishedPointer<const std::vector<std::pair<std::uint64_t, std::uint64_t>>> hostRanges;
     std::vector<std::pair<std::uint64_t, std::uint64_t>> hostRangesScratch;
     std::vector<std::pair<std::uint64_t, std::uint64_t>> hostRangesSource;
     std::atomic<std::uint64_t> publishedColorEpoch{0};
@@ -148,9 +148,7 @@ struct VulkanDevice::State {
                 if (!merged.empty() && range.first <= merged.back().second) merged.back().second = std::max(merged.back().second, range.second);
                 else merged.push_back(range);
             }
-            auto ranges = std::make_shared<const std::vector<std::pair<std::uint64_t, std::uint64_t>>>(std::move(merged));
-            std::lock_guard lock(hostRangesMutex);
-            hostRanges = std::move(ranges);
+            hostRanges.Publish(std::make_shared<const std::vector<std::pair<std::uint64_t, std::uint64_t>>>(std::move(merged)));
         }
         publishedColorEpoch.store(colorEpoch, std::memory_order_release);
         publishedWriterEpoch.store(writerEpoch, std::memory_order_release);
@@ -1377,11 +1375,11 @@ void VulkanDevice::ResolveMemory(std::uint64_t address, std::size_t bytes, bool 
 }
 
 bool VulkanDevice::NeedsResolve(std::uint64_t address, std::size_t bytes) const {
-    std::shared_ptr<const std::vector<std::pair<std::uint64_t, std::uint64_t>>> ranges;
-    {
-        std::lock_guard lock(state->hostRangesMutex);
-        ranges = state->hostRanges;
-    }
+    using HostRanges = PublishedPointer<const std::vector<std::pair<std::uint64_t, std::uint64_t>>>;
+    thread_local HostRanges::Cache* cache = nullptr;
+    if (cache == nullptr) cache = new HostRanges::Cache();
+    const auto& ranges = state->hostRanges.Get(*cache);
+    if (ranges == nullptr) return false;
     const auto end = address + bytes;
     const auto found = std::upper_bound(ranges->begin(), ranges->end(), address, [](std::uint64_t value, const std::pair<std::uint64_t, std::uint64_t>& range) { return value < range.second; });
     return found != ranges->end() && found->first < end;
